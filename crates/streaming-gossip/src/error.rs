@@ -6,6 +6,12 @@ pub enum GossipError {
     /// The configuration is inconsistent.
     #[error("invalid gossip config: {0}")]
     InvalidConfig(String),
+    /// The listen address is taken by another process.
+    #[error("the address {addr} is already in use")]
+    AddrInUse {
+        /// Address that is taken.
+        addr: String,
+    },
     /// Binding the listen address failed.
     #[error("cannot bind {addr}: {reason}")]
     Bind {

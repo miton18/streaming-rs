@@ -231,9 +231,16 @@ impl<P: Providers> Gossip<P> {
             .network()
             .bind(&config.listen_addr)
             .await
-            .map_err(|e| GossipError::Bind {
-                addr: config.listen_addr.clone(),
-                reason: e.to_string(),
+            .map_err(|e| {
+                let addr = config.listen_addr.clone();
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    GossipError::AddrInUse { addr }
+                } else {
+                    GossipError::Bind {
+                        addr,
+                        reason: e.to_string(),
+                    }
+                }
             })?;
         let now = providers.time().timer();
         let state = ClusterState::new(

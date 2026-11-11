@@ -103,6 +103,29 @@ fn environment(
     }
 }
 
+/// What to tell someone when `address` cannot be listened on. An operating
+/// system error code is not a message.
+fn listen_error(address: SocketAddr, error: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::AddrInUse => format!("the address {address} is already in use"),
+        ErrorKind::AddrNotAvailable => {
+            format!("the address {address} does not belong to this machine")
+        }
+        ErrorKind::PermissionDenied => {
+            format!("this user is not allowed to listen on the address {address}")
+        }
+        _ => format!("cannot listen on the address {address}: {error}"),
+    }
+}
+
+/// Open the HTTP listener, or say in plain words why not.
+async fn listen_on(address: SocketAddr) -> Result<TcpListener, AnyError> {
+    TcpListener::bind(address)
+        .await
+        .map_err(|error| listen_error(address, &error).into())
+}
+
 async fn wait_for_signal(shutdown: CancellationToken) {
     let _ = tokio::signal::ctrl_c().await;
     eprintln!("\nstopping...");
@@ -164,7 +187,7 @@ async fn standalone(
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let shutdown = CancellationToken::new();
     let generators = Arc::new(demo::Generators::default());
-    let listener = TcpListener::bind(listen).await?;
+    let listener = listen_on(listen).await?;
     let address = listener.local_addr()?;
 
     let mut tasks = Vec::new();
@@ -271,7 +294,7 @@ async fn worker(
 
     let mut api = None;
     if let Some(listen) = listen {
-        let listener = TcpListener::bind(listen).await?;
+        let listener = listen_on(listen).await?;
         let address = listener.local_addr()?;
         worker_config.api_addr = Some(address.to_string());
         eprintln!("  web UI and API: http://{address}/");
@@ -314,7 +337,19 @@ async fn worker(
     Ok(())
 }
 
-fn main() -> Result<(), AnyError> {
+fn main() -> std::process::ExitCode {
+    // Errors are for people: said in words, on one line, never as the debug
+    // form of a value.
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), AnyError> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -354,4 +389,24 @@ fn main() -> Result<(), AnyError> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_address_in_use_is_said_in_words() {
+        let address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let taken = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        assert_eq!(
+            listen_error(address, &taken),
+            "the address 127.0.0.1:8080 is already in use"
+        );
+        let other = std::io::Error::other("boom");
+        assert_eq!(
+            listen_error(address, &other),
+            "cannot listen on the address 127.0.0.1:8080: boom"
+        );
+    }
 }
