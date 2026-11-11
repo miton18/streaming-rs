@@ -147,6 +147,14 @@ SIM_REPORT=1 ...                                         # print coverage of the
 
 Other suites: `GOSSIP_SIM_ITERATIONS`, `KVREDIS_SIM_SEEDS`, `WARP10_SIM_SEEDS`.
 
+`scripts/sim-sweep.sh` runs the exactly-once scenarios in turn, on every
+core, on fresh seeds for a wall-clock budget (`SWEEP_BUDGET_SECS`, 900 by
+default), and writes `target/sim-sweep/summary.md` with a replay command per
+failing seed. `.github/workflows/nightly-simulation.yml` runs it every night
+at 02:17 UTC (or by hand, with a budget in minutes), uploads the results and
+opens or comments on a "Nightly simulation failed" issue. Release-profile
+seeds last about 70 ms each; replay them with `--release`.
+
 Generated mutants (`cargo install cargo-mutants`, configured in
 `.cargo/mutants.toml`) measure the ordinary tests the way the planted bugs
 measure the simulation. Use the `mutants` profile, without which the

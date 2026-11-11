@@ -1,0 +1,83 @@
+# Every night, run the exactly-once simulation on as many fresh seeds as fit
+# in 15 minutes (see scripts/sim-sweep.sh). A failing night turns the run red,
+# uploads the failing logs and opens (or comments on) an issue that lists a
+# replay command per failing seed.
+name: Nightly simulation
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # 02:17 UTC, every day
+  workflow_dispatch:
+    inputs:
+      budget_minutes:
+        description: Wall-clock minutes spent running seeds
+        default: "15"
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: nightly-simulation
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    # Build (a few minutes without cache) + budget + the jobs still running
+    # when the budget is spent.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-simulation
+
+      - name: Sweep seeds
+        env:
+          SWEEP_BUDGET_SECS: ${{ (inputs.budget_minutes || '15') }}
+          SWEEP_OUT: ${{ runner.temp }}/sim-sweep
+        run: |
+          export SWEEP_BUDGET_SECS=$((SWEEP_BUDGET_SECS * 60))
+          scripts/sim-sweep.sh
+
+      - name: Upload the sweep results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-sweep-${{ github.run_number }}
+          path: ${{ runner.temp }}/sim-sweep
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Report the failure in an issue
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SUMMARY: ${{ runner.temp }}/sim-sweep/summary.md
+        run: |
+          title="Nightly simulation failed"
+          {
+            echo "The [nightly simulation]($RUN_URL) failed on \`${GITHUB_SHA::7}\`."
+            echo
+            if [[ -s $SUMMARY ]]; then
+              head -c 60000 "$SUMMARY"
+            else
+              echo "No summary was written: the build or the sweep itself broke, see the run log."
+            fi
+          } > "$RUNNER_TEMP/issue.md"
+          number=$(gh issue list --state open --search "in:title \"$title\"" \
+            --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+          if [[ -n $number ]]; then
+            gh issue comment "$number" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+          fi
