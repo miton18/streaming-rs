@@ -146,6 +146,18 @@ SIM_REPORT=1 ...                                         # print coverage of the
 ```
 
 Other suites: `GOSSIP_SIM_ITERATIONS`, `KVREDIS_SIM_SEEDS`, `WARP10_SIM_SEEDS`.
+
+Generated mutants (`cargo install cargo-mutants`, configured in
+`.cargo/mutants.toml`) measure the ordinary tests the way the planted bugs
+measure the simulation. Use the `mutants` profile, without which the
+simulations make a run last days, and test the engine with the simulation:
+
+```sh
+cargo mutants --profile mutants -p streaming-gossip -p streaming-kv-redis
+cargo mutants --profile mutants -f 'crates/streaming-runtime/**' \
+    --test-package streaming-runtime,streaming-sim --timeout 180
+cargo mutants -p streaming-core -p streaming-api -p streaming-warp10 -p streaming-pulsar -p streamd
+```
 `scripts/e2e-pulsar-redis.sh` runs real Pulsar + Redis + two workers with a
 `kill -9`; `PULSAR_E2E_URL=pulsar://... cargo test -p streaming-pulsar`.
 

@@ -47,3 +47,12 @@ debug = "line-tables-only"
 
 [profile.release]
 debug = "line-tables-only"
+
+# For `cargo mutants --profile mutants`: the simulations run about ten times
+# faster than in the dev profile, and incremental builds stay short.
+[profile.mutants]
+inherits = "release"
+opt-level = 1
+debug = false
+incremental = true
+codegen-units = 256

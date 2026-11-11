@@ -1,0 +1,19 @@
+# cargo-mutants configuration: https://mutants.rs/
+#
+# The test doubles and the simulation harness are not under test: a mutant
+# there only weakens the tests themselves. The hand-planted mutants of
+# `streaming_runtime::mutation` have their own harness
+# (`cargo test --release -p streaming-sim --features mutants --test mutants`).
+exclude_globs = [
+    "crates/streaming-sim/**",
+    "crates/streaming-kv-redis/src/fake.rs",
+    "crates/streaming-kv-redis/src/testkit.rs",
+    "crates/streaming-warp10/src/fake.rs",
+    "crates/streaming-runtime/src/mutation.rs",
+    "**/tests/**",
+    "**/*_tests.rs",
+]
+
+# The simulations dominate the test time and vary from seed to seed.
+timeout_multiplier = 3.0
+minimum_test_timeout = 60
