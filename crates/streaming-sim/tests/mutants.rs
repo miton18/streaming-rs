@@ -55,8 +55,9 @@ fn every_planted_bug_is_noticed() {
         .unwrap_or(12);
     // Hostile settings, each the natural enemy of some precaution: workers
     // fighting over every slice; the same with three times the faults and an
-    // operator; long stalls, after which a worker resumes far behind; and a
-    // store applying commands long after their sender gave up.
+    // operator; long stalls, after which a worker resumes far behind; a store
+    // applying commands long after their sender gave up; and a source whose
+    // partitions come and go, with and without a fight.
     let scenarios = [
         Scenario {
             duel: true,
@@ -79,6 +80,16 @@ fn every_planted_bug_is_noticed() {
             late_ms: 800,
             gc_grace: Duration::from_secs(5),
             fault_scale: 3.0,
+            slide: Duration::from_millis(500),
+            ..Scenario::default()
+        },
+        Scenario {
+            repartition: true,
+            ..Scenario::default()
+        },
+        Scenario {
+            repartition: true,
+            duel: true,
             slide: Duration::from_millis(500),
             ..Scenario::default()
         },

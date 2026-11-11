@@ -133,6 +133,29 @@ pub struct GraphPlan {
     /// Why the graph cannot be planned (unknown operator, unreachable source, ...).
     #[serde(default)]
     pub error: Option<String>,
+    /// Incremented every time the set of slices changes, as when a source
+    /// gains or loses partitions. Slice instances and commit records carry
+    /// it: nothing is written under a plan older than what the log holds.
+    #[serde(default)]
+    pub generation: u64,
+    /// Slices that are no longer run, their partition being gone, but whose
+    /// committed state still has to be emitted.
+    #[serde(default)]
+    pub retired: Vec<SliceId>,
+    /// Slices that entered the plan after the graph had started, with the
+    /// generation at which they did: the pipeline may have emitted windows
+    /// without them, which they must then take for closed.
+    #[serde(default)]
+    pub joined: BTreeMap<SliceId, u64>,
+    /// Retired slices whose state has been deleted. Their log stays closed
+    /// to the plans of that time.
+    #[serde(default)]
+    pub closed: Vec<SliceId>,
+    /// Retired slices whose log has been closed, everything they committed
+    /// being emitted, with the instant it was: their state is deleted once
+    /// no write issued before that can still land.
+    #[serde(default)]
+    pub closing: BTreeMap<SliceId, Timestamp>,
 }
 
 /// Which worker runs which slice, computed by the controller.

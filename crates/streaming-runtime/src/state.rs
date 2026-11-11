@@ -66,6 +66,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use streaming_core::{Key, Kv, KvError, NodeId, Position, SliceKey, Timestamp, Window, keys};
 
+use crate::metrics::ts_key;
 use crate::mutation::{Mutant, planted};
 
 /// Watermark of a slice that has not seen any event time yet.
@@ -107,6 +108,8 @@ pub(crate) struct CommitRecord {
     /// Watermark of the slice at the end of the epoch.
     pub watermark: Timestamp,
     pub changes: Vec<NodeChanges>,
+    /// Generation of the plan the writer ran under.
+    pub plan: u64,
 }
 
 /// A state failure.
@@ -139,15 +142,83 @@ impl LogView {
     }
 }
 
-/// The seal of a slice log: every epoch at or below it is final.
-pub(crate) async fn read_floor(kv: &dyn Kv, slice: &SliceKey) -> Result<u64, KvError> {
-    Ok(kv
-        .hgetall(&keys::slice_seal(slice))
+/// Prefix of the field that closes a log to plans older than a generation.
+const PLAN_FLOOR: &str = "p:";
+
+/// What bounds the commits a slice log accepts.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Seal {
+    /// Every epoch at or below it is final.
+    pub floor: u64,
+    /// A record written under an older plan generation is void: the slice
+    /// was retired, and its state deleted, before that generation.
+    pub plan: u64,
+}
+
+/// The seal of a slice log.
+pub(crate) async fn read_seal(kv: &dyn Kv, slice: &SliceKey) -> Result<Seal, KvError> {
+    let mut seal = Seal::default();
+    for (field, _) in kv.hgetall(&keys::slice_seal(slice)).await? {
+        if let Some(floor) = keys::parse_seal_field(&field) {
+            seal.floor = seal.floor.max(floor);
+        } else if let Some(plan) = field
+            .strip_prefix(PLAN_FLOOR)
+            .and_then(|plan| plan.parse().ok())
+        {
+            seal.plan = seal.plan.max(plan);
+        }
+    }
+    Ok(seal)
+}
+
+/// Close the log of a retired slice, once all it committed is emitted, to
+/// every plan generation below `generation`.
+///
+/// An instance of the slice may still be running on a worker that has not
+/// heard of its retirement: it finds its next commit void, and whoever reads
+/// the log from now on finds it empty. Its state is only deleted later (see
+/// [`purge_closed`]), when no write issued before this can still land.
+pub(crate) async fn close_log(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    generation: u64,
+) -> Result<(), KvError> {
+    kv.hset(
+        &keys::slice_seal(slice),
+        vec![(format!("{PLAN_FLOOR}{generation}"), b"1".to_vec())],
+    )
+    .await
+}
+
+/// Delete what a slice whose log is closed left in the store. The closing
+/// mark stays, so that the slice can come back under a later plan and start
+/// afresh.
+pub(crate) async fn purge_closed(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    nodes: &[NodeId],
+) -> Result<(), KvError> {
+    for node in nodes {
+        let windows: Vec<Window> = indexed_windows(kv, slice, node)
+            .await?
+            .into_keys()
+            .collect();
+        delete_windows(kv, slice, node, &windows).await?;
+        kv.del(vec![keys::slice_window_index(slice, node)]).await?;
+    }
+    kv.del(vec![keys::slice_log(slice)]).await?;
+    let seal = keys::slice_seal(slice);
+    let floors: Vec<String> = kv
+        .hgetall(&seal)
         .await?
-        .iter()
-        .filter_map(|(field, _)| keys::parse_seal_field(field))
-        .max()
-        .unwrap_or(0))
+        .into_iter()
+        .map(|(field, _)| field)
+        .filter(|field| !field.starts_with(PLAN_FLOOR))
+        .collect();
+    if !floors.is_empty() {
+        kv.hdel(&seal, floors).await?;
+    }
+    Ok(())
 }
 
 /// Read the commit log of a slice.
@@ -157,23 +228,26 @@ pub(crate) async fn read_log(kv: &dyn Kv, slice: &SliceKey) -> Result<LogView, S
     // whole snapshot ended up below the seal, read again.
     for _ in 0..4 {
         let fields = kv.hgetall(&keys::slice_log(slice)).await?;
-        let floor = read_floor(kv, slice).await?;
+        let seal = read_seal(kv, slice).await?;
+        let floor = seal.floor;
         let mut view = LogView {
             floor,
             ..LogView::default()
         };
         let mut any = false;
+        let mut closed = false;
         for (field, value) in fields {
             let Some(epoch) = keys::parse_commit_field(&field) else {
                 continue;
             };
-            any = true;
             if epoch <= floor {
+                any = true;
                 view.sealed.push(epoch);
                 continue;
             }
-            view.live.push(epoch);
             if value.is_empty() {
+                any = true;
+                view.live.push(epoch);
                 continue;
             }
             let record: CommitRecord =
@@ -181,11 +255,21 @@ pub(crate) async fn read_log(kv: &dyn Kv, slice: &SliceKey) -> Result<LogView, S
                     slice: slice.to_string(),
                     reason: format!("field `{field}`: {e}"),
                 })?;
+            if record.plan < seal.plan {
+                // The slice was retired and its state is being deleted, or
+                // was: whatever it wrote before is void, like a field below
+                // the seal.
+                closed = true;
+                view.sealed.push(epoch);
+                continue;
+            }
+            any = true;
+            view.live.push(epoch);
             view.records.push(record);
         }
         view.records.sort_by_key(|record| record.epoch);
         view.live.sort_unstable();
-        if view.records.is_empty() && any {
+        if view.records.is_empty() && any && !closed {
             continue;
         }
         return Ok(view);
@@ -233,7 +317,10 @@ pub(crate) async fn try_commit(
     }
     // The field is ours. It only counts if the epoch was not already final:
     // below the seal, the field we created is a deleted one coming back.
-    if !planted(Mutant::CommitBelowTheSeal) && record.epoch <= read_floor(kv, slice).await? {
+    let seal = read_seal(kv, slice).await?;
+    let below = record.epoch <= seal.floor && !planted(Mutant::CommitBelowTheSeal);
+    // Nor if the slice was retired and purged under a later plan.
+    if below || record.plan < seal.plan {
         let _ = kv.hdel(&log, vec![field]).await;
         return Ok(CommitOutcome::Fenced);
     }
@@ -497,6 +584,16 @@ pub(crate) async fn list_windows(
     Ok(windows)
 }
 
+/// Whether an emitter that committed up to `upto` has emitted `window`
+/// entirely. Emitter positions are (window end, window start, index of the
+/// last element), the index being `u64::MAX` once the window is complete.
+pub(crate) fn emitted(window: &Window, upto: Option<Position>) -> bool {
+    upto.is_some_and(|at| {
+        let this = (ts_key(window.end), ts_key(window.start));
+        this < (at.0, at.1) || (this == (at.0, at.1) && at.2 == u64::MAX)
+    })
+}
+
 /// Largest number of keys one delete may carry.
 const DELETE_BATCH: usize = 100;
 
@@ -561,6 +658,7 @@ mod tests {
             owner: owner.to_owned(),
             position: Some(Position(0, epoch * 10, 0)),
             watermark: epoch as i64 * 1000,
+            plan: 0,
             changes: vec![NodeChanges {
                 node: node(),
                 windows: vec![WindowChanges {
@@ -744,7 +842,7 @@ mod tests {
 
             // The seal only grows, even if an older one is written late.
             compact(&kv, &slice(), 2, &[], 0).await.unwrap();
-            assert_eq!(read_floor(&kv, &slice()).await.unwrap(), 4);
+            assert_eq!(read_seal(&kv, &slice()).await.unwrap().floor, 4);
             // The next epoch still commits normally.
             assert_eq!(
                 try_commit(&kv, &slice(), &record(6, "o", &[]))

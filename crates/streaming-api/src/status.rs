@@ -1221,6 +1221,7 @@ mod tests {
             ],
             planned_ms: 0,
             error: Some("nope".into()),
+            ..GraphPlan::default()
         };
         let placement = Placement {
             version: 1,

@@ -33,7 +33,7 @@ impl Partition {
 ///
 /// Positions are `Position(0, offset + 1, 0)`, offsets starting at zero.
 pub struct MemLog {
-    partitions: Vec<Mutex<Partition>>,
+    partitions: Mutex<Vec<Arc<Mutex<Partition>>>>,
     appended: Notify,
     release_acked: bool,
 }
@@ -50,7 +50,7 @@ impl MemLog {
     #[must_use]
     pub fn with_retention(partitions: u32, release_acked: bool) -> Arc<Self> {
         Arc::new(Self {
-            partitions: (0..partitions.max(1)).map(|_| Mutex::default()).collect(),
+            partitions: Mutex::new((0..partitions.max(1)).map(|_| Arc::default()).collect()),
             appended: Notify::new(),
             release_acked,
         })
@@ -59,17 +59,37 @@ impl MemLog {
     /// Number of partitions.
     #[must_use]
     pub fn partitions(&self) -> u32 {
-        self.partitions.len() as u32
+        self.partitions.lock().len() as u32
     }
 
-    fn partition(&self, partition: u32) -> &Mutex<Partition> {
-        &self.partitions[partition as usize % self.partitions.len()]
+    /// Add a partition at the end. Returns its index.
+    pub fn add_partition(&self) -> u32 {
+        let mut partitions = self.partitions.lock();
+        partitions.push(Arc::default());
+        partitions.len() as u32 - 1
+    }
+
+    /// Remove the last partition, with whatever it still holds.
+    pub fn remove_partition(&self) {
+        let mut partitions = self.partitions.lock();
+        if partitions.len() > 1 {
+            partitions.pop();
+        }
+        drop(partitions);
+        self.appended.notify_waiters();
+    }
+
+    fn partition(&self, partition: u32) -> Option<Arc<Mutex<Partition>>> {
+        self.partitions.lock().get(partition as usize).cloned()
     }
 
     /// Append a record and wake waiting readers. Returns its position.
     pub fn append(&self, partition: u32, event_time: Timestamp, value: Datum) -> Position {
+        let Some(partition) = self.partition(partition) else {
+            return Position::default();
+        };
         let position = {
-            let mut partition = self.partition(partition).lock();
+            let mut partition = partition.lock();
             partition.records.push_back((event_time, value));
             Position(0, partition.end(), 0)
         };
@@ -80,21 +100,25 @@ impl MemLog {
     /// Position of the last record of a partition, if it ever had one.
     #[must_use]
     pub fn end(&self, partition: u32) -> Option<Position> {
-        let end = self.partition(partition).lock().end();
+        let end = self.partition(partition)?.lock().end();
         (end > 0).then_some(Position(0, end, 0))
     }
 
     /// Number of records currently retained in a partition.
     #[must_use]
     pub fn retained(&self, partition: u32) -> usize {
-        self.partition(partition).lock().records.len()
+        self.partition(partition)
+            .map_or(0, |partition| partition.lock().records.len())
     }
 
     /// Up to `max` records of `partition` whose offset is at least `from`.
     /// Records already released are skipped.
     #[must_use]
     pub fn read(&self, partition: u32, from: u64, max: usize) -> Vec<SourceRecord> {
-        let partition = self.partition(partition).lock();
+        let Some(partition) = self.partition(partition) else {
+            return Vec::new();
+        };
+        let partition = partition.lock();
         let start = from.max(partition.base);
         let skip = (start - partition.base) as usize;
         partition
@@ -116,7 +140,10 @@ impl MemLog {
         if !self.release_acked {
             return;
         }
-        let mut partition = self.partition(partition).lock();
+        let Some(partition) = self.partition(partition) else {
+            return;
+        };
+        let mut partition = partition.lock();
         while partition.base < upto.1 && partition.records.pop_front().is_some() {
             partition.base += 1;
         }

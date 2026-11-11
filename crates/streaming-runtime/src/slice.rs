@@ -36,7 +36,7 @@ use crate::mutation::{Mutant, planted};
 use crate::scope::TaskScope;
 use crate::state::{
     self, CommitOutcome, CommitRecord, NO_WATERMARK, NodeChanges, StateEntry, StateError,
-    WindowChanges,
+    WindowChanges, emitted,
 };
 
 const MIN_BACKOFF: Duration = Duration::from_millis(50);
@@ -157,14 +157,6 @@ struct Gate {
     /// The slice that emits the windows of the aggregate.
     emitter: SliceKey,
     closed: Closed,
-}
-
-/// Whether an emitter that committed up to `upto` has emitted `window` entirely.
-fn emitted(window: &Window, upto: Option<Position>) -> bool {
-    upto.is_some_and(|at| {
-        let this = (ts_key(window.end), ts_key(window.start));
-        this < (at.0, at.1) || (this == (at.0, at.1) && at.2 == u64::MAX)
-    })
 }
 
 fn is_closed(window: &Window, lateness_ms: i64, watermark: Timestamp) -> bool {
@@ -692,6 +684,8 @@ struct Start {
     epoch: u64,
     position: Option<Position>,
     watermark: Timestamp,
+    /// Generation of the plan the head of the log was written under.
+    plan: u64,
 }
 
 async fn run_source<P: Providers>(
@@ -857,6 +851,8 @@ async fn run_emitter<P: Providers>(
     aggregator: Arc<dyn DynAggregator>,
     lateness_ms: i64,
     feeding: Vec<SliceKey>,
+    active: usize,
+    generation: u64,
     start: Start,
 ) -> Result<(), ActorError> {
     let kv = root.ctx.env.kv.clone();
@@ -870,6 +866,7 @@ async fn run_emitter<P: Providers>(
     // Watermark of what this slice emits: results carry the timestamp
     // `window end - 1`, and windows are emitted in closing order.
     let mut watermark = start.watermark;
+    let mut admitted = start.plan >= generation;
     let grace_ms = root.ctx.settings.gc_grace.as_millis() as i64;
     // Emitted windows whose state this instance has deleted already, per
     // feeding slice: no need to delete it at every round.
@@ -882,17 +879,29 @@ async fn run_emitter<P: Providers>(
             continue;
         }
         root.ctx.meter.busy();
+        if !admitted {
+            // The log does not say yet that an emitter of this plan runs:
+            // say so before anything else. Slices new to the plan wait for
+            // it, and emitters of an older plan are fenced by it.
+            root.emit(Vec::new(), position, watermark).await;
+            admitted = true;
+            continue;
+        }
 
         // Logs first: they give, in one read per slice, the watermark and the
         // commits that are not copied out yet.
         let mut logs = Vec::with_capacity(feeding.len());
         let mut global = Timestamp::MAX;
-        for slice in &feeding {
+        for (index, slice) in feeding.iter().enumerate() {
             let log = root
                 .ctx
                 .persist(|| state::read_log(kv.as_ref(), slice))
                 .await?;
-            global = global.min(log.head().map_or(NO_WATERMARK, |head| head.watermark));
+            // A retired slice has stopped for good: its windows are waited
+            // for, its watermark is not.
+            if index < active {
+                global = global.min(log.head().map_or(NO_WATERMARK, |head| head.watermark));
+            }
             logs.push(log);
         }
         let mut indexed = Vec::with_capacity(feeding.len());
@@ -1176,6 +1185,7 @@ async fn run_committer<P: Providers>(
     committed: watch::Sender<u64>,
     start_epoch: u64,
     owner: String,
+    plan: u64,
     slice: Arc<SliceMetrics>,
     exit: Exit,
 ) -> Result<(), ActorError> {
@@ -1233,6 +1243,7 @@ async fn run_committer<P: Providers>(
                 position: ready.0,
                 watermark: ready.1,
                 changes,
+                plan,
             };
             let started = ctx.now();
             let mut backoff = MIN_BACKOFF;
@@ -1352,6 +1363,62 @@ struct Prepared {
 /// Number of fields a log may hold before it is sealed and swept.
 const COMPACT_AT: usize = 24;
 
+/// Let a slice that never committed join a pipeline that may have been
+/// running without it, as the slice of a partition added to a source does.
+/// Returns the watermark it starts from.
+///
+/// Emitters of the previous plan ignore this slice: a window they emit lacks
+/// what the slice would add to it, and an emitter of the new plan may emit the
+/// same window again, under the same ids, with it. So the slice first waits
+/// for an emitter of its own plan to have committed, which fences the others;
+/// then it starts from the lowest watermark of the slices already feeding the
+/// aggregate. Every window those emitters may have written is closed below
+/// that watermark, and what the slice reads for such windows is late.
+async fn join<P: Providers>(
+    params: &SliceParams<P>,
+    ops: &BTreeMap<NodeId, NodeOp>,
+    note: &impl Fn(String),
+) -> Result<Timestamp, ActorError> {
+    let env = &params.env;
+    let kv = env.kv.as_ref();
+    let generation = params.plan.generation;
+    let key_of = |slice: SliceId| SliceKey {
+        tenant: params.key.tenant.clone(),
+        graph: params.key.graph.clone(),
+        slice,
+    };
+    let mut watermark = NO_WATERMARK;
+    for (node, op) in ops {
+        let NodeOp::Aggregate(..) = op else {
+            continue;
+        };
+        let emitter = key_of(SliceId::Emitter { node: node.clone() });
+        loop {
+            let log = persist(env, note, || state::read_log(kv, &emitter)).await?;
+            if log.head().is_some_and(|head| head.plan >= generation) {
+                break;
+            }
+            let pause = params.topology.spec.settings.flush_interval;
+            let _ = env.providers.time().sleep(pause).await;
+        }
+        // Slices without a commit are joining as well: they added nothing to
+        // any window yet.
+        let mut others: Option<Timestamp> = None;
+        for other in params.topology.feeding_slices(node, &params.plan.slices) {
+            if other == params.key.slice {
+                continue;
+            }
+            let other = key_of(other);
+            let log = persist(env, note, || state::read_log(kv, &other)).await?;
+            if let Some(head) = log.head() {
+                others = Some(others.map_or(head.watermark, |low| low.min(head.watermark)));
+            }
+        }
+        watermark = watermark.max(others.unwrap_or(NO_WATERMARK));
+    }
+    Ok(watermark)
+}
+
 async fn prepare<P: Providers>(
     params: &SliceParams<P>,
     nodes: &[NodeId],
@@ -1373,14 +1440,26 @@ async fn prepare<P: Providers>(
     // slice, and this one does not before its first commit. Commits not copied
     // out yet are laid over what the window hashes hold.
     let log = persist(env, &note, || state::read_log(kv, &params.key)).await?;
-    let start = log.head().map_or(
+    let generation = params.plan.generation;
+    if let Some(head) = log.head().filter(|head| head.plan > generation) {
+        // The set of slices changed and this worker has not heard of it yet:
+        // nothing is written under a plan older than what the log holds.
+        return Err(OpError::Failed(format!(
+            "the commit log was written under plan {}, this worker still has plan {generation}",
+            head.plan
+        ))
+        .into());
+    }
+    let mut start = log.head().map_or(
         Start {
             epoch: 0,
             position: None,
             watermark: NO_WATERMARK,
+            plan: 0,
         },
         |head| Start {
             epoch: head.epoch,
+            plan: head.plan,
             position: head.position,
             watermark: if planted(Mutant::RestartWithoutWatermark) {
                 NO_WATERMARK
@@ -1395,6 +1474,13 @@ async fn prepare<P: Providers>(
     } else {
         &log.records
     };
+
+    if start.epoch == 0 && params.plan.joined.contains_key(&params.key.slice) {
+        let joined = join(params, &ops, &note).await?;
+        if !planted(Mutant::JoinWithoutWatermark) {
+            start.watermark = joined;
+        }
+    }
 
     let mut restored = BTreeMap::new();
     let mut closed: BTreeMap<NodeId, BTreeSet<Window>> = BTreeMap::new();
@@ -1619,6 +1705,7 @@ fn start_actors<P: Providers>(
             committed_tx,
             start.epoch,
             owner.clone(),
+            params.plan.generation,
             shared.metrics.clone(),
             exit.clone(),
         ),
@@ -1686,9 +1773,16 @@ fn start_actors<P: Providers>(
             }
             NodeOp::Emitter(aggregator, lateness_ms) => {
                 let Some(start) = start.take() else { continue };
-                let feeding = topology
-                    .feeding_slices(node, &params.plan.slices)
+                let running = topology.feeding_slices(node, &params.plan.slices);
+                let active = running.len();
+                let retired = if planted(Mutant::EmitWithoutRetired) {
+                    Vec::new()
+                } else {
+                    topology.feeding_slices(node, &params.plan.retired)
+                };
+                let feeding = running
                     .into_iter()
+                    .chain(retired)
                     .map(|slice| SliceKey {
                         tenant: params.key.tenant.clone(),
                         graph: params.key.graph.clone(),
@@ -1705,6 +1799,8 @@ fn start_actors<P: Providers>(
                     aggregator,
                     lateness_ms,
                     feeding,
+                    active,
+                    params.plan.generation,
                     start,
                 ))
             }

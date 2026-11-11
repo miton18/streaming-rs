@@ -29,11 +29,16 @@ pub enum Mutant {
     /// An instance taking a slice over empties the records it inherits
     /// without copying them out.
     EmptyWithoutCopy,
+    /// A slice entering a running pipeline starts without the watermark of
+    /// the slices already there.
+    JoinWithoutWatermark,
+    /// The emitter forgets the slices whose partition is gone.
+    EmitWithoutRetired,
 }
 
 impl Mutant {
     /// Every mutant.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::CommitWithoutFencing,
         Self::CommitBelowTheSeal,
         Self::AckBeforeCommit,
@@ -42,6 +47,8 @@ impl Mutant {
         Self::RestartWithoutWatermark,
         Self::RestoreWithoutPending,
         Self::EmptyWithoutCopy,
+        Self::JoinWithoutWatermark,
+        Self::EmitWithoutRetired,
     ];
 }
 

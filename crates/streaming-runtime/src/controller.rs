@@ -14,8 +14,8 @@ use streaming_core::control::{
     DesiredState, GraphIndexEntry, GraphPlan, Load, MemberInfo, Placement, RunState,
 };
 use streaming_core::{
-    GraphKey, GraphSpec, Kv, KvError, OpContext, OpFactory, OpKind, SliceKey, Topology, WorkerId,
-    keys,
+    GraphKey, GraphSpec, Kv, KvError, NodeSpec, OpContext, OpFactory, OpKind, SliceId, SliceKey,
+    Topology, WorkerId, keys,
 };
 
 use crate::RuntimeEnv;
@@ -154,6 +154,21 @@ pub(crate) fn assign(
 pub(crate) struct ControllerState {
     last_move: Option<Duration>,
     deleting_since: BTreeMap<GraphKey, Duration>,
+    /// When each graph was last planned.
+    planned: BTreeMap<GraphKey, Duration>,
+    /// How often the sources are asked again for their partitions.
+    pub replan_interval: Duration,
+}
+
+impl ControllerState {
+    /// A controller that asks the sources for their partitions again every
+    /// `replan_interval`.
+    pub(crate) fn new(replan_interval: Duration) -> Self {
+        Self {
+            replan_interval,
+            ..Self::default()
+        }
+    }
 }
 
 /// Cut a graph into slices: validate it and ask each source for its partitions.
@@ -219,28 +234,71 @@ async fn read_doc<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Remove everything a slice left in the KV.
+async fn purge_slice(kv: &dyn Kv, nodes: &[NodeSpec], slice: &SliceKey) -> Result<(), KvError> {
+    for node in nodes {
+        let windows: Vec<_> = state::indexed_windows(kv, slice, &node.id)
+            .await?
+            .into_keys()
+            .collect();
+        state::delete_windows(kv, slice, &node.id, &windows).await?;
+        kv.del(vec![keys::slice_window_index(slice, &node.id)])
+            .await?;
+    }
+    kv.del(vec![keys::slice_log(slice), keys::slice_seal(slice)])
+        .await
+}
+
+/// Whether everything a retired slice committed has been emitted: each window
+/// it holds accumulators for, in the store or in its log, is behind the
+/// position of the emitter of its aggregate.
+async fn drained(kv: &dyn Kv, topology: &Topology, slice: &SliceKey) -> Result<bool, KvError> {
+    let unreadable = |error: state::StateError| KvError::Unavailable(error.to_string());
+    let log = state::read_log(kv, slice).await.map_err(unreadable)?;
+    for node in topology.slice_nodes(&slice.slice) {
+        if &node == slice.slice.root() || topology.kind(&node) != OpKind::Aggregate {
+            continue;
+        }
+        let emitter = SliceKey {
+            tenant: slice.tenant.clone(),
+            graph: slice.graph.clone(),
+            slice: SliceId::Emitter { node: node.clone() },
+        };
+        let upto = state::read_log(kv, &emitter)
+            .await
+            .map_err(unreadable)?
+            .head()
+            .and_then(|head| head.position);
+        let windows = state::list_windows(kv, slice, &node, &log.records).await?;
+        if windows.iter().any(|window| !state::emitted(window, upto)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Remove everything a deleted graph left in the KV.
 async fn purge_graph(kv: &dyn Kv, graph: &GraphKey) -> Result<(), KvError> {
     let spec: Option<GraphSpec> = read_doc(kv, &keys::graph_spec(graph)).await?;
     let plan: Option<GraphPlan> = read_doc(kv, &keys::graph_plan(graph)).await?;
     let nodes = spec.map(|spec| spec.nodes).unwrap_or_default();
-    for slice in plan.map(|plan| plan.slices).unwrap_or_default() {
+    let plan = plan.unwrap_or_default();
+    for slice in &plan.closed {
+        // What is left of the slices purged earlier.
+        let slice = SliceKey {
+            tenant: graph.tenant.clone(),
+            graph: graph.graph.clone(),
+            slice: slice.clone(),
+        };
+        kv.del(vec![keys::slice_seal(&slice)]).await?;
+    }
+    for slice in plan.slices.into_iter().chain(plan.retired) {
         let slice = SliceKey {
             tenant: graph.tenant.clone(),
             graph: graph.graph.clone(),
             slice,
         };
-        for node in &nodes {
-            let windows: Vec<_> = state::indexed_windows(kv, &slice, &node.id)
-                .await?
-                .into_keys()
-                .collect();
-            state::delete_windows(kv, &slice, &node.id, &windows).await?;
-            kv.del(vec![keys::slice_window_index(&slice, &node.id)])
-                .await?;
-        }
-        kv.del(vec![keys::slice_log(&slice), keys::slice_seal(&slice)])
-            .await?;
+        purge_slice(kv, &nodes, &slice).await?;
     }
     let mut doomed: Vec<String> = nodes
         .iter()
@@ -301,18 +359,115 @@ pub(crate) async fn run_once<P: Providers>(
         let stale = plan
             .as_ref()
             .is_none_or(|plan| plan.spec_version != spec.version || plan.error.is_some());
-        if stale {
-            let fresh = plan_graph(env, &spec).await;
+        // A source may gain or lose partitions at any time: ask again now
+        // and then.
+        let due = state
+            .planned
+            .get(&graph)
+            .is_none_or(|at| now.saturating_sub(*at) >= state.replan_interval);
+        if stale || due {
+            state.planned.insert(graph.clone(), now);
+            let mut fresh = plan_graph(env, &spec).await;
+            if let (Some(old), Some(_)) = (&plan, &fresh.error) {
+                // A graph that cannot be planned keeps what the last plan
+                // knew of its slices: an error must never pass for a source
+                // that lost all its partitions.
+                fresh.partitions = old.partitions.clone();
+                fresh.slices = old.slices.clone();
+                fresh.retired = old.retired.clone();
+                fresh.joined = old.joined.clone();
+                fresh.closed = old.closed.clone();
+                fresh.closing = old.closing.clone();
+                fresh.generation = old.generation;
+            }
             let same = plan.as_ref().is_some_and(|plan| {
                 plan.spec_version == fresh.spec_version
                     && plan.error == fresh.error
                     && plan.slices == fresh.slices
             });
-            if !same {
+            if same {
+                // Nothing changed: see whether retired slices can go.
+                if let Some(current) = plan
+                    .as_mut()
+                    .filter(|plan| plan.error.is_none() && !plan.retired.is_empty())
+                    && let Ok(topology) = Topology::build(&spec, &env.registry.catalog())
+                {
+                    // A retired slice goes in two steps. Once all it
+                    // committed is emitted its log is closed; its state is
+                    // deleted two `gc_grace` later, when no write issued
+                    // before the closing can still land.
+                    let nodes: Vec<_> = spec.nodes.iter().map(|node| node.id.clone()).collect();
+                    let now_ms = env.clock.now_ms();
+                    let grace_ms = 2 * spec.settings.gc_grace.as_millis() as i64;
+                    let mut rewritten = false;
+                    let mut kept = Vec::new();
+                    for slice in current.retired.clone() {
+                        let key = SliceKey {
+                            tenant: graph.tenant.clone(),
+                            graph: graph.graph.clone(),
+                            slice: slice.clone(),
+                        };
+                        match current.closing.get(&slice).copied() {
+                            None => {
+                                if drained(kv, &topology, &key).await? {
+                                    state::close_log(kv, &key, current.generation).await?;
+                                    current.closing.insert(slice.clone(), now_ms);
+                                    rewritten = true;
+                                }
+                                kept.push(slice);
+                            }
+                            Some(since) if now_ms.saturating_sub(since) >= grace_ms => {
+                                state::purge_closed(kv, &key, &nodes).await?;
+                                current.closing.remove(&slice);
+                                if !current.closed.contains(&slice) {
+                                    current.closed.push(slice);
+                                }
+                                rewritten = true;
+                            }
+                            Some(_) => kept.push(slice),
+                        }
+                    }
+                    if rewritten {
+                        current.retired = kept;
+                        kv.set_json(&plan_key, current).await?;
+                        changed = true;
+                    }
+                }
+            } else if !stale && fresh.error.is_some() {
+                // A source that cannot be asked right now does not unplan a
+                // graph that runs.
+            } else if fresh.error.is_some() {
                 kv.set_json(&plan_key, &fresh).await?;
                 changed = true;
+                plan = Some(fresh);
+            } else {
+                // The set of slices changes: a new generation. Slices that
+                // leave the plan are retired, not forgotten, so that what
+                // they committed is still emitted.
+                if let Some(old) = &plan {
+                    fresh.generation = old.generation + 1;
+                    fresh.closed = old.closed.clone();
+                    fresh.closing = old.closing.clone();
+                    for slice in old.retired.iter().chain(&old.slices) {
+                        if !fresh.slices.contains(slice) && !fresh.retired.contains(slice) {
+                            fresh.retired.push(slice.clone());
+                        }
+                    }
+                    for slice in &fresh.slices {
+                        if let Some(since) = old.joined.get(slice) {
+                            fresh.joined.insert(slice.clone(), *since);
+                        } else if old.generation > 0 && !old.slices.contains(slice) {
+                            // The graph has run without this slice.
+                            fresh.joined.insert(slice.clone(), fresh.generation);
+                        }
+                    }
+                } else {
+                    fresh.generation = 1;
+                }
+                kv.set_json(&plan_key, &fresh).await?;
+                changed = true;
+                plan = Some(fresh);
             }
-            plan = Some(fresh);
         }
         let desired: DesiredState = read_doc(kv, &keys::graph_desired(&graph))
             .await?

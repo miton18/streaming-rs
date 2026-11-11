@@ -304,6 +304,34 @@ fn exactly_once_with_a_tardy_store() {
 }
 
 #[test]
+fn exactly_once_while_partitions_come_and_go() {
+    // The source gains a partition, which receives events before the
+    // pipeline reads it, then loses its last partition as soon as it is read
+    // to the end: what that partition's slice counted must still come out.
+    let scenario = Scenario {
+        repartition: true,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_while_partitions_come_and_go_in_a_fight() {
+    // The same with workers fighting over every slice, sliding windows and
+    // an operator interfering.
+    let scenario = Scenario {
+        repartition: true,
+        duel: true,
+        operator: true,
+        slide: Duration::from_millis(500),
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
 fn exactly_once_in_random_configurations() {
     // Swarm testing: every knob drawn at random, a few seeds per draw.
     // `SIM_CONFIGS=200` draws more, `SIM_CONFIG_SEED=<n>` replays one draw.

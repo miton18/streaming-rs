@@ -116,6 +116,19 @@ atomicity (no `MULTI`, no scripting), so the protocol also runs on Materia KV:
 `idle_timeout` follows the wall clock so that windows still close. Records
 arriving for a closed window are dropped and counted.
 
+**Partitions come and go.** The controller asks every source for its number
+of partitions again every `replan_interval` (a worker setting, 30 s). A new partition becomes a
+new slice, under a new *generation* of the plan. The pipeline may have emitted
+windows without it, so the slice first waits for an emitter of its generation
+to have committed, which fences the emitters of the previous one, then starts
+from the lowest watermark of the slices already there: what it reads for a
+window that may have been emitted without it is late, dropped and counted,
+rather than emitted a second time under the same ids with another value. A
+partition that disappears *retires* its slice: the slice stops, the emitter
+keeps reading what it committed until every window it holds is out; the
+controller then closes its log, so that an instance still running somewhere
+commits nothing more, and deletes its state two `gc_grace` later.
+
 **Multi-tenant.** Every graph, actor, metric and KV key belongs to a tenant
 (`t:<tenant>:...`); secrets are resolved per tenant. Workers are shared by all
 tenants.
@@ -211,28 +224,33 @@ and a second-level aggregation, that:
 - the committed history of a slice never went backwards (an auditor reads the
   commit logs every 100 ms);
 - nothing was acknowledged to the source before being committed;
+- no slice ever committed a change to a window already emitted (every commit
+  is looked at the instant it takes effect);
 - once everything is emitted, no window state is left in the store and the
   commit logs stayed small.
 
-Seventeen hand-written scenarios: quiet cluster, reboots, gossip membership
+Nineteen hand-written scenarios: quiet cluster, reboots, gossip membership
 over the simulated network, "every worker runs every slice" (three workers
 fighting over each commit), windows wider than an epoch, allowed lateness,
 sliding windows, an operator pausing, draining and re-submitting the graph, a
 larger cluster, a slow store, eager idle watermarks, a silent partition, a
 hostile mix of the above with three times the faults, a sink behind the
 aggregate slower than the windows close, the tightest limit on pending
-windows with workers fighting over every slice, long stalls, and a store
-applying commands late on windows that close all the time. On top of them,
+windows with workers fighting over every slice, long stalls, a store applying
+commands late on windows that close all the time, and a source that gains a
+partition then loses one while events flow, with and without a fight. On top
+of them,
 `exactly_once_in_random_configurations` draws every knob at random
 (`SIM_CONFIGS=200` for more draws, `SIM_CONFIG_SEED=<n>` to replay one).
 
 A simulation that passes says little unless it is known to fail when the
-engine is wrong. `streaming_runtime::mutation` holds eight bugs, each one
+engine is wrong. `streaming_runtime::mutation` holds ten bugs, each one
 precaution of the protocol removed (commit without fencing, commit below the
 seal, acknowledge before commit, emit without checking ownership, forget a
 window at once, restart without the watermark, restore without the pending
-commits, empty inherited records without copying them out). They are only
-compiled in with the `mutants` feature, and
+commits, empty inherited records without copying them out, join a running
+pipeline without its watermark, forget the slices of partitions that are
+gone). They are only compiled in with the `mutants` feature, and
 
 ```sh
 cargo test --release -p streaming-sim --features mutants --test mutants -- --nocapture
@@ -277,7 +295,10 @@ what was produced.
 - **Isolation between tenants is logical.** Operators are trusted code; there
   are no quotas and no fair scheduling yet. An operator that panics restarts
   its slice, not the process.
-- A graph is planned once per version: a change in the partition count of a
-  source is not followed. Changing a node's configuration restarts the
-  graph's slices (state is kept).
+- Events a new partition receives before the pipeline reads it may be late
+  by then: budget `allowed_lateness` for `replan_interval` if that matters.
+  A partition removed and later added again under the same index resumes
+  from the state of the old one (Pulsar only ever adds partitions).
+- Changing a node's configuration restarts the graph's slices (state is
+  kept).
 - Not yet run against a real Materia KV or a real Warp 10.

@@ -33,7 +33,7 @@ use streaming_core::{
     Position, Registry, SinkConnector, SinkError, SourceConnector, SourceError, SourceRecord,
     Timestamp, TypeTag, Window, Windowed, WorkerId, datum, keys,
 };
-use streaming_runtime::inspect::{SliceHead, slice_head};
+use streaming_runtime::inspect::{SliceHead, covers, late_commit, slice_head};
 use streaming_runtime::memlog::MemLog;
 use streaming_runtime::{GossipConfig, GossipMembership, NoLoad, RuntimeEnv, Worker, WorkerConfig};
 
@@ -120,6 +120,9 @@ pub struct Produced {
     pub total: u64,
     /// Expected count per first-level window and key.
     pub counts: BTreeMap<(Window, String), u64>,
+    /// How much of each expected count came from a partition the pipeline
+    /// did not read yet: those events may be late, hence not counted.
+    pub optional: BTreeMap<(Window, String), u64>,
 }
 
 /// The world shared by the processes and workloads of one simulation run.
@@ -158,6 +161,8 @@ pub struct SimEnv {
     pub stall_ms: u64,
     /// How long after its sender gave up a KV command may still be applied.
     pub late_ms: u64,
+    /// Partitions added to, and removed from, the source while events flowed.
+    pub repartitions: Mutex<(u64, u64)>,
     /// KV commands applied after their sender had been told they failed.
     pub kv_late: Mutex<u64>,
     /// KV commands that stalled.
@@ -180,6 +185,7 @@ impl SimEnv {
             sink_latency_ms: scenario.sink_latency_ms.max(1),
             stall_ms: scenario.stall_ms,
             late_ms: scenario.late_ms,
+            repartitions: Mutex::new((0, 0)),
             kv_late: Mutex::new(0),
             kv_stalls: Mutex::new(0),
             kv: MemKv::shared(),
@@ -345,8 +351,19 @@ impl<P: Providers> Kv for ChaosKv<P> {
 
     async fn hsetnx(&self, key: &str, field: &str, value: Vec<u8>) -> Result<bool, KvError> {
         let (key, field) = (key.to_owned(), field.to_owned());
-        self.carry(move |kv| async move { kv.hsetnx(&key, &field, value).await })
-            .await
+        let env = self.env.clone();
+        self.carry(move |kv| async move {
+            let written = kv.hsetnx(&key, &field, value.clone()).await?;
+            // Every commit is looked at the instant it takes effect.
+            if written
+                && let Some(slice) = slice_of_log(&key)
+                && let Some(finding) = late_commit(kv.as_ref(), &slice, &field, &value).await
+            {
+                env.audit.lock().push(finding);
+            }
+            Ok(written)
+        })
+        .await
     }
 
     async fn hset(&self, key: &str, entries: Vec<(String, Vec<u8>)>) -> Result<(), KvError> {
@@ -644,6 +661,9 @@ pub struct Scenario {
     /// Closed windows a slice may have waiting to be emitted before it stops
     /// reading (`0`: no limit).
     pub max_pending_windows: usize,
+    /// Whether the source gains a partition, then loses one, while events
+    /// flow.
+    pub repartition: bool,
     /// Upper bound of a rare, long stall of a KV command, in milliseconds
     /// (`0`: none). `gc_grace` must cover three of them.
     pub stall_ms: u64,
@@ -682,6 +702,7 @@ impl Default for Scenario {
             kv_latency_ms: 6,
             sink_latency_ms: 8,
             max_pending_windows: 16,
+            repartition: false,
             stall_ms: 0,
             late_ms: 300,
             // Above three times the slowest ordinary command of `ChaosKv`, late
@@ -730,6 +751,7 @@ impl Scenario {
             kv_latency_ms: pick(&[1, 6, 40]),
             sink_latency_ms: pick(&[8, 8, 600, 3_000]),
             max_pending_windows: pick(&[0, 1, 2, 16]) as usize,
+            repartition: pick(&[0, 0, 0, 1]) == 1,
             stall_ms,
             late_ms: 300,
             gc_grace: Duration::from_secs(if stall_ms > 0 { 24 } else { 3 }),
@@ -739,9 +761,14 @@ impl Scenario {
             gossip: pick(&[0, 0, 0, 1]) == 1,
             settle_timeout: Duration::from_secs(900),
         };
-        // A slow sink must leave the run time to finish: every window costs
-        // one write per epoch needed to emit its keys.
+        // The run must have time to finish. Emitting a window takes one epoch,
+        // hence one commit, per `max_batch` of its keys: too many of them
+        // under stalls and faults outlast any timeout. And a slow sink is
+        // paid once per epoch.
         let windows = (scenario.produce_for + scenario.window).as_millis() as u64 / slide.max(1);
+        if windows * scenario.keys.div_ceil(scenario.max_batch as u64).max(1) > 600 {
+            scenario.max_batch = 200;
+        }
         let epochs = scenario.keys.div_ceil(scenario.max_batch as u64).max(1);
         if windows * epochs * scenario.sink_latency_ms > 300_000 {
             scenario.sink_latency_ms = 8;
@@ -859,6 +886,7 @@ impl Process for WorkerProcess {
         let mut config = WorkerConfig::new(worker);
         config.tick = Duration::from_millis(200);
         config.member_timeout = Duration::from_millis(1_500);
+        config.replan_interval = Duration::from_millis(800);
         config.restart_backoff = Duration::from_millis(150);
         config.controller_grace = Duration::from_millis(600);
         config.catch_panics = false;
@@ -947,6 +975,49 @@ impl Driver {
             *totals.entry(Window::new(start, start + big)).or_default() += 1;
         }
         totals
+    }
+
+    /// Whether both emitters have gone past the last window that can hold an
+    /// event, and the stateless paths are complete. With partitions coming
+    /// and going some events may be late, so counts alone cannot tell when
+    /// the pipeline is done.
+    async fn emitted_everything(&self, env: &SimEnv) -> bool {
+        if !self.scenario.repartition {
+            return false;
+        }
+        let (total, last) = {
+            let produced = env.produced.lock();
+            (
+                produced.total,
+                produced.counts.keys().map(|(window, _)| *window).max(),
+            )
+        };
+        if env.raw.len() as u64 != total || env.both.len() as u64 != 2 * total {
+            return false;
+        }
+        let Some(last) = last else {
+            return true;
+        };
+        let big = self.scenario.big_window().as_millis() as i64;
+        let start = (last.end - 1).div_euclid(big) * big;
+        let store: DynKv = env.kv.clone();
+        for (slice, window) in [
+            ("acme/sim/agg.count", last),
+            ("acme/sim/agg.total", Window::new(start, start + big)),
+        ] {
+            let Ok(slice) = slice.parse::<streaming_core::SliceKey>() else {
+                return false;
+            };
+            let position = slice_head(store.as_ref(), &slice)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|head| head.position);
+            if !covers(position, &window) {
+                return false;
+            }
+        }
+        true
     }
 
     fn settled(&self, env: &SimEnv) -> bool {
@@ -1088,20 +1159,68 @@ impl Workload for Driver {
         let pause = scenario.produce_for / scenario.events.max(1) as u32;
         let max_age = scenario.max_event_age.as_millis().max(1) as i64;
 
+        let store: DynKv = env.kv.clone();
+        let committed = |partition: u32| {
+            let store = store.clone();
+            async move {
+                let slice = format!("acme/sim/src.events.{partition}")
+                    .parse::<streaming_core::SliceKey>()
+                    .ok()?;
+                slice_head(store.as_ref(), &slice).await.ok().flatten()
+            }
+        };
+        // The partition added while events flow, and whether the pipeline
+        // reads it yet.
+        let mut added: Option<(u32, bool)> = None;
         for id in 0..scenario.events {
+            if scenario.repartition && id == scenario.events / 3 {
+                added = Some((env.log.add_partition(), false));
+                env.repartitions.lock().0 += 1;
+            }
+            if scenario.repartition && id == scenario.events * 2 / 3 && env.log.partitions() > 1 {
+                // The last partition goes once all of it is committed. Its
+                // slice stops, yet what it read must still be emitted.
+                let last = env.log.partitions() - 1;
+                let started = ctx.time().now();
+                while ctx.time().now().saturating_sub(started) < Duration::from_secs(120) {
+                    let reached = committed(last).await.and_then(|head| head.position);
+                    if reached == env.log.end(last) {
+                        env.log.remove_partition();
+                        env.repartitions.lock().1 += 1;
+                        added = added.filter(|(partition, _)| *partition != last);
+                        break;
+                    }
+                    let _ = ctx.time().sleep(Duration::from_millis(200)).await;
+                }
+            }
             let key = format!("key-{}", ctx.random().random_range(0..scenario.keys.max(1)));
             // Events are stamped in the past, as if they had travelled.
             let ts = clock.now_ms() - ctx.random().random_range(0..max_age);
-            let fed = scenario
-                .partitions
+            let fed = env
+                .log
+                .partitions()
                 .saturating_sub(scenario.silent_partitions)
                 .max(1);
             let partition = ctx.random().random_range(0..fed);
+            // Until the slice of an added partition has committed, the
+            // pipeline runs without it: what the partition receives meanwhile
+            // may be late by the time it is read.
+            let mut optional = false;
+            if let Some((new, reads)) = &mut added
+                && *new == partition
+                && !*reads
+            {
+                *reads = committed(partition).await.is_some();
+                optional = !*reads;
+            }
             {
                 let mut produced = env.produced.lock();
                 produced.total += 1;
                 for window in scenario.windows_of(ts) {
                     *produced.counts.entry((window, key.clone())).or_default() += 1;
+                    if optional {
+                        *produced.optional.entry((window, key.clone())).or_default() += 1;
+                    }
                 }
             }
             env.log.append(partition, ts, datum(SimEvent { id, key }));
@@ -1113,7 +1232,7 @@ impl Workload for Driver {
         *env.production_done.lock() = true;
 
         let started = ctx.time().now();
-        while !self.settled(&env) {
+        while !(self.settled(&env) || self.emitted_everything(&env).await) {
             if ctx.time().now().saturating_sub(started) > scenario.settle_timeout {
                 dump(&env).await;
                 let produced = env.produced.lock();
@@ -1131,16 +1250,38 @@ impl Workload for Driver {
             let _ = ctx.time().sleep(Duration::from_millis(500)).await;
         }
 
+        let store: DynKv = env.kv.clone();
         // Everything is out: the state of the emitted windows must leave the
         // KV, and the commit logs must have stayed small. Leaks would not
         // falsify a count, but they would fill a real store.
         let started = ctx.time().now();
         loop {
+            // The logs of slices that left the plan must go as well.
+            let planned: BTreeSet<String> = store
+                .get_json::<streaming_core::control::GraphPlan>(&keys::graph_plan(
+                    &self.scenario.spec().key(),
+                ))
+                .await
+                .ok()
+                .flatten()
+                .map(|plan| {
+                    plan.slices
+                        .iter()
+                        .chain(&plan.retired)
+                        .map(|slice| format!(":s:{slice}:log"))
+                        .collect()
+                })
+                .unwrap_or_default();
             let leaked: Vec<String> = env
                 .kv
                 .keys()
                 .into_iter()
-                .filter(|key| key.contains(":w:") || key.contains(":idx:"))
+                .filter(|key| {
+                    key.contains(":w:")
+                        || key.contains(":idx:")
+                        || (key.ends_with(":log")
+                            && !planned.iter().any(|log| key.ends_with(log.as_str())))
+                })
                 .collect();
             if leaked.is_empty() {
                 break;
@@ -1155,7 +1296,6 @@ impl Workload for Driver {
             }
             let _ = ctx.time().sleep(Duration::from_millis(500)).await;
         }
-        let store: DynKv = env.kv.clone();
         for key in env.kv.keys() {
             if !key.ends_with(":log") {
                 continue;
@@ -1181,6 +1321,7 @@ impl Workload for Driver {
             Produced {
                 total: produced.total,
                 counts: produced.counts.clone(),
+                optional: produced.optional.clone(),
             }
         };
 
@@ -1226,7 +1367,22 @@ impl Workload for Driver {
                 )));
             }
         }
-        let exact = counts == produced.counts;
+        let exact = if self.scenario.repartition {
+            // Events a new partition received before the pipeline read it may
+            // be late: each count lies between what is certain and all of it.
+            let certain = |at: &(Window, String)| {
+                let all = produced.counts.get(at).copied().unwrap_or(0);
+                all.saturating_sub(produced.optional.get(at).copied().unwrap_or(0))
+            };
+            counts.iter().all(|(at, count)| {
+                produced.counts.get(at).is_some_and(|all| count <= all) && *count >= certain(at)
+            }) && produced
+                .counts
+                .keys()
+                .all(|at| counts.get(at).copied().unwrap_or(0) >= certain(at))
+        } else {
+            counts == produced.counts
+        };
         assert_always!(exact, "every event is counted exactly once");
         if !exact {
             let wrong: Vec<String> = produced
@@ -1296,7 +1452,13 @@ impl Workload for Driver {
                 return Err(violation(format!("big window {window} was emitted twice")));
             }
         }
-        let expected_totals = self.expected_totals(&produced.counts);
+        // With optional events the second level is checked against what the
+        // first level did emit.
+        let expected_totals = if self.scenario.repartition {
+            self.expected_totals(&counts)
+        } else {
+            self.expected_totals(&produced.counts)
+        };
         let totals_exact = totals == expected_totals;
         assert_always!(
             totals_exact,
@@ -1349,6 +1511,13 @@ impl Workload for Driver {
             "a KV command was applied after its sender gave up"
         );
         assert_sometimes!(*env.kv_stalls.lock() > 0, "a KV command stalled");
+        let (partitions_added, partitions_removed) = *env.repartitions.lock();
+        assert_sometimes!(partitions_added > 0, "the source gained a partition");
+        assert_sometimes!(partitions_removed > 0, "the source lost a partition");
+        assert_sometimes!(
+            !produced.optional.is_empty(),
+            "a new partition received events before the pipeline read it"
+        );
         assert_sometimes!(
             *env.redeliveries.lock() > 0,
             "the source redelivered records"

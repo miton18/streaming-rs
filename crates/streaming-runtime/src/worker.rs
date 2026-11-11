@@ -106,6 +106,8 @@ pub struct WorkerConfig {
     pub restart_backoff: Duration,
     /// Minimum time between two load-driven moves of a slice.
     pub rebalance_cooldown: Duration,
+    /// How often the controller asks the sources again for their partitions.
+    pub replan_interval: Duration,
     /// Whether this worker may act as controller.
     pub controller: bool,
     /// How long after its start a worker waits before acting as controller,
@@ -132,6 +134,7 @@ impl WorkerConfig {
             member_timeout: Duration::from_secs(5),
             restart_backoff: Duration::from_secs(1),
             rebalance_cooldown: Duration::from_secs(30),
+            replan_interval: Duration::from_secs(30),
             controller: true,
             controller_grace: Duration::from_secs(3),
             catch_panics: true,
@@ -159,6 +162,7 @@ struct Running {
     control: watch::Sender<Control>,
     shared: SliceShared,
     spec_version: u64,
+    plan_generation: u64,
     done: Arc<AtomicBool>,
     actor_samples: BTreeMap<(NodeId, ActorKind), ActorSample>,
     slice_sample: Option<SliceSample>,
@@ -365,7 +369,10 @@ impl<P: Providers> Worker<P> {
 
         for (key, slice) in running.iter() {
             match target.get(key) {
-                Some(docs) if docs.spec_version == slice.spec_version => {
+                Some(docs)
+                    if docs.spec_version == slice.spec_version
+                        && docs.plan.generation == slice.plan_generation =>
+                {
                     let wanted = Control {
                         run: docs.desired.state,
                         paused_nodes: docs.desired.paused_nodes.clone(),
@@ -430,6 +437,7 @@ impl<P: Providers> Worker<P> {
                     control,
                     shared,
                     spec_version: docs.spec_version,
+                    plan_generation: docs.plan.generation,
                     done,
                     actor_samples: BTreeMap::new(),
                     slice_sample: None,
@@ -533,7 +541,7 @@ impl<P: Providers> Worker<P> {
         let mut running: BTreeMap<SliceKey, Running> = BTreeMap::new();
         let mut books: BTreeMap<SliceKey, Book> = BTreeMap::new();
         let mut synced: Option<Synced> = None;
-        let mut controller_state = ControllerState::default();
+        let mut controller_state = ControllerState::new(self.config.replan_interval);
         let mut catalog_published = false;
         let mut last_tick = time.now();
         let started = last_tick;
