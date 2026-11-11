@@ -14,7 +14,7 @@
 //! pipeline to settle, then checks that every event was accounted for exactly
 //! once.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,11 +26,11 @@ use moonpool_sim::{
     assert_sometimes, buggify, buggify_with_prob,
 };
 use parking_lot::Mutex;
-use streaming_core::control::{GraphIndexEntry, WorkerSnapshot};
+use streaming_core::control::{DesiredState, GraphIndexEntry, RunState, WorkerSnapshot};
 use streaming_core::{
-    Clock, Datum, DynKv, Emit, GraphSpec, Kv, KvError, MemKv, NoSecrets, PartitionReader, Position,
-    Registry, SinkConnector, SinkError, SourceConnector, SourceError, SourceRecord, Timestamp,
-    TypeTag, Window, Windowed, WorkerId, datum, keys,
+    Clock, Datum, DynKv, Emit, GraphSpec, Kv, KvError, MemKv, NoSecrets, NodeId, PartitionReader,
+    Position, Registry, SinkConnector, SinkError, SourceConnector, SourceError, SourceRecord,
+    Timestamp, TypeTag, Window, Windowed, WorkerId, datum, keys,
 };
 use streaming_runtime::memlog::MemLog;
 use streaming_runtime::{GossipConfig, GossipMembership, NoLoad, RuntimeEnv, Worker, WorkerConfig};
@@ -144,6 +144,10 @@ pub struct SimEnv {
     pub sink_ambiguous: Mutex<u64>,
     /// Number of worker boots.
     pub boots: Mutex<u64>,
+    /// Set by the driver once every event is produced.
+    pub production_done: Mutex<bool>,
+    /// Number of actions the operator took, per kind.
+    pub operator_actions: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl SimEnv {
@@ -162,6 +166,8 @@ impl SimEnv {
             redeliveries: Mutex::new(0),
             sink_ambiguous: Mutex::new(0),
             boots: Mutex::new(0),
+            production_done: Mutex::new(false),
+            operator_actions: Mutex::default(),
         })
     }
 }
@@ -515,6 +521,17 @@ pub struct Scenario {
     pub produce_for: Duration,
     /// Size of the first-level windows.
     pub window: Duration,
+    /// Distance between the starts of two first-level windows. Equal to
+    /// `window` for tumbling windows, smaller for sliding ones.
+    pub slide: Duration,
+    /// How long after its end a first-level window still accepts records.
+    pub allowed_lateness: Duration,
+    /// How far in the past an event may be stamped when it is produced.
+    pub max_event_age: Duration,
+    /// Maximum number of records per epoch.
+    pub max_batch: usize,
+    /// An operator pauses, drains and re-submits the graph while it runs.
+    pub operator: bool,
     /// Every worker runs every slice, whatever the placement says.
     pub duel: bool,
     /// Workers find each other through gossip over the simulated network
@@ -532,6 +549,11 @@ impl Default for Scenario {
             keys: 8,
             produce_for: Duration::from_secs(20),
             window: Duration::from_secs(2),
+            slide: Duration::from_secs(2),
+            allowed_lateness: Duration::ZERO,
+            max_event_age: Duration::from_millis(150),
+            max_batch: 40,
+            operator: false,
             duel: false,
             gossip: false,
             settle_timeout: Duration::from_secs(900),
@@ -540,6 +562,20 @@ impl Default for Scenario {
 }
 
 impl Scenario {
+    /// The first-level windows an event stamped `ts` belongs to.
+    #[must_use]
+    pub fn windows_of(&self, ts: Timestamp) -> Vec<Window> {
+        let size = self.window.as_millis() as i64;
+        let slide = self.slide.as_millis().max(1) as i64;
+        let mut windows = Vec::new();
+        let mut start = ts.div_euclid(slide) * slide;
+        while start > ts - size {
+            windows.push(Window::new(start, start + size));
+            start -= slide;
+        }
+        windows
+    }
+
     /// Size of the second-level windows.
     #[must_use]
     pub fn big_window(&self) -> Duration {
@@ -551,8 +587,18 @@ impl Scenario {
     /// second aggregation over the results of the first.
     #[must_use]
     pub fn spec(&self) -> GraphSpec {
-        let window = format!("{}ms", self.window.as_millis());
-        let big = format!("{}ms", self.big_window().as_millis());
+        let millis = |duration: Duration| format!("{}ms", duration.as_millis());
+        let first_window = if self.slide == self.window {
+            serde_json::json!({"id": "win", "op": "std/tumbling@1", "config": {
+                "size": millis(self.window),
+                "allowed_lateness": millis(self.allowed_lateness)}})
+        } else {
+            serde_json::json!({"id": "win", "op": "std/sliding@1", "config": {
+                "size": millis(self.window),
+                "slide": millis(self.slide),
+                "allowed_lateness": millis(self.allowed_lateness)}})
+        };
+        let big = millis(self.big_window());
         serde_json::from_value(serde_json::json!({
             "tenant": "acme",
             "graph": "sim",
@@ -562,7 +608,7 @@ impl Scenario {
                 "idle_timeout": "1500ms",
                 "linger": "40ms",
                 "flush_interval": "250ms",
-                "max_batch": 40,
+                "max_batch": self.max_batch,
                 "chunk_size": 7,
                 "mailbox_capacity": 2,
                 "max_in_flight_epochs": 2
@@ -570,7 +616,7 @@ impl Scenario {
             "nodes": [
                 {"id": "events", "op": "sim/log@1"},
                 {"id": "by-key", "op": "sim/key@1"},
-                {"id": "win", "op": "std/tumbling@1", "config": {"size": window}},
+                first_window,
                 {"id": "count", "op": "std/count@1"},
                 {"id": "counts", "op": "sim/counts@1"},
                 {"id": "raw", "op": "sim/raw@1"},
@@ -723,7 +769,7 @@ impl Driver {
             .iter()
             .filter_map(|row| row.rsplit('|').next()?.parse::<u64>().ok())
             .sum();
-        Self::counted(env) == produced.total
+        Self::counted(env) == produced.counts.values().sum::<u64>()
             && env.raw.len() as u64 == produced.total
             && env.both.len() as u64 == 2 * produced.total
             && totals == expected_totals
@@ -821,28 +867,28 @@ impl Workload for Driver {
         let env = env_of(&self.slot)?;
         let scenario = &self.scenario;
         let clock = SimClock::exact(ctx.time().clone());
-        let window = scenario.window.as_millis() as i64;
         let pause = scenario.produce_for / scenario.events.max(1) as u32;
+        let max_age = scenario.max_event_age.as_millis().max(1) as i64;
 
         for id in 0..scenario.events {
             let key = format!("key-{}", ctx.random().random_range(0..scenario.keys.max(1)));
-            // Events are stamped slightly in the past, as if they had travelled.
-            let ts = clock.now_ms() - ctx.random().random_range(0..150_i64);
+            // Events are stamped in the past, as if they had travelled.
+            let ts = clock.now_ms() - ctx.random().random_range(0..max_age);
             let partition = ctx.random().random_range(0..scenario.partitions.max(1));
             {
                 let mut produced = env.produced.lock();
                 produced.total += 1;
-                let start = ts.div_euclid(window) * window;
-                *produced
-                    .counts
-                    .entry((Window::new(start, start + window), key.clone()))
-                    .or_default() += 1;
+                for window in scenario.windows_of(ts) {
+                    *produced.counts.entry((window, key.clone())).or_default() += 1;
+                }
             }
             env.log.append(partition, ts, datum(SimEvent { id, key }));
             if ctx.random().random_bool(0.3) {
                 let _ = ctx.time().sleep(pause * 3).await;
             }
         }
+
+        *env.production_done.lock() = true;
 
         let started = ctx.time().now();
         while !self.settled(&env) {
@@ -852,7 +898,7 @@ impl Workload for Driver {
                 return Err(violation(format!(
                     "the pipeline did not settle: counted {}/{}, raw {}/{}, both {}/{}, totals rows {}",
                     Self::counted(&env),
-                    produced.total,
+                    produced.counts.values().sum::<u64>(),
                     env.raw.len(),
                     produced.total,
                     env.both.len(),
@@ -1025,6 +1071,136 @@ impl Workload for Driver {
             "a sink received an element it already held"
         );
         assert_sometimes!(*env.boots.lock() > 3, "a worker was rebooted");
+        let actions = env.operator_actions.lock().clone();
+        for kind in ["pause", "pause-node", "drain", "resubmit"] {
+            assert_sometimes!(
+                actions.get(kind).copied().unwrap_or(0) > 0,
+                format!("the operator did: {kind}")
+            );
+        }
+        let widest = produced
+            .counts
+            .keys()
+            .fold(BTreeMap::<Window, usize>::new(), |mut keys, (window, _)| {
+                *keys.entry(*window).or_default() += 1;
+                keys
+            })
+            .into_values()
+            .max()
+            .unwrap_or(0);
+        assert_sometimes!(
+            widest > self.scenario.max_batch,
+            "a window held more keys than one epoch can emit"
+        );
+        Ok(())
+    }
+}
+
+/// A human operator, as the pipeline sees one: pauses the graph, pauses a
+/// node, drains, re-submits the description, at random, while events flow.
+/// Leaves the graph running once production is over.
+pub struct Operator {
+    slot: EnvSlot,
+    scenario: Scenario,
+}
+
+impl Operator {
+    /// An operator for the given scenario. Does nothing unless the scenario
+    /// asks for one.
+    #[must_use]
+    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self {
+        Self { slot, scenario }
+    }
+}
+
+#[async_trait]
+impl Workload for Operator {
+    fn name(&self) -> &str {
+        "operator"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // The simulation ends as soon as one workload returns: this one must
+        // outlive the driver, which decides when the run is over.
+        if !self.scenario.operator {
+            ctx.shutdown().cancelled().await;
+            return Ok(());
+        }
+        let env = env_of(&self.slot)?;
+        let kv: DynKv = env.kv.clone();
+        let mut spec = self.scenario.spec();
+        let graph = spec.key();
+        let nodes: Vec<NodeId> = spec.nodes.iter().map(|node| node.id.clone()).collect();
+        let failed = |error: KvError| violation(error.to_string());
+        let pause =
+            |low: u64, high: u64| Duration::from_millis(ctx.random().random_range(low..high));
+
+        let desire = |state: RunState, paused: Option<NodeId>| {
+            let kv = kv.clone();
+            let graph = graph.clone();
+            async move {
+                let desired = DesiredState {
+                    state,
+                    paused_nodes: paused.into_iter().collect::<BTreeSet<_>>(),
+                    updated_ms: 0,
+                };
+                kv.set_json(&keys::graph_desired(&graph), &desired).await?;
+                kv.incr(keys::CLUSTER_EPOCH).await.map(|_| ())
+            }
+        };
+
+        while !*env.production_done.lock() {
+            let _ = ctx.time().sleep(pause(800, 3_000)).await;
+            let kind = match ctx.random().random_range(0..4_u32) {
+                0 => {
+                    desire(RunState::Paused, None).await.map_err(failed)?;
+                    let _ = ctx.time().sleep(pause(300, 2_000)).await;
+                    desire(RunState::Running, None).await.map_err(failed)?;
+                    "pause"
+                }
+                1 => {
+                    let node = nodes[ctx.random().random_range(0..nodes.len())].clone();
+                    desire(RunState::Running, Some(node))
+                        .await
+                        .map_err(failed)?;
+                    let _ = ctx.time().sleep(pause(300, 2_000)).await;
+                    desire(RunState::Running, None).await.map_err(failed)?;
+                    "pause-node"
+                }
+                2 => {
+                    desire(RunState::Draining, None).await.map_err(failed)?;
+                    let _ = ctx.time().sleep(pause(500, 2_500)).await;
+                    desire(RunState::Running, None).await.map_err(failed)?;
+                    "drain"
+                }
+                _ => {
+                    // The same description under a new version: workers stop
+                    // the graph's slices and start them again from their logs.
+                    spec.version += 1;
+                    kv.set_json(&keys::graph_spec(&graph), &spec)
+                        .await
+                        .map_err(failed)?;
+                    kv.hset_json(
+                        keys::CLUSTER_GRAPHS,
+                        &graph.to_string(),
+                        &GraphIndexEntry {
+                            tenant: spec.tenant.clone(),
+                            graph: spec.graph.clone(),
+                            version: spec.version,
+                            updated_ms: EPOCH_MS,
+                            deleting: false,
+                        },
+                    )
+                    .await
+                    .map_err(failed)?;
+                    kv.incr(keys::CLUSTER_EPOCH).await.map_err(failed)?;
+                    "resubmit"
+                }
+            };
+            *env.operator_actions.lock().entry(kind).or_default() += 1;
+        }
+        desire(RunState::Running, None).await.map_err(failed)?;
+        ctx.shutdown().cancelled().await;
         Ok(())
     }
 }

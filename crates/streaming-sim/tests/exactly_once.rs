@@ -11,7 +11,7 @@ use moonpool_sim::{
     Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport,
 };
 use parking_lot::Mutex;
-use streaming_sim::{Driver, EnvSlot, Scenario, SimEnv, WorkerProcess};
+use streaming_sim::{Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
 
 fn iterations(default: usize) -> usize {
     std::env::var("SIM_ITERATIONS")
@@ -39,6 +39,7 @@ fn run(
             move || Box::new(WorkerProcess::new(slot.clone(), scenario.clone()))
         })
         .workload(Driver::new(slot.clone(), scenario.clone()))
+        .workload(Operator::new(slot.clone(), scenario.clone()))
         .run_time_budget(Duration::from_secs(3_600));
     if attrition {
         builder = builder
@@ -71,7 +72,10 @@ fn run(
         builder.set_iterations(seeds.len()).set_debug_seeds(seeds)
     };
     let report = builder.run();
-    if report.failed_runs > 0 || !report.assertion_violations.is_empty() {
+    if report.failed_runs > 0
+        || !report.assertion_violations.is_empty()
+        || std::env::var("SIM_REPORT").is_ok()
+    {
         report.eprint();
     }
     report
@@ -120,5 +124,66 @@ fn exactly_once_with_gossip_membership() {
         ..Scenario::default()
     };
     let report = run(scenario, 3, true, 15);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_windows_wider_than_an_epoch() {
+    // More keys per window than records per epoch: a closed window is emitted
+    // over several epochs, and may be resumed halfway after a crash.
+    let scenario = Scenario {
+        keys: 150,
+        events: 3_000,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_allowed_lateness() {
+    // Events up to 1.8 s old with a watermark only 0.6 s behind: many arrive
+    // after their window ended, inside the allowed lateness.
+    let scenario = Scenario {
+        allowed_lateness: Duration::from_millis(1_500),
+        max_event_age: Duration::from_millis(1_800),
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_sliding_windows() {
+    let scenario = Scenario {
+        window: Duration::from_secs(4),
+        slide: Duration::from_secs(2),
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_under_operator_actions() {
+    let scenario = Scenario {
+        operator: true,
+        produce_for: Duration::from_secs(40),
+        events: 2_000,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_on_a_larger_cluster() {
+    let scenario = Scenario {
+        partitions: 6,
+        events: 3_000,
+        keys: 20,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 5, true, 10);
     assert_clean(&report);
 }
