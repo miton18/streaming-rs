@@ -268,7 +268,9 @@ impl Kv for MemKv {
                 .ok_or_else(|| KvError::Protocol(format!("value at `{key}` is not an integer")))?,
             Some(Entry::Hash(_)) => return Err(wrong_type(key)),
         };
-        let next = current + 1;
+        let next = current
+            .checked_add(1)
+            .ok_or_else(|| KvError::Protocol("increment or decrement would overflow".to_owned()))?;
         entries.insert(key.to_owned(), Entry::Str(next.to_string().into_bytes()));
         Ok(next)
     }

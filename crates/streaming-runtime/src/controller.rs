@@ -203,10 +203,26 @@ pub(crate) async fn plan_graph<P: Providers>(env: &RuntimeEnv<P>, spec: &GraphSp
     plan
 }
 
+/// Read a JSON document. A document that is absent or cannot be decoded is
+/// `None`; a store failure is an error, never mistaken for an absent document.
+async fn read_doc<T: serde::de::DeserializeOwned>(
+    kv: &dyn Kv,
+    key: &str,
+) -> Result<Option<T>, KvError> {
+    match kv.get_json(key).await {
+        Ok(doc) => Ok(doc),
+        Err(KvError::Malformed { key, reason }) => {
+            tracing::warn!(%key, %reason, "ignoring a malformed control-plane document");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Remove everything a deleted graph left in the KV.
 async fn purge_graph(kv: &dyn Kv, graph: &GraphKey) -> Result<(), KvError> {
-    let spec: Option<GraphSpec> = kv.get_json(&keys::graph_spec(graph)).await.unwrap_or(None);
-    let plan: Option<GraphPlan> = kv.get_json(&keys::graph_plan(graph)).await.unwrap_or(None);
+    let spec: Option<GraphSpec> = read_doc(kv, &keys::graph_spec(graph)).await?;
+    let plan: Option<GraphPlan> = read_doc(kv, &keys::graph_plan(graph)).await?;
     let nodes = spec.map(|spec| spec.nodes).unwrap_or_default();
     for slice in plan.map(|plan| plan.slices).unwrap_or_default() {
         let slice = SliceKey {
@@ -219,7 +235,8 @@ async fn purge_graph(kv: &dyn Kv, graph: &GraphKey) -> Result<(), KvError> {
                 state::drop_window(kv, &slice, &node.id, &window).await?;
             }
         }
-        kv.del(vec![keys::slice_log(&slice)]).await?;
+        kv.del(vec![keys::slice_log(&slice), keys::slice_seal(&slice)])
+            .await?;
     }
     let mut doomed: Vec<String> = nodes
         .iter()
@@ -272,11 +289,11 @@ pub(crate) async fn run_once<P: Providers>(
             }
             continue;
         }
-        let Some(spec) = kv.get_json::<GraphSpec>(&keys::graph_spec(&graph)).await? else {
+        let Some(spec) = read_doc::<GraphSpec>(kv, &keys::graph_spec(&graph)).await? else {
             continue;
         };
         let plan_key = keys::graph_plan(&graph);
-        let mut plan = kv.get_json::<GraphPlan>(&plan_key).await.unwrap_or(None);
+        let mut plan: Option<GraphPlan> = read_doc(kv, &plan_key).await?;
         let stale = plan
             .as_ref()
             .is_none_or(|plan| plan.spec_version != spec.version || plan.error.is_some());
@@ -293,10 +310,8 @@ pub(crate) async fn run_once<P: Providers>(
             }
             plan = Some(fresh);
         }
-        let desired: DesiredState = kv
-            .get_json(&keys::graph_desired(&graph))
-            .await
-            .unwrap_or(None)
+        let desired: DesiredState = read_doc(kv, &keys::graph_desired(&graph))
+            .await?
             .unwrap_or_default();
         if desired.state == RunState::Stopped {
             continue;
@@ -317,10 +332,8 @@ pub(crate) async fn run_once<P: Providers>(
             load: member.load,
         })
         .collect();
-    let placement: Placement = kv
-        .get_json(keys::CLUSTER_PLACEMENT)
-        .await
-        .unwrap_or(None)
+    let placement: Placement = read_doc(kv, keys::CLUSTER_PLACEMENT)
+        .await?
         .unwrap_or_default();
     let rebalance = state
         .last_move

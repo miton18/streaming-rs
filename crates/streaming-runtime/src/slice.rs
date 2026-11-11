@@ -433,6 +433,13 @@ struct Root<P: Providers> {
     epoch: u64,
     slice: Arc<SliceMetrics>,
     exit: Exit,
+    /// Whether the slice holds an aggregate: only then is it worth committing
+    /// an epoch whose sole content is a watermark advance.
+    stateful: bool,
+    /// Token identifying this instance in the commit log.
+    owner: String,
+    /// Head epoch of the log when this instance started.
+    start_epoch: u64,
 }
 
 impl<P: Providers> Root<P> {
@@ -621,7 +628,7 @@ async fn run_source<P: Providers>(
             let since = *idle_since.get_or_insert(now);
             let due =
                 last_idle_epoch.is_none_or(|at| now.saturating_sub(at) >= idle_epoch_interval);
-            if now.saturating_sub(since) >= settings.idle_timeout && due {
+            if root.stateful && now.saturating_sub(since) >= settings.idle_timeout && due {
                 match open.end_position().await {
                     Ok(end) => {
                         let caught_up = match (end, position) {
@@ -683,6 +690,9 @@ async fn run_emitter<P: Providers>(
     // the index being `u64::MAX` once the window is complete.
     let mut position = start.position;
     let mut committed = start.position;
+    // Watermark of what this slice emits: results carry the timestamp
+    // `window end - 1`, and windows are emitted in closing order.
+    let mut watermark = start.watermark;
     let mut backoff = MIN_BACKOFF;
     loop {
         if let Some(covered) = root.settle() {
@@ -753,6 +763,19 @@ async fn run_emitter<P: Providers>(
             .filter(|window| !emitted(window, position))
             .collect();
         if ready.is_empty() {
+            // Every closed window is out. Whatever comes next belongs to a window
+            // still open upstream, so its timestamp lies beyond the upstream
+            // watermark: let the output watermark follow, so that windows
+            // downstream of this node can close even when nothing new arrives.
+            let reached = if feeding.is_empty() || global == NO_WATERMARK {
+                NO_WATERMARK
+            } else {
+                global.saturating_sub(lateness_ms).saturating_sub(1)
+            };
+            if root.stateful && reached > watermark {
+                watermark = reached;
+                root.emit(Vec::new(), position, watermark).await;
+            }
             root.ctx.meter.idle();
             root.ctx.sleep(flush_interval).await;
             continue;
@@ -792,6 +815,28 @@ async fn run_emitter<P: Providers>(
                         }
                     }
                 }
+            }
+            // The accumulators just read are only trustworthy if nobody else
+            // emitted in our place meanwhile: another instance committing this
+            // window would then delete the very state we were reading. Its
+            // commit comes first, so checking the log after the read settles it.
+            match state::read_log(kv.as_ref(), &root.ctx.key).await {
+                Ok(log) => {
+                    let ours = match log.head() {
+                        None => root.start_epoch == 0,
+                        Some(head) => head.owner == root.owner || head.epoch == root.start_epoch,
+                    };
+                    if !ours {
+                        root.exit.finish(SliceExit::Fenced);
+                        return futures::future::pending().await;
+                    }
+                }
+                Err(StateError::Kv(error)) => {
+                    root.ctx.meter.metrics.error(error.to_string());
+                    root.ctx.sleep(bump(&mut backoff)).await;
+                    break 'windows;
+                }
+                Err(error) => return Err(error.into()),
             }
             let window_position = (ts_key(window.end), ts_key(window.start));
             let resume = match position {
@@ -849,7 +894,10 @@ async fn run_emitter<P: Providers>(
                     }
                 }
                 root.ctx.meter.busy();
-                root.emit(batch, Some(at), window.end).await;
+                // Not `window.end`: the rest of this window, or another window
+                // ending at the same instant, may still follow.
+                watermark = watermark.max(window.end - 1);
+                root.emit(batch, Some(at), watermark).await;
                 position = Some(at);
                 if complete {
                     break;
@@ -873,18 +921,20 @@ async fn run_committer<P: Providers>(
     committed: watch::Sender<u64>,
     start_epoch: u64,
     owner: String,
+    log: LogState,
     slice: Arc<SliceMetrics>,
     exit: Exit,
 ) -> Result<(), ActorError> {
     let kv = ctx.env.kv.clone();
     let mut next = start_epoch + 1;
     let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
-    // Epochs whose record is still in the log although it is materialized.
-    let mut untrimmed: Vec<u64> = if start_epoch > 0 {
-        vec![start_epoch]
-    } else {
-        Vec::new()
-    };
+    let LogState {
+        mut live,
+        mut floor,
+        head_is_heavy,
+    } = log;
+    // The record the next commit supersedes, and whether it is worth emptying.
+    let mut superseded = (start_epoch > 0).then_some((start_epoch, head_is_heavy));
     ctx.meter.metrics.set_state(ActorState::Running);
     loop {
         ctx.meter.idle();
@@ -958,11 +1008,26 @@ async fn run_committer<P: Providers>(
                 ctx.meter.metrics.error(error.to_string());
                 ctx.sleep(bump(&mut backoff)).await;
             }
-            // Best effort: what is not trimmed now is trimmed after a later epoch.
-            if state::trim(kv.as_ref(), &ctx.key, &untrimmed).await.is_ok() {
-                untrimmed.clear();
+            // The record this one supersedes is materialized: empty it. Its
+            // field stays, so that a worker left behind cannot take the epoch.
+            // Best effort: a payload not emptied now goes at the next sweep.
+            if let Some((epoch, true)) = superseded {
+                let _ = state::tombstone(kv.as_ref(), &ctx.key, epoch).await;
             }
-            untrimmed.push(next);
+            superseded = Some((next, !record.changes.is_empty()));
+            live.push(next);
+            if live.len() > COMPACT_AT {
+                // Everything before this epoch is materialized: seal it, then
+                // delete the fields below the seal.
+                let sealed = next - 1;
+                if state::compact(kv.as_ref(), &ctx.key, sealed, &live, floor)
+                    .await
+                    .is_ok()
+                {
+                    live.retain(|epoch| *epoch > sealed);
+                    floor = sealed;
+                }
+            }
 
             let elapsed = ctx.env.providers.time().now().saturating_sub(started);
             slice.epoch.store(next, Ordering::Relaxed);
@@ -982,11 +1047,25 @@ async fn run_committer<P: Providers>(
     }
 }
 
+/// What the commit actor needs to know about the log it continues.
+struct LogState {
+    /// Epochs present in the log above the seal.
+    live: Vec<u64>,
+    /// The seal as of the last read.
+    floor: u64,
+    /// Whether the head record carries state changes worth emptying later.
+    head_is_heavy: bool,
+}
+
 struct Prepared {
     ops: BTreeMap<NodeId, NodeOp>,
     start: Start,
     restored: BTreeMap<NodeId, AggState>,
+    log: LogState,
 }
+
+/// Number of fields a log may hold before it is sealed and swept.
+const COMPACT_AT: usize = 24;
 
 async fn prepare<P: Providers>(
     params: &SliceParams<P>,
@@ -1004,15 +1083,17 @@ async fn prepare<P: Providers>(
     }
 
     // Whatever the previous owner committed but did not finish copying out is
-    // copied out now; then only the head record needs to stay in the log.
+    // copied out now. What sits at or below the seal is final or void.
     let log = state::read_log(kv, &params.key).await?;
     for record in &log.records {
         state::materialize(kv, &params.key, record).await?;
     }
-    if let Some((_, older)) = log.records.split_last() {
-        let epochs: Vec<u64> = older.iter().map(|record| record.epoch).collect();
-        state::trim(kv, &params.key, &epochs).await?;
-    }
+    state::sweep(kv, &params.key, &log.sealed).await?;
+    let log_state = LogState {
+        head_is_heavy: log.head().is_some_and(|head| !head.changes.is_empty()),
+        live: log.live.clone(),
+        floor: log.floor,
+    };
     let start = log.head().map_or(
         Start {
             epoch: 0,
@@ -1048,6 +1129,7 @@ async fn prepare<P: Providers>(
         ops,
         start,
         restored,
+        log: log_state,
     })
 }
 
@@ -1156,6 +1238,7 @@ fn start_actors<P: Providers>(
         mut ops,
         start,
         mut restored,
+        log: log_state,
     } = prepared;
 
     let ident = |node: &NodeId, kind: ActorKind| ActorIdent {
@@ -1192,6 +1275,9 @@ fn start_actors<P: Providers>(
         inputs.entry(to).or_default().push(rx);
     }
 
+    let stateful = nodes
+        .iter()
+        .any(|node| *node != root && topology.kind(node) == OpKind::Aggregate);
     let (commits_tx, commits_rx) = mpsc::unbounded_channel();
     let (committed_tx, committed_rx) = watch::channel(start.epoch);
     let terminals = nodes
@@ -1235,7 +1321,8 @@ fn start_actors<P: Providers>(
             commits_rx,
             committed_tx,
             start.epoch,
-            owner,
+            owner.clone(),
+            log_state,
             shared.metrics.clone(),
             exit.clone(),
         ),
@@ -1256,6 +1343,9 @@ fn start_actors<P: Providers>(
             epoch,
             slice: shared.metrics.clone(),
             exit: exit.clone(),
+            stateful,
+            owner: owner.clone(),
+            start_epoch: epoch,
         };
         let actor: std::pin::Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send>> = match op
         {

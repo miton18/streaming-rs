@@ -1,8 +1,19 @@
 [package]
 name = "streaming-sim"
+description = "Deterministic simulation harness for streaming-rs: fault-injecting KV, source and sinks, rebootable workers, exactly-once checker."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+publish = false
 
 [dependencies]
+streaming-core.workspace = true
+streaming-runtime.workspace = true
+async-trait.workspace = true
+moonpool-core.workspace = true
+moonpool-sim.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true

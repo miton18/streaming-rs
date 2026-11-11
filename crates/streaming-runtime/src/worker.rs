@@ -157,6 +157,8 @@ struct Running {
 struct Book {
     lifetime: SliceLifetime,
     started: bool,
+    /// Consecutive failures without a single commit in between.
+    failures: u32,
     retry_at: Option<Duration>,
     last_error: Option<String>,
 }
@@ -323,11 +325,18 @@ impl<P: Providers> Worker<P> {
                 continue;
             };
             let book = books.entry(key.clone()).or_default();
+            if slice.shared.metrics.commits.load(Ordering::Relaxed) > 0 {
+                book.failures = 0;
+            }
+            // Back off exponentially while a slice keeps failing before its
+            // first commit, so that a broken graph does not spin.
             let jitter = 1.0 + self.env.providers.random().random_ratio();
-            let retry_at = now + self.config.restart_backoff.mul_f64(jitter);
+            let factor = f64::from(1_u32 << book.failures.min(5));
+            let retry_at = now + self.config.restart_backoff.mul_f64(jitter * factor);
             match slice.shared.exit() {
                 Some(SliceExit::Fenced) => {
                     book.lifetime.fenced += 1;
+                    book.failures += 1;
                     book.retry_at = Some(retry_at);
                     book.last_error =
                         Some("fenced: another worker committed this slice".to_owned());
@@ -335,6 +344,7 @@ impl<P: Providers> Worker<P> {
                 }
                 Some(SliceExit::Failed(error)) => {
                     tracing::warn!(slice = %key, %error, "slice failed");
+                    book.failures += 1;
                     book.retry_at = Some(retry_at);
                     book.last_error = Some(error);
                 }

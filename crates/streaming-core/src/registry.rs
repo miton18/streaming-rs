@@ -385,7 +385,7 @@ impl<P: Providers> Registry<P> {
         Out: Any + Send + Sync,
     {
         let f = Arc::new(f);
-        self.register_map_with(op, about, move |(): ()| {
+        self.register_map_with(op, about, move |_: serde::de::IgnoredAny| {
             let f = f.clone();
             move |input: &In, out: &mut Vec<Out>| out.extend(f(input))
         })
@@ -407,7 +407,7 @@ impl<P: Providers> Registry<P> {
         Out: Any + Send + Sync,
     {
         let f = Arc::new(f);
-        self.register_map_with(op, about, move |(): ()| {
+        self.register_map_with(op, about, move |_: serde::de::IgnoredAny| {
             let f = f.clone();
             move |input: &In, out: &mut Vec<Out>| f(input, out)
         })
@@ -574,5 +574,92 @@ impl<P: Providers> Registry<P> {
                 .map(|(op, (descriptor, _))| (op.clone(), descriptor.clone()))
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moonpool_core::TokioProviders;
+
+    #[test]
+    fn operators_build_without_configuration() {
+        let mut registry = Registry::<TokioProviders>::standard();
+        registry.register_map("test/len@1", "", |text: &String| Some(text.len()));
+        registry.register_flat_map("test/chars@1", "", |text: &String, out: &mut Vec<char>| {
+            out.extend(text.chars());
+        });
+        registry.register_key("test/key@1", "", |text: &String| text.clone());
+        for config in [
+            Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"ignored": 1}),
+        ] {
+            for op in ["test/len@1", "test/chars@1", "std/identity@1"] {
+                let Some((_, OpFactory::Map(factory))) = registry.get(&OpRef::new(op).unwrap())
+                else {
+                    panic!("{op} is not a map");
+                };
+                let map = factory(&config).unwrap_or_else(|e| panic!("{op} with {config}: {e}"));
+                let mut out = Vec::new();
+                map.apply(&datum("abc".to_owned()), &mut out).unwrap();
+                assert!(!out.is_empty());
+            }
+            let Some((_, OpFactory::Key(factory))) =
+                registry.get(&OpRef::new("test/key@1").unwrap())
+            else {
+                panic!("not a key");
+            };
+            let key = factory(&config)
+                .unwrap()
+                .key(&datum("abc".to_owned()))
+                .unwrap();
+            assert_eq!(key.decode::<String>().unwrap(), "abc");
+            let Some((_, OpFactory::Aggregate(factory))) =
+                registry.get(&OpRef::new("std/count@1").unwrap())
+            else {
+                panic!("not an aggregate");
+            };
+            factory(&config).unwrap();
+        }
+        // A window needs its size: a missing configuration is a clear error.
+        let Some((_, OpFactory::Window(factory))) =
+            registry.get(&OpRef::new("std/tumbling@1").unwrap())
+        else {
+            panic!("not a window");
+        };
+        assert!(matches!(factory(&Value::Null), Err(OpError::Config(_))));
+        assert!(factory(&serde_json::json!({"size": "5m"})).is_ok());
+    }
+
+    #[test]
+    fn secrets_resolve_per_tenant() {
+        let tenant = TenantId::new("acme").unwrap();
+        let context = OpContext {
+            providers: TokioProviders::new(),
+            clock: Arc::new(crate::clock::SystemClock),
+            secrets: Arc::new(crate::clock::StaticSecrets::new().with(&tenant, "token", "s3cr3t")),
+            tenant,
+            graph: GraphId::new("g").unwrap(),
+            node: NodeId::new("n").unwrap(),
+        };
+        assert_eq!(
+            context
+                .secret_or_literal(&serde_json::json!("plain"))
+                .unwrap(),
+            "plain"
+        );
+        assert_eq!(
+            context
+                .secret_or_literal(&serde_json::json!({"secret": "token"}))
+                .unwrap(),
+            "s3cr3t"
+        );
+        assert!(
+            context
+                .secret_or_literal(&serde_json::json!({"secret": "other"}))
+                .is_err()
+        );
+        assert!(context.secret_or_literal(&serde_json::json!(42)).is_err());
     }
 }

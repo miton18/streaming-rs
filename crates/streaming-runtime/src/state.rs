@@ -11,14 +11,31 @@
 //! from the log. This single-field compare-and-set is the only atomicity the
 //! framework needs from the store.
 //!
+//! # Keeping the log small without weakening it
+//!
+//! `HSETNX` only arbitrates while the field exists: deleting the field of an
+//! old epoch would let a worker that fell far behind create it again and
+//! believe it committed. Two rules prevent that:
+//!
+//! - a superseded record is *emptied*, not deleted: the field stays as a
+//!   tombstone and keeps refusing late writers;
+//! - tombstones are only deleted below a *seal*. Sealing epoch `f` (a
+//!   write-once field `f:<f>` in a second hash; the seal is the highest such
+//!   field, so it can only grow) declares every epoch up to `f` final. A
+//!   committer reads the seal *after* its `HSETNX` succeeded: an epoch at or
+//!   below the seal was already final, the write is void and the writer is
+//!   fenced. Since a field is sealed before it is deleted, a write that
+//!   revives a deleted field always finds the seal above it.
+//!
+//! Readers apply the same rule: whatever sits at or below the seal is ignored.
+//!
 //! # Materialization
 //!
-//! Accumulators are then copied out of the commit record into one hash per
-//! window, under versioned fields `<key>@<epoch>`. Versioned fields make the
-//! copy safe to repeat and safe against a fenced worker finishing late: a
-//! reader keeps, for each key, the field with the highest epoch. Once a record
-//! is materialized, older records are trimmed from the log; whoever opens a
-//! log replays every record still present, in order.
+//! Accumulators are copied out of the commit record into one hash per window,
+//! under versioned fields `<key>@<epoch>`. Versioned fields make the copy safe
+//! to repeat and safe against a fenced worker finishing late: a reader keeps,
+//! for each key, the field with the highest epoch. Whoever opens a log replays
+//! every record still holding its payload, in order.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -75,10 +92,18 @@ pub(crate) enum StateError {
     Corrupt { slice: String, reason: String },
 }
 
-/// The commit records currently in a log, oldest first.
+/// What a commit log holds, as of one read.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LogView {
+    /// Commit records above the seal that still hold their payload, oldest
+    /// first. The last one is the head of the slice.
     pub records: Vec<CommitRecord>,
+    /// The seal: every epoch at or below it is final.
+    pub floor: u64,
+    /// Epochs above the seal present in the log, records and tombstones alike.
+    pub live: Vec<u64>,
+    /// Epochs at or below the seal still present in the log: leftovers.
+    pub sealed: Vec<u64>,
 }
 
 impl LogView {
@@ -88,22 +113,60 @@ impl LogView {
     }
 }
 
+/// The seal of a slice log: every epoch at or below it is final.
+pub(crate) async fn read_floor(kv: &dyn Kv, slice: &SliceKey) -> Result<u64, KvError> {
+    Ok(kv
+        .hgetall(&keys::slice_seal(slice))
+        .await?
+        .iter()
+        .filter_map(|(field, _)| keys::parse_seal_field(field))
+        .max()
+        .unwrap_or(0))
+}
+
 /// Read the commit log of a slice.
 pub(crate) async fn read_log(kv: &dyn Kv, slice: &SliceKey) -> Result<LogView, StateError> {
-    let mut records = Vec::new();
-    for (field, value) in kv.hgetall(&keys::slice_log(slice)).await? {
-        if keys::parse_commit_field(&field).is_none() {
+    // The log is read before the seal, so that anything revived below the
+    // seal while we read is seen as such. If the slice moved so fast that the
+    // whole snapshot ended up below the seal, read again.
+    for _ in 0..4 {
+        let fields = kv.hgetall(&keys::slice_log(slice)).await?;
+        let floor = read_floor(kv, slice).await?;
+        let mut view = LogView {
+            floor,
+            ..LogView::default()
+        };
+        let mut any = false;
+        for (field, value) in fields {
+            let Some(epoch) = keys::parse_commit_field(&field) else {
+                continue;
+            };
+            any = true;
+            if epoch <= floor {
+                view.sealed.push(epoch);
+                continue;
+            }
+            view.live.push(epoch);
+            if value.is_empty() {
+                continue;
+            }
+            let record: CommitRecord =
+                postcard::from_bytes(&value).map_err(|e| StateError::Corrupt {
+                    slice: slice.to_string(),
+                    reason: format!("field `{field}`: {e}"),
+                })?;
+            view.records.push(record);
+        }
+        view.records.sort_by_key(|record| record.epoch);
+        view.live.sort_unstable();
+        if view.records.is_empty() && any {
             continue;
         }
-        let record: CommitRecord =
-            postcard::from_bytes(&value).map_err(|e| StateError::Corrupt {
-                slice: slice.to_string(),
-                reason: format!("field `{field}`: {e}"),
-            })?;
-        records.push(record);
+        return Ok(view);
     }
-    records.sort_by_key(|record| record.epoch);
-    Ok(LogView { records })
+    Err(StateError::Kv(KvError::Unavailable(format!(
+        "commit log of `{slice}` kept moving while being read"
+    ))))
 }
 
 /// Result of a commit attempt.
@@ -128,17 +191,27 @@ pub(crate) async fn try_commit(
         slice: slice.to_string(),
         reason: format!("cannot encode epoch {}: {e}", record.epoch),
     })?;
-    if kv.hsetnx(&log, &field, bytes).await? {
-        return Ok(CommitOutcome::Committed);
+    if !kv.hsetnx(&log, &field, bytes).await? {
+        // The field exists: ours from an attempt whose reply was lost, or
+        // somebody else's (possibly already emptied or deleted).
+        let ours = match kv.hget(&log, &field).await? {
+            Some(existing) if !existing.is_empty() => {
+                postcard::from_bytes::<CommitRecord>(&existing)
+                    .is_ok_and(|existing| existing.owner == record.owner)
+            }
+            _ => false,
+        };
+        if !ours {
+            return Ok(CommitOutcome::Fenced);
+        }
     }
-    match kv.hget(&log, &field).await? {
-        Some(existing) => match postcard::from_bytes::<CommitRecord>(&existing) {
-            Ok(existing) if existing.owner == record.owner => Ok(CommitOutcome::Committed),
-            _ => Ok(CommitOutcome::Fenced),
-        },
-        // Already trimmed: someone committed a later epoch.
-        None => Ok(CommitOutcome::Fenced),
+    // The field is ours. It only counts if the epoch was not already final:
+    // below the seal, the field we created is a deleted one coming back.
+    if record.epoch <= read_floor(kv, slice).await? {
+        let _ = kv.hdel(&log, vec![field]).await;
+        return Ok(CommitOutcome::Fenced);
     }
+    Ok(CommitOutcome::Committed)
 }
 
 /// Copy the accumulators of a commit record into the window hashes. Idempotent.
@@ -187,8 +260,57 @@ pub(crate) async fn materialize(
     Ok(())
 }
 
-/// Remove materialized commit records from the log.
-pub(crate) async fn trim(kv: &dyn Kv, slice: &SliceKey, epochs: &[u64]) -> Result<(), KvError> {
+/// Empty a superseded, materialized record. Its field stays and keeps
+/// refusing late writers.
+pub(crate) async fn tombstone(kv: &dyn Kv, slice: &SliceKey, epoch: u64) -> Result<(), KvError> {
+    kv.hset(
+        &keys::slice_log(slice),
+        vec![(keys::commit_field(epoch), Vec::new())],
+    )
+    .await
+}
+
+/// Seal every epoch up to `floor`, then delete what the log holds below it.
+///
+/// `epochs` are the log fields to delete (all at or below `floor`) and
+/// `previous_floor` the seal this one replaces, if known. The order matters:
+/// a field must be sealed before it is deleted.
+pub(crate) async fn compact(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    floor: u64,
+    epochs: &[u64],
+    previous_floor: u64,
+) -> Result<(), KvError> {
+    let seal = keys::slice_seal(slice);
+    kv.hset(&seal, vec![(keys::seal_field(floor), b"1".to_vec())])
+        .await?;
+    let fields: Vec<String> = epochs
+        .iter()
+        .filter(|epoch| **epoch <= floor)
+        .map(|epoch| keys::commit_field(*epoch))
+        .collect();
+    if !fields.is_empty() {
+        kv.hdel(&keys::slice_log(slice), fields).await?;
+    }
+    if previous_floor != 0 && previous_floor < floor {
+        // Older seals are redundant: the highest one is the seal.
+        let older: Vec<String> = kv
+            .hgetall(&seal)
+            .await?
+            .into_iter()
+            .filter(|(field, _)| keys::parse_seal_field(field).is_some_and(|f| f < floor))
+            .map(|(field, _)| field)
+            .collect();
+        if !older.is_empty() {
+            kv.hdel(&seal, older).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Delete log fields found at or below the seal. They are final or void.
+pub(crate) async fn sweep(kv: &dyn Kv, slice: &SliceKey, epochs: &[u64]) -> Result<(), KvError> {
     if epochs.is_empty() {
         return Ok(());
     }
@@ -420,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn trim_keeps_the_head() {
+    fn superseded_records_are_emptied_and_still_refuse_writers() {
         block_on(async {
             let kv = MemKv::new();
             for epoch in 1..=3 {
@@ -428,10 +550,67 @@ mod tests {
                     .await
                     .unwrap();
             }
-            trim(&kv, &slice(), &[1, 2]).await.unwrap();
+            tombstone(&kv, &slice(), 1).await.unwrap();
+            tombstone(&kv, &slice(), 2).await.unwrap();
             let log = read_log(&kv, &slice()).await.unwrap();
             assert_eq!(log.records.len(), 1);
             assert_eq!(log.head().unwrap().epoch, 3);
+            assert_eq!(log.live, [1, 2, 3]);
+            // A worker that fell behind cannot commit an epoch already taken.
+            let late = record(2, "late", &[("k", 9, 0)]);
+            assert_eq!(
+                try_commit(&kv, &slice(), &late).await.unwrap(),
+                CommitOutcome::Fenced
+            );
+        });
+    }
+
+    #[test]
+    fn a_deleted_epoch_cannot_be_revived() {
+        block_on(async {
+            let kv = MemKv::new();
+            for epoch in 1..=5 {
+                try_commit(&kv, &slice(), &record(epoch, "o", &[]))
+                    .await
+                    .unwrap();
+            }
+            compact(&kv, &slice(), 4, &[1, 2, 3, 4], 0).await.unwrap();
+            let log = read_log(&kv, &slice()).await.unwrap();
+            assert_eq!((log.floor, log.live.clone()), (4, vec![5]));
+
+            // The field of epoch 2 is gone, so HSETNX alone would accept this.
+            let late = record(2, "late", &[("k", 9, 0)]);
+            assert_eq!(
+                try_commit(&kv, &slice(), &late).await.unwrap(),
+                CommitOutcome::Fenced
+            );
+            let log = read_log(&kv, &slice()).await.unwrap();
+            assert_eq!(log.head().unwrap().epoch, 5);
+            assert!(log.sealed.is_empty(), "the revived field was removed");
+
+            // A revived field left behind by a writer that died is ignored.
+            kv.hsetnx(
+                &keys::slice_log(&slice()),
+                &keys::commit_field(3),
+                postcard::to_allocvec(&record(3, "ghost", &[("k", 1, 0)])).unwrap(),
+            )
+            .await
+            .unwrap();
+            let log = read_log(&kv, &slice()).await.unwrap();
+            assert_eq!(log.records.iter().map(|r| r.epoch).collect::<Vec<_>>(), [5]);
+            assert_eq!(log.sealed, [3]);
+            sweep(&kv, &slice(), &log.sealed).await.unwrap();
+
+            // The seal only grows, even if an older one is written late.
+            compact(&kv, &slice(), 2, &[], 0).await.unwrap();
+            assert_eq!(read_floor(&kv, &slice()).await.unwrap(), 4);
+            // The next epoch still commits normally.
+            assert_eq!(
+                try_commit(&kv, &slice(), &record(6, "o", &[]))
+                    .await
+                    .unwrap(),
+                CommitOutcome::Committed
+            );
         });
     }
 }

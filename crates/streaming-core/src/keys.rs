@@ -12,7 +12,8 @@
 //! t:<tenant>:g:<graph>:desired                   string DesiredState (JSON)
 //! t:<tenant>:g:<graph>:plan                      string GraphPlan (JSON)
 //! t:<tenant>:g:<graph>:out:<node>                hash  emit id       -> OutputRow (JSON)
-//! t:<tenant>:g:<graph>:s:<slice>:log             hash  c:<epoch>     -> commit record
+//! t:<tenant>:g:<graph>:s:<slice>:log             hash  c:<epoch>     -> commit record (empty once superseded)
+//! t:<tenant>:g:<graph>:s:<slice>:seal            hash  f:<epoch>     -> "1": epochs up to it are final
 //! t:<tenant>:g:<graph>:s:<slice>:idx:<node>      hash  <window>      -> "1"
 //! t:<tenant>:g:<graph>:s:<slice>:w:<node>:<win>  hash  <hexkey>@<epoch> -> accumulator
 //! ```
@@ -84,6 +85,24 @@ pub fn slice_log(slice: &SliceKey) -> String {
     format!("{}:log", slice_prefix(slice))
 }
 
+/// Seal of a slice log: the epochs at or below its highest field are final.
+#[must_use]
+pub fn slice_seal(slice: &SliceKey) -> String {
+    format!("{}:seal", slice_prefix(slice))
+}
+
+/// Field of a slice seal declaring every epoch up to `epoch` final.
+#[must_use]
+pub fn seal_field(epoch: u64) -> String {
+    format!("f:{epoch}")
+}
+
+/// Inverse of [`seal_field`].
+#[must_use]
+pub fn parse_seal_field(field: &str) -> Option<u64> {
+    field.strip_prefix("f:")?.parse().ok()
+}
+
 /// Index of the windows a slice holds state for, for one aggregate node.
 #[must_use]
 pub fn slice_window_index(slice: &SliceKey, node: &NodeId) -> String {
@@ -137,6 +156,7 @@ mod tests {
             graph_plan(&graph),
             graph_output(&graph, &node),
             slice_log(&slice),
+            slice_seal(&slice),
             slice_window_index(&slice, &node),
             slice_window(&slice, &node, &window),
         ] {
@@ -152,6 +172,8 @@ mod tests {
     fn fields_round_trip() {
         assert_eq!(parse_commit_field(&commit_field(42)), Some(42));
         assert_eq!(parse_commit_field("m"), None);
+        assert_eq!(parse_seal_field(&seal_field(9)), Some(9));
+        assert_eq!(parse_seal_field("c:9"), None);
         let key = Key::encode(&"user".to_owned()).unwrap();
         assert_eq!(parse_state_field(&state_field(&key, 7)), Some((key, 7)));
     }
