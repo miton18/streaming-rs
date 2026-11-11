@@ -194,6 +194,12 @@ The gossip, the KV client and the Warp 10 sink have their own simulation
 tests. The Pulsar connector is tested against a real broker instead
 (`PULSAR_E2E_URL=pulsar://localhost:6650 cargo test -p streaming-pulsar`).
 
+`scripts/e2e-pulsar-redis.sh` runs the stock `streamd` on real
+infrastructure: a Pulsar topic with three partitions, a real Redis for the
+state, two workers found through gossip, the one running the pipeline killed
+with `SIGKILL` halfway through, and a check that the counts per key equal
+what was produced.
+
 ## Limits
 
 - **Parallelism follows the source.** A node runs one actor per partition of
@@ -208,6 +214,9 @@ tests. The Pulsar connector is tested against a real broker instead
   by nature. The Pulsar sink is at-least-once with the emit id in a message
   property, or effectively-once with broker deduplication under the
   conditions documented in `streaming-pulsar`.
+- Messages written by the Pulsar sink carry a wrong *publish* time: Magnetar
+  1.8's moonpool engine, which the connector runs on, anchors its wall clock
+  at 2024-01-01. Their *event* time is right, and reading is not affected.
 - **State lives in the KV**, one commit per epoch: throughput and state size
   are bounded by the store (Materia KV: 5 MB per value, 10 MB per command).
 - **Aggregations only**: tumbling and sliding windows; no joins, no session
