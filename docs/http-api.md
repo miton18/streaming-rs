@@ -99,8 +99,10 @@ aggregate node additionally has one `emitter` actor):
   is not `commit`, from every *alive* worker's snapshot, each with a `worker` field.
 - `state`: the worst instance state, in the order `failed`, `starting`,
   `paused`, `draining`, `running`, `stopped`; `"pending"` when there is no instance.
-- `busy`, `idle`, `backpressured`: those of the instance with the highest `busy`
-  (the hot instance decides whether the node limits the graph).
+- `busy`, `backpressured`: each the highest value found over the instances,
+  independently: an instance waiting for room downstream is never the busiest
+  one (for an aggregate node, typically its `emitter` instance waits while its
+  `aggregate` instances work). `idle`: `1 - busy - backpressured`, floored at 0.
 - `records_in`, `in_per_sec`: summed over instances whose kind is not `emitter`.
 - `records_out`, `out_per_sec`: summed over instances whose kind is not
   `aggregate`; if the node has no `emitter` instance, summed over all.

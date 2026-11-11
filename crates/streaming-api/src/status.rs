@@ -442,14 +442,19 @@ fn aggregate_node(
     let not_aggregate = |a: &ActorSnapshot| a.kind != ActorKind::Aggregate;
     let out_pick: &dyn Fn(&ActorSnapshot) -> bool = if has_emitter { &not_aggregate } else { &any };
 
-    // The hot instance: highest busy, first one on a tie.
-    let hot = instances
-        .iter()
-        .map(|(_, a)| *a)
-        .fold(None, |best: Option<&ActorSnapshot>, a| match best {
-            Some(b) if b.busy >= a.busy => Some(b),
-            _ => Some(a),
-        });
+    // A node runs as several actors: one per slice, plus the emitting half of
+    // an aggregate. For one actor the three phases exclude each other, so the
+    // actor waiting for room downstream is never the busiest one: each ratio
+    // is the worst found over the instances, on its own.
+    let worst =
+        |f: fn(&ActorSnapshot) -> f64| instances.iter().map(|(_, a)| f(a)).fold(0.0_f64, f64::max);
+    let busy = worst(|a| a.busy);
+    let backpressured = worst(|a| a.backpressured);
+    let idle = if instances.is_empty() {
+        0.0
+    } else {
+        (1.0 - busy - backpressured).max(0.0)
+    };
     let state = instances
         .iter()
         .map(|(_, a)| NodeState::from(a.state))
@@ -476,9 +481,9 @@ fn aggregate_node(
         records_out: sum_u(|a| a.records_out, out_pick),
         in_per_sec: sum(|a| a.in_per_sec, &not_emitter),
         out_per_sec: sum(|a| a.out_per_sec, out_pick),
-        busy: hot.map_or(0.0, |a| a.busy),
-        idle: hot.map_or(0.0, |a| a.idle),
-        backpressured: hot.map_or(0.0, |a| a.backpressured),
+        busy,
+        idle,
+        backpressured,
         queue_len: sum_u(|a| u64::from(a.queue_len), &any),
         queue_cap: sum_u(|a| u64::from(a.queue_cap), &any),
         late_dropped: sum_u(|a| a.late_dropped, &any),
@@ -1008,15 +1013,15 @@ mod tests {
     }
 
     #[test]
-    fn hot_instance_decides_ratios() {
+    fn each_ratio_is_the_worst_over_the_instances() {
         let a = with_load(actor("count", ActorKind::Aggregate), 0.2, 0.1);
         let b = with_load(actor("count", ActorKind::Aggregate), 0.9, 0.05);
         let detail = detail_of(&[alive("w1", vec![a, b], vec![])]);
         let count = node_of(&detail, "count");
         assert_eq!(count.actors, 2);
         assert_eq!(count.busy, 0.9);
-        assert!((count.idle - 0.05).abs() < 1e-9);
-        assert_eq!(count.backpressured, 0.05);
+        assert_eq!(count.backpressured, 0.1);
+        assert!(count.idle.abs() < 1e-9);
         assert_eq!(count.kind, "aggregate");
         assert_eq!(count.input_type.as_deref(), Some("*"));
         assert_eq!(count.description, "t/count@1 description");
@@ -1360,6 +1365,23 @@ mod tests {
             with_load(actor("out", ActorKind::Sink), 0.6, 0.0),
         ]);
         assert_eq!(bottleneck.unwrap().node, node("out"));
+    }
+
+    #[test]
+    fn a_waiting_emitter_is_not_hidden_by_busy_aggregates() {
+        // A sink slower than the windows close: the emitting half of `count`
+        // waits for it, while its accumulating halves keep working upstream.
+        let (bottleneck, detail) = bottleneck_of(vec![
+            with_load(actor("events", ActorKind::Source), 0.3, 0.0),
+            with_load(actor("count", ActorKind::Aggregate), 0.2, 0.0),
+            with_load(actor("count", ActorKind::Emitter), 0.0, 1.0),
+            with_load(actor("out", ActorKind::Sink), 1.0, 0.0),
+        ]);
+        let count = node_of(&detail, "count");
+        assert_eq!((count.busy, count.backpressured), (0.2, 1.0));
+        let bottleneck = bottleneck.unwrap();
+        assert_eq!(bottleneck.node, node("out"));
+        assert!(bottleneck.reason.contains("count"), "{}", bottleneck.reason);
     }
 
     #[test]
