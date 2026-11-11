@@ -226,6 +226,7 @@ fn worker_snapshot(worker: &str, graph: &str) -> WorkerSnapshot {
             in_flight_epochs: 1,
             fenced: 0,
             restarts: 0,
+            throttled: 0,
             last_error: None,
         }],
         tenants: [(

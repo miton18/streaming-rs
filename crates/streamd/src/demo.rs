@@ -228,7 +228,10 @@ pub fn graphs() -> Vec<GraphSpec> {
         "flush_interval": "500ms",
         "max_batch": 500,
         "chunk_size": 100,
-        "mailbox_capacity": 4
+        "mailbox_capacity": 4,
+        // Low enough for a slow sink behind the aggregate to hold the source
+        // back within half a minute.
+        "max_pending_windows": 3
     });
     let specs = [
         json!({

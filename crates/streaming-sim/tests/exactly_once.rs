@@ -243,3 +243,32 @@ fn exactly_once_with_a_silent_partition() {
     let report = run(scenario, 3, true, 10);
     assert_clean(&report);
 }
+
+#[test]
+fn exactly_once_behind_a_slow_sink() {
+    // The sink behind the aggregate takes about as long as a window lasts,
+    // and a slice may only have one closed window waiting: the sources spend
+    // their time held back by the emitter, across reboots.
+    let scenario = Scenario {
+        sink_latency_ms: 3_000,
+        max_pending_windows: 1,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_every_window_held_back() {
+    // The tightest gate with workers fighting over every slice and an
+    // operator interfering: holding back must never turn into a deadlock.
+    let scenario = Scenario {
+        max_pending_windows: 1,
+        duel: true,
+        operator: true,
+        slide: Duration::from_millis(500),
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}

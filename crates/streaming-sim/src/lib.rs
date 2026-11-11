@@ -151,6 +151,8 @@ pub struct SimEnv {
     pub fault_scale: f64,
     /// Upper bound of the latency of an ordinary KV command, in milliseconds.
     pub kv_latency_ms: u64,
+    /// Upper bound of the delay of one write to the per-key counts sink.
+    pub sink_latency_ms: u64,
     /// Number of actions the operator took, per kind.
     pub operator_actions: Mutex<BTreeMap<&'static str, u64>>,
     /// What the auditor found wrong while the run was in progress.
@@ -166,6 +168,7 @@ impl SimEnv {
         Arc::new(Self {
             fault_scale: scenario.fault_scale,
             kv_latency_ms: scenario.kv_latency_ms.max(1),
+            sink_latency_ms: scenario.sink_latency_ms.max(1),
             kv: MemKv::shared(),
             log: MemLog::with_retention(scenario.partitions, true),
             counts: Arc::default(),
@@ -424,12 +427,14 @@ struct ChaosSink<P: Providers> {
     probe: Arc<SinkProbe>,
     providers: P,
     render: Render,
+    /// Upper bound of the delay of one write, in milliseconds.
+    latency_ms: u64,
 }
 
 #[async_trait]
 impl<P: Providers> SinkConnector for ChaosSink<P> {
     async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
-        let delay = self.providers.random().random_range(0..8_u64);
+        let delay = self.providers.random().random_range(0..self.latency_ms);
         let _ = self
             .providers
             .time()
@@ -516,12 +521,18 @@ pub fn registry<P: Providers>(env: &Arc<SimEnv>) -> Registry<P> {
     ];
     for (op, probe, render) in sinks {
         let env = env.clone();
+        let latency_ms = if op == "sim/counts@1" {
+            env.sink_latency_ms
+        } else {
+            8
+        };
         registry.register_sink(op, "Recording sink.", TypeTag::Any, move |context, _| {
             Ok(Arc::new(ChaosSink {
                 env: env.clone(),
                 probe: probe.clone(),
                 providers: context.providers.clone(),
                 render,
+                latency_ms,
             }) as Arc<dyn SinkConnector>)
         });
     }
@@ -556,6 +567,12 @@ pub struct Scenario {
     pub fault_scale: f64,
     /// Upper bound of the latency of an ordinary KV command, in milliseconds.
     pub kv_latency_ms: u64,
+    /// Upper bound of the delay of one write to the per-key counts sink, the
+    /// one behind the aggregate, in milliseconds.
+    pub sink_latency_ms: u64,
+    /// Closed windows a slice may have waiting to be emitted before it stops
+    /// reading (`0`: no limit).
+    pub max_pending_windows: usize,
     /// Silence after which a fully-read partition follows the wall clock.
     pub idle_timeout: Duration,
     /// Number of partitions, among the last ones, that never receive an event.
@@ -584,6 +601,8 @@ impl Default for Scenario {
             operator: false,
             fault_scale: 1.0,
             kv_latency_ms: 6,
+            sink_latency_ms: 8,
+            max_pending_windows: 16,
             idle_timeout: Duration::from_millis(1_500),
             silent_partitions: 0,
             duel: false,
@@ -644,6 +663,7 @@ impl Scenario {
                 "chunk_size": 7,
                 "mailbox_capacity": 2,
                 "max_in_flight_epochs": 2,
+                "max_pending_windows": self.max_pending_windows,
                 // Above three times the slowest store command of `ChaosKv`.
                 "gc_grace": "2s"
             },
@@ -1157,6 +1177,7 @@ impl Workload for Driver {
         let kv: DynKv = env.kv.clone();
         let mut fenced = 0;
         let mut restarts = 0;
+        let mut throttled = 0;
         for key in env.kv.keys() {
             if key.starts_with("cluster:metrics:")
                 && let Ok(Some(snapshot)) = kv.get_json::<WorkerSnapshot>(&key).await
@@ -1171,10 +1192,19 @@ impl Workload for Driver {
                     .iter()
                     .map(|slice| slice.restarts)
                     .sum::<u64>();
+                throttled += snapshot
+                    .slices
+                    .iter()
+                    .map(|slice| slice.throttled)
+                    .sum::<u64>();
             }
         }
         assert_sometimes!(fenced > 0, "a worker lost a commit to another worker");
         assert_sometimes!(restarts > 0, "a slice restarted from its last commit");
+        assert_sometimes!(
+            throttled > 0,
+            "a slice stopped reading until emission caught up"
+        );
         assert_sometimes!(
             *env.kv_replies_lost.lock() > 0,
             "a KV reply was lost after the command applied"

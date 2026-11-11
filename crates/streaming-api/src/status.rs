@@ -764,6 +764,7 @@ pub fn graph_detail(
                 in_flight_epochs: 0,
                 fenced: 0,
                 restarts: 0,
+                throttled: 0,
                 last_error: None,
             },
             worker: None,
@@ -958,6 +959,7 @@ mod tests {
             in_flight_epochs: 0,
             fenced: 0,
             restarts: 0,
+            throttled: 0,
             last_error: None,
         }
     }

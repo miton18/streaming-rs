@@ -26,6 +26,10 @@ Things to try in the UI:
 - open `acme / count-per-key`, click the `archive` node, set `latency_ms` to
   `400` and apply: the sink saturates, backpressure climbs up to the source
   and the node is flagged as the bottleneck;
+- do the same on `warp10`, the sink behind the aggregate, with `15000` (more
+  than the ten-second window): the emitting half of `count` waits for it at
+  once, and half a minute later, three closed windows being held up, the
+  source stops reading too;
 - raise `rate_per_sec` on `events`;
 - pause a node, pause or drain the graph;
 - watch the per-key counts arrive in the *Résultats* tab every ten seconds.
@@ -65,6 +69,12 @@ then stops reading. Each actor accounts its time as *busy*, *idle* (waiting
 for input) or *backpressured* (waiting for room downstream). The control plane
 names the bottleneck of a graph from those three numbers: the node that works
 most of the time while what feeds it waits.
+
+Closed windows wait in the store, not on an edge, so backpressure crosses an
+aggregate differently: a slice stops reading when too many of the windows it
+closed are still waiting to be emitted (`max_pending_windows`). A sink that
+cannot keep up behind an aggregate thus ends up slowing the source down, and
+the state waiting in the store stays bounded.
 
 **Slices.** A graph is cut at its aggregate nodes. Each piece runs once per
 input partition: `src.<node>.<partition>` runs everything from one partition
@@ -200,12 +210,14 @@ stateless path, a diamond and a second-level aggregation, that:
 - once everything is emitted, no window state is left in the store and the
   commit logs stayed small.
 
-Thirteen scenarios: quiet cluster, reboots, gossip membership over the
+Fifteen scenarios: quiet cluster, reboots, gossip membership over the
 simulated network, "every worker runs every slice" (three workers fighting
 over each commit), windows wider than an epoch, allowed lateness, sliding
 windows, an operator pausing, draining and re-submitting the graph, a larger
-cluster, a slow store, eager idle watermarks, a silent partition, and a
-hostile mix of the above with three times the faults.
+cluster, a slow store, eager idle watermarks, a silent partition, a hostile
+mix of the above with three times the faults, a sink behind the aggregate
+slower than the windows close, and the tightest limit on pending windows
+with workers fighting over every slice.
 
 The gossip, the KV client and the Warp 10 sink have their own simulation
 tests. The Pulsar connector is tested against a real broker instead
@@ -225,8 +237,11 @@ what was produced.
   slices. A node cannot be scaled independently of its source.
 - **Placement** moves slices off a saturated worker but never brings them back
   together; load is the process's CPU and memory as read from `/proc`.
-- **No backpressure across an aggregate.** If the sinks behind an aggregate
-  are slow, closed windows wait in the KV; nothing slows the sources down.
+- **Backpressure crosses an aggregate by counting windows**, not records: a
+  slice stops reading once `max_pending_windows` (16 by default) of the
+  windows it closed are still waiting to be emitted. Until then a slow sink
+  behind an aggregate only shows as backpressure on the emitting half of the
+  aggregate, while closed windows wait in the KV.
 - **Sinks must be idempotent** for the result to be exactly-once. Warp 10 is
   by nature. The Pulsar sink is at-least-once with the emit id in a message
   property, or effectively-once with broker deduplication under the

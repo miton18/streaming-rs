@@ -494,6 +494,7 @@ impl<P: Providers> Worker<P> {
                     in_flight_epochs: 0,
                     fenced: book.lifetime.fenced,
                     restarts: book.lifetime.restarts,
+                    throttled: 0,
                     last_error: book.last_error.clone(),
                 });
             }

@@ -192,6 +192,7 @@ pub(crate) struct SliceMetrics {
     pub commits: AtomicU64,
     pub commit_ns: AtomicU64,
     pub in_flight: AtomicU32,
+    pub throttled: AtomicU64,
     pub last_error: Mutex<Option<String>>,
 }
 
@@ -205,6 +206,7 @@ impl SliceMetrics {
             commits: AtomicU64::new(0),
             commit_ns: AtomicU64::new(0),
             in_flight: AtomicU32::new(0),
+            throttled: AtomicU64::new(0),
             last_error: Mutex::new(None),
         })
     }
@@ -360,6 +362,7 @@ pub(crate) fn snapshot_slice(
         in_flight_epochs: metrics.in_flight.load(Ordering::Relaxed),
         fenced: lifetime.fenced,
         restarts: lifetime.restarts,
+        throttled: metrics.throttled.load(Ordering::Relaxed),
         last_error: metrics.last_error.lock().clone(),
     };
     (snapshot, sample)

@@ -146,6 +146,26 @@ enum Contribution {
 
 type AggState = HashMap<(Window, Key), (DynAcc, u64)>;
 
+/// Windows an aggregate of this slice has closed and that, as far as this
+/// instance knows, are not emitted yet. The aggregate actor adds to it; the
+/// root of the slice holds back when it grows (see `Root::throttled`).
+type Closed = Arc<Mutex<BTreeSet<Window>>>;
+
+/// What the root of a slice watches for one of its aggregates.
+struct Gate {
+    /// The slice that emits the windows of the aggregate.
+    emitter: SliceKey,
+    closed: Closed,
+}
+
+/// Whether an emitter that committed up to `upto` has emitted `window` entirely.
+fn emitted(window: &Window, upto: Option<Position>) -> bool {
+    upto.is_some_and(|at| {
+        let this = (ts_key(window.end), ts_key(window.start));
+        this < (at.0, at.1) || (this == (at.0, at.1) && at.2 == u64::MAX)
+    })
+}
+
 fn is_closed(window: &Window, lateness_ms: i64, watermark: Timestamp) -> bool {
     watermark != NO_WATERMARK && window.end.saturating_add(lateness_ms) <= watermark
 }
@@ -361,6 +381,7 @@ async fn run_transform<P: Providers>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_aggregate<P: Providers>(
     mut ctx: ActorCtx<P>,
     aggregator: Arc<dyn DynAggregator>,
@@ -369,6 +390,7 @@ async fn run_aggregate<P: Providers>(
     commits: mpsc::UnboundedSender<Contribution>,
     mut state: AggState,
     mut watermark: Timestamp,
+    closed: Closed,
 ) -> Result<(), ActorError> {
     let mut dirty: BTreeSet<(Window, Key)> = BTreeSet::new();
     loop {
@@ -426,7 +448,17 @@ async fn run_aggregate<P: Providers>(
                     changes,
                 });
                 watermark = watermark.max(barrier.watermark);
-                state.retain(|(window, _), _| !is_closed(window, lateness_ms, watermark));
+                let mut done: BTreeSet<Window> = BTreeSet::new();
+                state.retain(|(window, _), _| {
+                    let open = !is_closed(window, lateness_ms, watermark);
+                    if !open {
+                        done.insert(*window);
+                    }
+                    open
+                });
+                if !done.is_empty() {
+                    closed.lock().extend(done);
+                }
             }
         }
     }
@@ -494,6 +526,8 @@ struct Root<P: Providers> {
     owner: String,
     /// Head epoch of the log when this instance started.
     start_epoch: u64,
+    /// One per aggregate of the slice.
+    gates: Vec<Gate>,
 }
 
 impl<P: Providers> Root<P> {
@@ -542,11 +576,18 @@ impl<P: Providers> Root<P> {
             RunState::Running => {
                 if !control.paused_nodes.contains(&self.ctx.node) {
                     self.ctx.meter.metrics.set_state(ActorState::Running);
-                    if self.in_flight.len() < self.ctx.settings.max_in_flight_epochs.max(1) {
+                    if self.in_flight.len() >= self.ctx.settings.max_in_flight_epochs.max(1) {
+                        self.ctx.meter.blocked();
+                        self.wait_commit().await;
+                        self.ctx.meter.busy();
+                        return false;
+                    }
+                    if !self.throttled().await {
                         return true;
                     }
+                    // Emission is too far behind: leave it time to catch up.
                     self.ctx.meter.blocked();
-                    self.wait_commit().await;
+                    self.ctx.sleep(self.ctx.settings.flush_interval).await;
                     self.ctx.meter.busy();
                     return false;
                 }
@@ -567,6 +608,46 @@ impl<P: Providers> Root<P> {
             }
         }
         false
+    }
+
+    /// Whether emission has fallen too far behind this slice: for one of its
+    /// aggregates, more windows are closed and not emitted than
+    /// `max_pending_windows`. Backpressure cannot travel through an aggregate
+    /// the way it does along an edge, since closed windows wait in the store;
+    /// this is what carries it across.
+    ///
+    /// Costs nothing while the slice is within the limit: the emitter is only
+    /// asked where it is once the limit is passed.
+    async fn throttled(&mut self) -> bool {
+        let limit = self.ctx.settings.max_pending_windows;
+        if limit == 0 {
+            return false;
+        }
+        let mut behind = false;
+        for gate in &self.gates {
+            if gate.closed.lock().len() <= limit {
+                continue;
+            }
+            let kv = self.ctx.env.kv.as_ref();
+            let Ok(log) = self
+                .ctx
+                .persist(|| state::read_log(kv, &gate.emitter))
+                .await
+            else {
+                continue;
+            };
+            let upto = log.head().and_then(|head| head.position);
+            let left = {
+                let mut closed = gate.closed.lock();
+                closed.retain(|window| !emitted(window, upto));
+                closed.len()
+            };
+            behind |= left > limit;
+        }
+        if behind {
+            self.slice.throttled.fetch_add(1, Ordering::Relaxed);
+        }
+        behind
     }
 
     /// Emit one epoch: its header to the commit actor, its records and its
@@ -829,12 +910,6 @@ async fn run_emitter<P: Providers>(
         // once; their index entry stays until no commit record has carried a
         // change to them for `gc_grace`, so that a write issued meanwhile by
         // an instance that lost the slice is deleted too (see `state`).
-        let emitted = |window: &Window, upto: Option<Position>| {
-            upto.is_some_and(|at| {
-                let this = (ts_key(window.end), ts_key(window.start));
-                this < (at.0, at.1) || (this == (at.0, at.1) && at.2 == u64::MAX)
-            })
-        };
         for (((slice, log), found), lingering) in
             feeding.iter().zip(&logs).zip(&indexed).zip(&mut lingering)
         {
@@ -1263,6 +1338,9 @@ struct Prepared {
     ops: BTreeMap<NodeId, NodeOp>,
     start: Start,
     restored: BTreeMap<NodeId, AggState>,
+    /// Per aggregate, the windows found closed: emitted or not, the root
+    /// finds out when it matters.
+    closed: BTreeMap<NodeId, BTreeSet<Window>>,
 }
 
 /// Number of fields a log may hold before it is sealed and swept.
@@ -1303,6 +1381,7 @@ async fn prepare<P: Providers>(
     );
 
     let mut restored = BTreeMap::new();
+    let mut closed: BTreeMap<NodeId, BTreeSet<Window>> = BTreeMap::new();
     for (node, op) in &ops {
         let NodeOp::Aggregate(aggregator, lateness_ms) = op else {
             continue;
@@ -1314,6 +1393,7 @@ async fn prepare<P: Providers>(
         .await?;
         for window in windows {
             if is_closed(&window, *lateness_ms, start.watermark) {
+                closed.entry(node.clone()).or_default().insert(window);
                 continue;
             }
             let entries = persist(env, &note, || {
@@ -1330,6 +1410,7 @@ async fn prepare<P: Providers>(
         ops,
         start,
         restored,
+        closed,
     })
 }
 
@@ -1438,6 +1519,7 @@ fn start_actors<P: Providers>(
         mut ops,
         start,
         mut restored,
+        mut closed,
     } = prepared;
 
     let ident = |node: &NodeId, kind: ActorKind| ActorIdent {
@@ -1526,13 +1608,33 @@ fn start_actors<P: Providers>(
         ),
     ));
 
+    // One gate per aggregate of the slice, shared by its actor and the root.
+    let mut gates = Vec::new();
+    let mut closed_of: BTreeMap<NodeId, Closed> = BTreeMap::new();
+    for node in nodes
+        .iter()
+        .filter(|node| **node != root && topology.kind(node) == OpKind::Aggregate)
+    {
+        let set: Closed = Arc::new(Mutex::new(closed.remove(node).unwrap_or_default()));
+        gates.push(Gate {
+            emitter: SliceKey {
+                tenant: params.key.tenant.clone(),
+                graph: params.key.graph.clone(),
+                slice: SliceId::Emitter { node: node.clone() },
+            },
+            closed: set.clone(),
+        });
+        closed_of.insert(node.clone(), set);
+    }
+    let mut gates = Some(gates);
+
     let mut start = Some(start);
     for node in nodes {
         let Some(op) = ops.remove(node) else { continue };
         let actor_ctx = ctx(node, metrics[node].clone());
         let node_inputs = Inputs::new(inputs.remove(node).unwrap_or_default());
         let node_outputs = Outputs::new(outputs.remove(node).unwrap_or_default());
-        let make_root = |ctx: ActorCtx<P>, outputs: Outputs, epoch: u64| Root {
+        let make_root = |ctx: ActorCtx<P>, outputs: Outputs, epoch: u64, gates: Vec<Gate>| Root {
             ctx,
             outputs,
             commits: commits_tx.clone(),
@@ -1544,6 +1646,7 @@ fn start_actors<P: Providers>(
             stateful,
             owner: owner.clone(),
             start_epoch: epoch,
+            gates,
         };
         let actor: std::pin::Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send>> = match op
         {
@@ -1554,7 +1657,12 @@ fn start_actors<P: Providers>(
                     SliceId::Emitter { .. } => 0,
                 };
                 Box::pin(run_source(
-                    make_root(actor_ctx, node_outputs, start.epoch),
+                    make_root(
+                        actor_ctx,
+                        node_outputs,
+                        start.epoch,
+                        gates.take().unwrap_or_default(),
+                    ),
                     connector,
                     partition,
                     start,
@@ -1572,7 +1680,12 @@ fn start_actors<P: Providers>(
                     })
                     .collect();
                 Box::pin(run_emitter(
-                    make_root(actor_ctx, node_outputs, start.epoch),
+                    make_root(
+                        actor_ctx,
+                        node_outputs,
+                        start.epoch,
+                        gates.take().unwrap_or_default(),
+                    ),
                     aggregator,
                     lateness_ms,
                     feeding,
@@ -1644,6 +1757,7 @@ fn start_actors<P: Providers>(
                     commits_tx.clone(),
                     restored.remove(node).unwrap_or_default(),
                     watermark,
+                    closed_of.get(node).cloned().unwrap_or_default(),
                 ))
             }
             NodeOp::Sink(sink) => {

@@ -54,6 +54,9 @@ fn default_max_in_flight_epochs() -> usize {
 fn default_gc_grace() -> Duration {
     Duration::from_secs(30)
 }
+fn default_max_pending_windows() -> usize {
+    16
+}
 
 /// Engine settings of a graph. Every field has a default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +93,13 @@ pub struct GraphSettings {
     /// Must exceed three times the command timeout of the store.
     #[serde(with = "duration_str", default = "default_gc_grace")]
     pub gc_grace: Duration,
+    /// How many windows a slice may have closed, per aggregate, without their
+    /// results being emitted yet. Past that number the slice stops reading
+    /// until emission catches up: this is how a slow sink behind an aggregate
+    /// slows the sources down, and what bounds the state waiting in the store.
+    /// `0` removes the limit.
+    #[serde(default = "default_max_pending_windows")]
+    pub max_pending_windows: usize,
 }
 
 impl Default for GraphSettings {
@@ -104,6 +114,7 @@ impl Default for GraphSettings {
             flush_interval: default_flush_interval(),
             max_in_flight_epochs: default_max_in_flight_epochs(),
             gc_grace: default_gc_grace(),
+            max_pending_windows: default_max_pending_windows(),
         }
     }
 }

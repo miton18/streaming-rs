@@ -302,6 +302,10 @@ pub struct SliceSnapshot {
     /// Times the slice restarted on this worker.
     #[serde(default)]
     pub restarts: u64,
+    /// Times this instance held back reading because too many closed windows
+    /// were waiting to be emitted (see `max_pending_windows`).
+    #[serde(default)]
+    pub throttled: u64,
     /// Most recent error, if any.
     #[serde(default)]
     pub last_error: Option<String>,
