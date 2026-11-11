@@ -297,7 +297,7 @@ pub struct SliceSnapshot {
 pub struct TenantUsage {
     /// Actors of the tenant running on the worker.
     pub actors: u32,
-    /// Records its actors received over the last interval, per second.
+    /// Records its source actors read over the last interval, per second.
     pub in_per_sec: f64,
     /// Sum of the busy ratios of its actors: an estimate of the cores it uses.
     pub busy: f64,

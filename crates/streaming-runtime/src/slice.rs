@@ -1,0 +1,1376 @@
+//! One running slice: its actors, its epochs, its commits.
+//!
+//! A slice instance wires one actor per node, connected by bounded edges. Its
+//! *root* actor (a source partition reader, or the emitter of closed windows)
+//! cuts its input into epochs: a batch of records followed by a barrier. When
+//! every *terminal* actor (aggregates and sinks) has reported the barrier of an
+//! epoch, the *commit* actor writes the epoch to the KV in one field. The root
+//! only acknowledges its input once the epoch is committed.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use futures::FutureExt;
+use moonpool_core::{Providers, TaskProvider, TimeProvider};
+use parking_lot::Mutex;
+use streaming_core::control::{ActorKind, ActorState, GraphPlan, RunState};
+use streaming_core::data::hash_str;
+use streaming_core::ops::DynAcc;
+use streaming_core::spec::GraphSettings;
+use streaming_core::{
+    DynAggregator, DynKey, DynMap, Emit, EmitId, Key, KvError, NodeId, OpContext, OpError,
+    OpFactory, OpKind, Origin, PartitionReader, Position, Record, SinkConnector, SliceId, SliceKey,
+    SourceConnector, Timestamp, Topology, Window, WindowAssigner, WorkerId,
+};
+use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
+
+use crate::RuntimeEnv;
+use crate::mailbox::{Barrier, Input, Inputs, Msg, Outputs};
+use crate::metrics::{ActorIdent, ActorMetrics, Meter, SliceMetrics};
+use crate::scope::TaskScope;
+use crate::state::{
+    self, CommitOutcome, CommitRecord, NO_WATERMARK, NodeChanges, StateEntry, StateError,
+    WindowChanges,
+};
+
+const MIN_BACKOFF: Duration = Duration::from_millis(50);
+const MAX_BACKOFF: Duration = Duration::from_secs(2);
+
+/// What the control plane asks of a running slice.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct Control {
+    pub run: RunState,
+    pub paused_nodes: BTreeSet<NodeId>,
+}
+
+/// Why a slice instance ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SliceExit {
+    /// Stopped by the worker.
+    Stopped,
+    /// Finished its in-flight work after a drain request.
+    Drained,
+    /// Another instance of the slice committed in its place.
+    Fenced,
+    /// Something failed; the slice restarts from its last commit.
+    Failed(String),
+}
+
+/// What the worker shares with a slice instance.
+#[derive(Clone)]
+pub(crate) struct SliceShared {
+    pub metrics: Arc<SliceMetrics>,
+    pub actors: Arc<Mutex<Vec<Arc<ActorMetrics>>>>,
+    exit: Arc<Mutex<Option<SliceExit>>>,
+}
+
+impl SliceShared {
+    pub(crate) fn new() -> Self {
+        Self {
+            metrics: SliceMetrics::new(),
+            actors: Arc::new(Mutex::new(Vec::new())),
+            exit: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// The exit reason, once the instance has ended.
+    pub(crate) fn exit(&self) -> Option<SliceExit> {
+        self.exit.lock().clone()
+    }
+}
+
+/// Everything needed to run one slice instance.
+pub(crate) struct SliceParams<P: Providers> {
+    pub env: Arc<RuntimeEnv<P>>,
+    pub key: SliceKey,
+    pub topology: Arc<Topology>,
+    pub plan: Arc<GraphPlan>,
+    pub worker: WorkerId,
+    pub catch_panics: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ActorError {
+    #[error("{0}")]
+    Op(#[from] OpError),
+    #[error("{0}")]
+    State(#[from] StateError),
+    #[error("{0}")]
+    Kv(#[from] KvError),
+    #[error("actor panicked")]
+    Panicked,
+}
+
+/// Records the first exit reason of a slice and stops its actors.
+#[derive(Clone)]
+struct Exit {
+    slot: Arc<Mutex<Option<SliceExit>>>,
+    stop: CancellationToken,
+}
+
+impl Exit {
+    fn finish(&self, exit: SliceExit) {
+        self.slot.lock().get_or_insert(exit);
+        self.stop.cancel();
+    }
+}
+
+enum NodeOp {
+    Source(Arc<dyn SourceConnector>),
+    Emitter(Arc<dyn DynAggregator>, i64),
+    Map(Arc<dyn DynMap>),
+    Key(Arc<dyn DynKey>),
+    Window(Arc<dyn WindowAssigner>),
+    Aggregate(Arc<dyn DynAggregator>, i64),
+    Sink(Arc<dyn SinkConnector>),
+}
+
+/// What terminal actors and the root tell the commit actor.
+enum Contribution {
+    /// From the root: epoch `epoch` ends at `position` with `watermark`.
+    Header {
+        epoch: u64,
+        position: Option<Position>,
+        watermark: Timestamp,
+    },
+    /// From an aggregate: its state changes for the epoch.
+    State { epoch: u64, changes: NodeChanges },
+    /// From a sink: everything of the epoch is written.
+    Ack { epoch: u64 },
+}
+
+type AggState = HashMap<(Window, Key), (DynAcc, u64)>;
+
+fn is_closed(window: &Window, lateness_ms: i64, watermark: Timestamp) -> bool {
+    watermark != NO_WATERMARK && window.end.saturating_add(lateness_ms) <= watermark
+}
+
+/// Order-preserving mapping of a timestamp onto an unsigned position component.
+fn ts_key(ts: Timestamp) -> u64 {
+    (ts as u64) ^ (1 << 63)
+}
+
+fn bump(backoff: &mut Duration) -> Duration {
+    let current = *backoff;
+    *backoff = (current * 2).min(MAX_BACKOFF);
+    current
+}
+
+fn context<P: Providers>(env: &RuntimeEnv<P>, key: &SliceKey, node: &NodeId) -> OpContext<P> {
+    OpContext {
+        providers: env.providers.clone(),
+        clock: env.clock.clone(),
+        secrets: env.secrets.clone(),
+        tenant: key.tenant.clone(),
+        graph: key.graph.clone(),
+        node: node.clone(),
+    }
+}
+
+fn lateness_of<P: Providers>(
+    env: &RuntimeEnv<P>,
+    topology: &Topology,
+    aggregate: &NodeId,
+) -> Result<i64, OpError> {
+    let window = topology
+        .inputs
+        .get(aggregate)
+        .and_then(|inputs| inputs.first())
+        .ok_or_else(|| OpError::Config(format!("aggregate `{aggregate}` has no window input")))?;
+    let spec = topology
+        .spec
+        .node(window)
+        .ok_or_else(|| OpError::Config(format!("unknown node `{window}`")))?;
+    match env.registry.get(&spec.op) {
+        Some((_, OpFactory::Window(factory))) => {
+            Ok(factory(&spec.config)?.allowed_lateness().as_millis() as i64)
+        }
+        _ => Err(OpError::Config(format!(
+            "`{window}` is not a window operator known to this worker"
+        ))),
+    }
+}
+
+fn build_op<P: Providers>(
+    env: &RuntimeEnv<P>,
+    topology: &Topology,
+    key: &SliceKey,
+    node: &NodeId,
+    is_root: bool,
+) -> Result<NodeOp, OpError> {
+    let spec = topology
+        .spec
+        .node(node)
+        .ok_or_else(|| OpError::Config(format!("unknown node `{node}`")))?;
+    let (_, factory) = env.registry.get(&spec.op).ok_or_else(|| {
+        OpError::Config(format!(
+            "operator `{}` is not compiled into this worker",
+            spec.op
+        ))
+    })?;
+    Ok(match factory {
+        OpFactory::Source(factory) => {
+            NodeOp::Source(factory(&context(env, key, node), &spec.config)?)
+        }
+        OpFactory::Sink(factory) => NodeOp::Sink(factory(&context(env, key, node), &spec.config)?),
+        OpFactory::Map(factory) => NodeOp::Map(factory(&spec.config)?),
+        OpFactory::Key(factory) => NodeOp::Key(factory(&spec.config)?),
+        OpFactory::Window(factory) => NodeOp::Window(factory(&spec.config)?),
+        OpFactory::Aggregate(factory) => {
+            let aggregator = factory(&spec.config)?;
+            let lateness = lateness_of(env, topology, node)?;
+            if is_root {
+                NodeOp::Emitter(aggregator, lateness)
+            } else {
+                NodeOp::Aggregate(aggregator, lateness)
+            }
+        }
+    })
+}
+
+/// What every actor of a slice holds.
+struct ActorCtx<P: Providers> {
+    env: Arc<RuntimeEnv<P>>,
+    key: SliceKey,
+    node: NodeId,
+    node_hash: u64,
+    meter: Meter<P>,
+    control: watch::Receiver<Control>,
+    settings: GraphSettings,
+}
+
+impl<P: Providers> ActorCtx<P> {
+    async fn sleep(&self, duration: Duration) {
+        let _ = self.env.providers.time().sleep(duration).await;
+    }
+
+    /// Suspend while the node is paused by the control plane.
+    async fn wait_unpaused(&mut self) {
+        loop {
+            if !self
+                .control
+                .borrow_and_update()
+                .paused_nodes
+                .contains(&self.node)
+            {
+                self.meter.metrics.set_state(ActorState::Running);
+                return;
+            }
+            self.meter.metrics.set_state(ActorState::Paused);
+            self.meter.idle();
+            if self.control.changed().await.is_err() {
+                return futures::future::pending().await;
+            }
+        }
+    }
+
+    /// An operator failed on a record: the slice fails and restarts from its
+    /// last commit, so that no record is ever dropped silently.
+    fn op_error(&self, error: OpError) -> ActorError {
+        self.meter.metrics.error(error.to_string());
+        ActorError::Op(error)
+    }
+}
+
+async fn run_transform<P: Providers>(
+    mut ctx: ActorCtx<P>,
+    mut inputs: Inputs,
+    outputs: Outputs,
+    mut transform: impl FnMut(&Record, u64, &mut Vec<Record>) -> Result<(), OpError> + Send,
+) -> Result<(), ActorError> {
+    loop {
+        ctx.wait_unpaused().await;
+        ctx.meter.idle();
+        match inputs.next().await {
+            Input::Records(records) => {
+                ctx.meter.busy();
+                ctx.meter.records_in(records.len());
+                let mut out = Vec::with_capacity(records.len());
+                for record in &records {
+                    transform(record, ctx.node_hash, &mut out).map_err(|e| ctx.op_error(e))?;
+                }
+                if !out.is_empty() {
+                    ctx.meter.records_out(out.len());
+                    outputs.send(&ctx.meter, Msg::Records(out)).await;
+                }
+            }
+            Input::Barrier(barrier) => {
+                ctx.meter.busy();
+                outputs.send(&ctx.meter, Msg::Barrier(barrier)).await;
+            }
+        }
+    }
+}
+
+async fn run_aggregate<P: Providers>(
+    mut ctx: ActorCtx<P>,
+    aggregator: Arc<dyn DynAggregator>,
+    lateness_ms: i64,
+    mut inputs: Inputs,
+    commits: mpsc::UnboundedSender<Contribution>,
+    mut state: AggState,
+    mut watermark: Timestamp,
+) -> Result<(), ActorError> {
+    let mut dirty: BTreeSet<(Window, Key)> = BTreeSet::new();
+    loop {
+        ctx.wait_unpaused().await;
+        ctx.meter.idle();
+        match inputs.next().await {
+            Input::Records(records) => {
+                ctx.meter.busy();
+                ctx.meter.records_in(records.len());
+                for record in &records {
+                    let (Some(window), Some(key)) = (record.window, record.key.as_ref()) else {
+                        return Err(ctx.op_error(OpError::Failed(
+                            "a record reached an aggregate without key and window".into(),
+                        )));
+                    };
+                    if is_closed(&window, lateness_ms, watermark) {
+                        ctx.meter
+                            .metrics
+                            .late_dropped
+                            .fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let slot = state
+                        .entry((window, key.clone()))
+                        .or_insert_with(|| (aggregator.init(), 0));
+                    aggregator
+                        .add(&mut slot.0, &record.value)
+                        .map_err(|e| ctx.op_error(e))?;
+                    dirty.insert((window, key.clone()));
+                }
+            }
+            Input::Barrier(barrier) => {
+                ctx.meter.busy();
+                let mut windows: BTreeMap<Window, Vec<StateEntry>> = BTreeMap::new();
+                for (window, key) in std::mem::take(&mut dirty) {
+                    if let Some((acc, last_epoch)) = state.get_mut(&(window, key.clone())) {
+                        let bytes = aggregator.encode(acc).map_err(|e| ctx.op_error(e))?;
+                        windows.entry(window).or_default().push(StateEntry {
+                            key,
+                            acc: bytes,
+                            prev_epoch: *last_epoch,
+                        });
+                        *last_epoch = barrier.epoch;
+                    }
+                }
+                let changes = NodeChanges {
+                    node: ctx.node.clone(),
+                    windows: windows
+                        .into_iter()
+                        .map(|(window, entries)| WindowChanges { window, entries })
+                        .collect(),
+                };
+                let _ = commits.send(Contribution::State {
+                    epoch: barrier.epoch,
+                    changes,
+                });
+                watermark = watermark.max(barrier.watermark);
+                state.retain(|(window, _), _| !is_closed(window, lateness_ms, watermark));
+            }
+        }
+    }
+}
+
+async fn run_sink<P: Providers>(
+    mut ctx: ActorCtx<P>,
+    sink: Arc<dyn SinkConnector>,
+    mut inputs: Inputs,
+    commits: mpsc::UnboundedSender<Contribution>,
+) -> Result<(), ActorError> {
+    loop {
+        ctx.wait_unpaused().await;
+        ctx.meter.idle();
+        match inputs.next().await {
+            Input::Records(records) => {
+                ctx.meter.busy();
+                ctx.meter.records_in(records.len());
+                let batch: Vec<Emit> = records
+                    .iter()
+                    .map(|record| {
+                        let origin = record.origin.derive(ctx.node_hash, 0);
+                        Emit {
+                            id: EmitId::new(&ctx.key.slice, &origin),
+                            origin,
+                            ts: record.ts,
+                            key: record.key.clone(),
+                            value: record.value.clone(),
+                        }
+                    })
+                    .collect();
+                let mut backoff = MIN_BACKOFF;
+                // The same elements with the same ids are retried until the sink
+                // takes them: at-least-once delivery of idempotent writes.
+                while let Err(error) = sink.write(&batch).await {
+                    ctx.meter.metrics.error(error.to_string());
+                    ctx.sleep(bump(&mut backoff)).await;
+                }
+                ctx.meter.records_out(batch.len());
+            }
+            Input::Barrier(barrier) => {
+                let _ = commits.send(Contribution::Ack {
+                    epoch: barrier.epoch,
+                });
+            }
+        }
+    }
+}
+
+/// State shared by the two kinds of root actors: epoch numbering, in-flight
+/// accounting and reaction to the control plane.
+struct Root<P: Providers> {
+    ctx: ActorCtx<P>,
+    outputs: Outputs,
+    commits: mpsc::UnboundedSender<Contribution>,
+    committed: watch::Receiver<u64>,
+    in_flight: VecDeque<(u64, Option<Position>)>,
+    epoch: u64,
+    slice: Arc<SliceMetrics>,
+    exit: Exit,
+}
+
+impl<P: Providers> Root<P> {
+    /// Forget the epochs that got committed; returns the last position they covered.
+    fn settle(&mut self) -> Option<Position> {
+        let committed = *self.committed.borrow_and_update();
+        let mut position = None;
+        while self
+            .in_flight
+            .front()
+            .is_some_and(|(epoch, _)| *epoch <= committed)
+        {
+            if let Some((_, Some(covered))) = self.in_flight.pop_front() {
+                position = Some(covered);
+            }
+        }
+        self.slice
+            .in_flight
+            .store(self.in_flight.len() as u32, Ordering::Relaxed);
+        position
+    }
+
+    async fn wait_commit(&mut self) {
+        if self.committed.changed().await.is_err() {
+            futures::future::pending::<()>().await;
+        }
+    }
+
+    /// Whether a new epoch may start now. `false` means something changed
+    /// (a commit landed, the control plane spoke): go round the loop again.
+    async fn ready(&mut self) -> bool {
+        let control = self.ctx.control.borrow_and_update().clone();
+        match control.run {
+            RunState::Draining | RunState::Stopped => {
+                if self.in_flight.is_empty() {
+                    self.ctx.meter.metrics.set_state(ActorState::Stopped);
+                    self.exit.finish(SliceExit::Drained);
+                    return futures::future::pending().await;
+                }
+                self.ctx.meter.metrics.set_state(ActorState::Draining);
+                self.ctx.meter.blocked();
+                self.wait_commit().await;
+                return false;
+            }
+            RunState::Paused => {}
+            RunState::Running => {
+                if !control.paused_nodes.contains(&self.ctx.node) {
+                    self.ctx.meter.metrics.set_state(ActorState::Running);
+                    if self.in_flight.len() < self.ctx.settings.max_in_flight_epochs.max(1) {
+                        return true;
+                    }
+                    self.ctx.meter.blocked();
+                    self.wait_commit().await;
+                    self.ctx.meter.busy();
+                    return false;
+                }
+            }
+        }
+        self.ctx.meter.metrics.set_state(ActorState::Paused);
+        self.ctx.meter.idle();
+        moonpool_core::select! {
+            changed = self.ctx.control.changed() => {
+                if changed.is_err() {
+                    futures::future::pending::<()>().await;
+                }
+            }
+            changed = self.committed.changed() => {
+                if changed.is_err() {
+                    futures::future::pending::<()>().await;
+                }
+            }
+        }
+        false
+    }
+
+    /// Emit one epoch: its header to the commit actor, its records and its
+    /// barrier downstream.
+    async fn emit(
+        &mut self,
+        records: Vec<Record>,
+        position: Option<Position>,
+        watermark: Timestamp,
+    ) {
+        self.epoch += 1;
+        let epoch = self.epoch;
+        let _ = self.commits.send(Contribution::Header {
+            epoch,
+            position,
+            watermark,
+        });
+        self.in_flight.push_back((epoch, position));
+        self.slice
+            .in_flight
+            .store(self.in_flight.len() as u32, Ordering::Relaxed);
+        self.ctx.meter.records_out(records.len());
+        let chunk = self.ctx.settings.chunk_size.max(1);
+        let mut records = records;
+        while !records.is_empty() {
+            let rest = records.split_off(chunk.min(records.len()));
+            self.outputs
+                .send(
+                    &self.ctx.meter,
+                    Msg::Records(std::mem::replace(&mut records, rest)),
+                )
+                .await;
+        }
+        self.outputs
+            .send(&self.ctx.meter, Msg::Barrier(Barrier { epoch, watermark }))
+            .await;
+    }
+}
+
+struct Start {
+    epoch: u64,
+    position: Option<Position>,
+    watermark: Timestamp,
+}
+
+async fn run_source<P: Providers>(
+    mut root: Root<P>,
+    connector: Arc<dyn SourceConnector>,
+    partition: u32,
+    start: Start,
+) -> Result<(), ActorError> {
+    let settings = root.ctx.settings.clone();
+    let out_of_orderness = settings.max_out_of_orderness.as_millis() as i64;
+    let idle_epoch_interval = settings.flush_interval.max(Duration::from_millis(100));
+    let mut reader: Option<Box<dyn PartitionReader>> = None;
+    let mut position = start.position;
+    let mut watermark = start.watermark;
+    let mut max_ts = Timestamp::MIN;
+    let mut idle_since: Option<Duration> = None;
+    let mut last_idle_epoch: Option<Duration> = None;
+    let mut backoff = MIN_BACKOFF;
+    loop {
+        let acked = root.settle();
+        if let (Some(upto), Some(reader)) = (acked, reader.as_mut())
+            && let Err(error) = reader.ack(upto).await
+        {
+            root.ctx.meter.metrics.error(error.to_string());
+        }
+        if !root.ready().await {
+            continue;
+        }
+        let Some(open) = reader.as_mut() else {
+            root.ctx.meter.busy();
+            match connector.open(partition, position).await {
+                Ok(opened) => reader = Some(opened),
+                Err(error) => {
+                    root.ctx.meter.metrics.error(error.to_string());
+                    root.ctx.meter.idle();
+                    root.ctx.sleep(bump(&mut backoff)).await;
+                }
+            }
+            continue;
+        };
+        root.ctx.meter.idle();
+        let polled = open.poll(settings.max_batch.max(1), settings.linger).await;
+        root.ctx.meter.busy();
+        let mut polled = match polled {
+            Ok(polled) => {
+                backoff = MIN_BACKOFF;
+                polled
+            }
+            Err(error) => {
+                root.ctx.meter.metrics.error(error.to_string());
+                reader = None;
+                root.ctx.meter.idle();
+                root.ctx.sleep(bump(&mut backoff)).await;
+                continue;
+            }
+        };
+        // Redeliveries: keep only what lies strictly after what was already read.
+        let mut last = position;
+        polled.retain(|record| {
+            let fresh = last.is_none_or(|seen| record.position > seen);
+            if fresh {
+                last = Some(record.position);
+            }
+            fresh
+        });
+
+        let mut new_watermark = watermark;
+        if polled.is_empty() {
+            let now = root.ctx.env.providers.time().now();
+            let since = *idle_since.get_or_insert(now);
+            let due =
+                last_idle_epoch.is_none_or(|at| now.saturating_sub(at) >= idle_epoch_interval);
+            if now.saturating_sub(since) >= settings.idle_timeout && due {
+                match open.end_position().await {
+                    Ok(end) => {
+                        let caught_up = match (end, position) {
+                            (None, _) => true,
+                            (Some(end), Some(read)) => read >= end,
+                            (Some(_), None) => false,
+                        };
+                        if caught_up {
+                            // Nothing left to read and nothing arrived for a while: let
+                            // event time follow the wall clock so windows can close.
+                            new_watermark = watermark
+                                .max(root.ctx.env.clock.now_ms().saturating_sub(out_of_orderness));
+                        }
+                    }
+                    Err(error) => root.ctx.meter.metrics.error(error.to_string()),
+                }
+            }
+            if new_watermark == watermark {
+                continue;
+            }
+            last_idle_epoch = Some(now);
+        } else {
+            idle_since = None;
+            root.ctx.meter.records_in(polled.len());
+            for record in &polled {
+                max_ts = max_ts.max(record.event_time);
+            }
+            new_watermark = watermark.max(max_ts.saturating_sub(out_of_orderness));
+        }
+
+        let records: Vec<Record> = polled
+            .into_iter()
+            .map(|record| Record {
+                value: record.value,
+                ts: record.event_time,
+                key: None,
+                window: None,
+                origin: Origin::source(record.position),
+            })
+            .collect();
+        position = last;
+        watermark = new_watermark;
+        root.emit(records, position, watermark).await;
+    }
+}
+
+async fn run_emitter<P: Providers>(
+    mut root: Root<P>,
+    aggregator: Arc<dyn DynAggregator>,
+    lateness_ms: i64,
+    feeding: Vec<SliceKey>,
+    start: Start,
+) -> Result<(), ActorError> {
+    let kv = root.ctx.env.kv.clone();
+    let node = root.ctx.node.clone();
+    let flush_interval = root.ctx.settings.flush_interval;
+    let max_batch = root.ctx.settings.max_batch.max(1);
+    // Position of the last emitted element: (window end, window start, index),
+    // the index being `u64::MAX` once the window is complete.
+    let mut position = start.position;
+    let mut committed = start.position;
+    let mut backoff = MIN_BACKOFF;
+    loop {
+        if let Some(covered) = root.settle() {
+            committed = Some(covered);
+        }
+        if !root.ready().await {
+            continue;
+        }
+        root.ctx.meter.busy();
+
+        // Logs first: they give, in one read per slice, the watermark and the
+        // commits that may not be materialized yet.
+        let mut logs = Vec::with_capacity(feeding.len());
+        let mut global = Timestamp::MAX;
+        let mut failed = None;
+        for slice in &feeding {
+            match state::read_log(kv.as_ref(), slice).await {
+                Ok(log) => {
+                    global = global.min(log.head().map_or(NO_WATERMARK, |head| head.watermark));
+                    logs.push(log);
+                }
+                Err(StateError::Kv(error)) => {
+                    failed = Some(error);
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut windows = BTreeSet::new();
+        if failed.is_none() {
+            for (slice, log) in feeding.iter().zip(&logs) {
+                match state::list_windows(kv.as_ref(), slice, &node, &log.records).await {
+                    Ok(found) => windows.extend(found),
+                    Err(error) => {
+                        failed = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(error) = failed {
+            root.ctx.meter.metrics.error(error.to_string());
+            root.ctx.meter.idle();
+            root.ctx.sleep(bump(&mut backoff)).await;
+            continue;
+        }
+        backoff = MIN_BACKOFF;
+
+        // Windows whose emission is committed are garbage, including any
+        // resurrected by a fenced worker finishing late.
+        let emitted = |window: &Window, upto: Option<Position>| {
+            upto.is_some_and(|at| {
+                let this = (ts_key(window.end), ts_key(window.start));
+                this < (at.0, at.1) || (this == (at.0, at.1) && at.2 == u64::MAX)
+            })
+        };
+        for window in windows.iter().filter(|window| emitted(window, committed)) {
+            for slice in &feeding {
+                if let Err(error) = state::drop_window(kv.as_ref(), slice, &node, window).await {
+                    root.ctx.meter.metrics.error(error.to_string());
+                }
+            }
+        }
+
+        let ready: Vec<Window> = windows
+            .into_iter()
+            .filter(|window| !feeding.is_empty() && is_closed(window, lateness_ms, global))
+            .filter(|window| !emitted(window, position))
+            .collect();
+        if ready.is_empty() {
+            root.ctx.meter.idle();
+            root.ctx.sleep(flush_interval).await;
+            continue;
+        }
+
+        'windows: for window in ready {
+            // A closed window is frozen: every feeding slice has a committed
+            // watermark past its end, so no later commit can change it.
+            let mut merged: BTreeMap<Key, DynAcc> = BTreeMap::new();
+            for (slice, log) in feeding.iter().zip(&logs) {
+                let partial = match state::read_window(
+                    kv.as_ref(),
+                    slice,
+                    &node,
+                    &window,
+                    &log.records,
+                )
+                .await
+                {
+                    Ok(partial) => partial,
+                    Err(error) => {
+                        root.ctx.meter.metrics.error(error.to_string());
+                        root.ctx.sleep(bump(&mut backoff)).await;
+                        break 'windows;
+                    }
+                };
+                for (key, (bytes, _)) in partial {
+                    let acc = aggregator
+                        .decode(&bytes)
+                        .map_err(|e| root.ctx.op_error(e))?;
+                    match merged.get_mut(&key) {
+                        Some(existing) => aggregator
+                            .merge(existing, &acc)
+                            .map_err(|e| root.ctx.op_error(e))?,
+                        None => {
+                            merged.insert(key, acc);
+                        }
+                    }
+                }
+            }
+            let window_position = (ts_key(window.end), ts_key(window.start));
+            let resume = match position {
+                Some(at) if (at.0, at.1) == window_position => at.2 + 1,
+                _ => 0,
+            };
+            let mut results = Vec::with_capacity(merged.len());
+            for (index, (key, acc)) in merged.iter().enumerate() {
+                if (index as u64) < resume {
+                    continue;
+                }
+                let value = aggregator
+                    .finish(acc, window, key)
+                    .map_err(|e| root.ctx.op_error(e))?;
+                results.push((
+                    index as u64,
+                    Record {
+                        value,
+                        ts: window.end - 1,
+                        key: Some(key.clone()),
+                        window: Some(window),
+                        origin: Origin::source(Position(
+                            window_position.0,
+                            window_position.1,
+                            index as u64,
+                        )),
+                    },
+                ));
+            }
+            root.ctx.meter.records_in(results.len());
+            let mut results = results.into_iter().peekable();
+            loop {
+                let mut batch = Vec::with_capacity(max_batch.min(1024));
+                let mut last_index = 0;
+                while batch.len() < max_batch {
+                    let Some((index, record)) = results.next() else {
+                        break;
+                    };
+                    last_index = index;
+                    batch.push(record);
+                }
+                let complete = results.peek().is_none();
+                let at = Position(
+                    window_position.0,
+                    window_position.1,
+                    if complete { u64::MAX } else { last_index },
+                );
+                // Wait for room before each epoch, still honouring pause and drain.
+                loop {
+                    if let Some(covered) = root.settle() {
+                        committed = Some(covered);
+                    }
+                    if root.ready().await {
+                        break;
+                    }
+                }
+                root.ctx.meter.busy();
+                root.emit(batch, Some(at), window.end).await;
+                position = Some(at);
+                if complete {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+struct Pending {
+    header: Option<(Option<Position>, Timestamp)>,
+    reports: usize,
+    changes: Vec<NodeChanges>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_committer<P: Providers>(
+    ctx: ActorCtx<P>,
+    terminals: usize,
+    mut contributions: mpsc::UnboundedReceiver<Contribution>,
+    committed: watch::Sender<u64>,
+    start_epoch: u64,
+    owner: String,
+    slice: Arc<SliceMetrics>,
+    exit: Exit,
+) -> Result<(), ActorError> {
+    let kv = ctx.env.kv.clone();
+    let mut next = start_epoch + 1;
+    let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
+    // Epochs whose record is still in the log although it is materialized.
+    let mut untrimmed: Vec<u64> = if start_epoch > 0 {
+        vec![start_epoch]
+    } else {
+        Vec::new()
+    };
+    ctx.meter.metrics.set_state(ActorState::Running);
+    loop {
+        ctx.meter.idle();
+        let Some(contribution) = contributions.recv().await else {
+            return futures::future::pending().await;
+        };
+        ctx.meter.busy();
+        let (epoch, header, changes) = match contribution {
+            Contribution::Header {
+                epoch,
+                position,
+                watermark,
+            } => (epoch, Some((position, watermark)), None),
+            Contribution::State { epoch, changes } => (epoch, None, Some(changes)),
+            Contribution::Ack { epoch } => (epoch, None, None),
+        };
+        let entry = pending.entry(epoch).or_insert(Pending {
+            header: None,
+            reports: 0,
+            changes: Vec::new(),
+        });
+        match header {
+            Some(header) => entry.header = Some(header),
+            None => {
+                entry.reports += 1;
+                entry
+                    .changes
+                    .extend(changes.filter(|c| !c.windows.is_empty()));
+            }
+        }
+
+        while let Some(ready) = pending
+            .get(&next)
+            .filter(|p| p.reports == terminals)
+            .and_then(|p| p.header)
+        {
+            let mut changes = pending.remove(&next).map(|p| p.changes).unwrap_or_default();
+            changes.sort_by(|a, b| a.node.cmp(&b.node));
+            let record = CommitRecord {
+                epoch: next,
+                owner: owner.clone(),
+                position: ready.0,
+                watermark: ready.1,
+                changes,
+            };
+            let started = ctx.env.providers.time().now();
+            let mut backoff = MIN_BACKOFF;
+            let outcome = loop {
+                match state::try_commit(kv.as_ref(), &ctx.key, &record).await {
+                    Ok(outcome) => break outcome,
+                    Err(StateError::Kv(error @ KvError::TooLarge { .. })) => {
+                        return Err(error.into());
+                    }
+                    Err(StateError::Kv(error)) => {
+                        // Outcome unknown: the next attempt recognises our own record.
+                        ctx.meter.metrics.error(error.to_string());
+                        ctx.sleep(bump(&mut backoff)).await;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            if outcome == CommitOutcome::Fenced {
+                exit.finish(SliceExit::Fenced);
+                return futures::future::pending().await;
+            }
+            let mut backoff = MIN_BACKOFF;
+            while let Err(error) = state::materialize(kv.as_ref(), &ctx.key, &record).await {
+                if matches!(error, KvError::TooLarge { .. }) {
+                    return Err(error.into());
+                }
+                ctx.meter.metrics.error(error.to_string());
+                ctx.sleep(bump(&mut backoff)).await;
+            }
+            // Best effort: what is not trimmed now is trimmed after a later epoch.
+            if state::trim(kv.as_ref(), &ctx.key, &untrimmed).await.is_ok() {
+                untrimmed.clear();
+            }
+            untrimmed.push(next);
+
+            let elapsed = ctx.env.providers.time().now().saturating_sub(started);
+            slice.epoch.store(next, Ordering::Relaxed);
+            if let Some(position) = record.position {
+                *slice.position.lock() = Some(position);
+            }
+            slice.watermark.store(record.watermark, Ordering::Relaxed);
+            slice.commits.fetch_add(1, Ordering::Relaxed);
+            slice
+                .commit_ns
+                .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+            ctx.meter.records_in(1);
+            ctx.meter.records_out(1);
+            let _ = committed.send(next);
+            next += 1;
+        }
+    }
+}
+
+struct Prepared {
+    ops: BTreeMap<NodeId, NodeOp>,
+    start: Start,
+    restored: BTreeMap<NodeId, AggState>,
+}
+
+async fn prepare<P: Providers>(
+    params: &SliceParams<P>,
+    nodes: &[NodeId],
+) -> Result<Prepared, ActorError> {
+    let env = &params.env;
+    let kv = env.kv.as_ref();
+    let root = params.key.slice.root();
+    let mut ops = BTreeMap::new();
+    for node in nodes {
+        ops.insert(
+            node.clone(),
+            build_op(env, &params.topology, &params.key, node, node == root)?,
+        );
+    }
+
+    // Whatever the previous owner committed but did not finish copying out is
+    // copied out now; then only the head record needs to stay in the log.
+    let log = state::read_log(kv, &params.key).await?;
+    for record in &log.records {
+        state::materialize(kv, &params.key, record).await?;
+    }
+    if let Some((_, older)) = log.records.split_last() {
+        let epochs: Vec<u64> = older.iter().map(|record| record.epoch).collect();
+        state::trim(kv, &params.key, &epochs).await?;
+    }
+    let start = log.head().map_or(
+        Start {
+            epoch: 0,
+            position: None,
+            watermark: NO_WATERMARK,
+        },
+        |head| Start {
+            epoch: head.epoch,
+            position: head.position,
+            watermark: head.watermark,
+        },
+    );
+
+    let mut restored = BTreeMap::new();
+    for (node, op) in &ops {
+        let NodeOp::Aggregate(aggregator, lateness_ms) = op else {
+            continue;
+        };
+        let mut state = AggState::new();
+        for window in state::list_windows(kv, &params.key, node, &[]).await? {
+            if is_closed(&window, *lateness_ms, start.watermark) {
+                continue;
+            }
+            for (key, (bytes, epoch)) in
+                state::read_window(kv, &params.key, node, &window, &[]).await?
+            {
+                state.insert((window, key), (aggregator.decode(&bytes)?, epoch));
+            }
+        }
+        restored.insert(node.clone(), state);
+    }
+    Ok(Prepared {
+        ops,
+        start,
+        restored,
+    })
+}
+
+fn actor_kind(op: &NodeOp) -> ActorKind {
+    match op {
+        NodeOp::Source(_) => ActorKind::Source,
+        NodeOp::Emitter(..) => ActorKind::Emitter,
+        NodeOp::Map(_) => ActorKind::Map,
+        NodeOp::Key(_) => ActorKind::KeyBy,
+        NodeOp::Window(_) => ActorKind::Window,
+        NodeOp::Aggregate(..) => ActorKind::Aggregate,
+        NodeOp::Sink(_) => ActorKind::Sink,
+    }
+}
+
+fn spawn_actor<P: Providers>(
+    scope: &TaskScope<P>,
+    name: String,
+    metrics: Arc<ActorMetrics>,
+    exit: Exit,
+    catch_panics: bool,
+    actor: impl Future<Output = Result<(), ActorError>> + Send + 'static,
+) -> <P::Task as TaskProvider>::JoinHandle {
+    let node = metrics.ident.node.clone();
+    scope.spawn(&name, async move {
+        let result = if catch_panics {
+            AssertUnwindSafe(actor)
+                .catch_unwind()
+                .await
+                .unwrap_or(Err(ActorError::Panicked))
+        } else {
+            actor.await
+        };
+        if let Err(error) = result {
+            metrics.error(error.to_string());
+            metrics.set_state(ActorState::Failed);
+            exit.finish(SliceExit::Failed(format!("{node}: {error}")));
+        }
+    })
+}
+
+/// Run one slice instance until it is stopped, drained, fenced or fails.
+///
+/// `scope` is the slice's own scope: cancelling its token stops every actor at
+/// its current await point. The exit reason ends up in `shared`.
+pub(crate) async fn run_slice<P: Providers>(
+    params: SliceParams<P>,
+    scope: TaskScope<P>,
+    control: watch::Receiver<Control>,
+    shared: SliceShared,
+) {
+    let exit = Exit {
+        slot: shared.exit.clone(),
+        stop: scope.token().clone(),
+    };
+    let nodes = params.topology.slice_nodes(&params.key.slice);
+    let prepared = moonpool_core::select! {
+        () = scope.token().cancelled() => None,
+        prepared = prepare(&params, &nodes) => Some(prepared),
+    };
+    let handles = match prepared {
+        None => Vec::new(),
+        Some(Err(error)) => {
+            *shared.metrics.last_error.lock() = Some(error.to_string());
+            exit.finish(SliceExit::Failed(error.to_string()));
+            Vec::new()
+        }
+        Some(Ok(prepared)) => {
+            start_actors(&params, &scope, control, &shared, &exit, &nodes, prepared)
+        }
+    };
+    scope.token().cancelled().await;
+    for handle in handles {
+        let _ = handle.await;
+    }
+    let exit = shared.exit.lock().get_or_insert(SliceExit::Stopped).clone();
+    shared.metrics.set_state(match &exit {
+        SliceExit::Failed(error) => {
+            *shared.metrics.last_error.lock() = Some(error.clone());
+            ActorState::Failed
+        }
+        SliceExit::Fenced => {
+            *shared.metrics.last_error.lock() =
+                Some("fenced: another worker committed this slice".to_owned());
+            ActorState::Failed
+        }
+        SliceExit::Stopped | SliceExit::Drained => ActorState::Stopped,
+    });
+}
+
+fn start_actors<P: Providers>(
+    params: &SliceParams<P>,
+    scope: &TaskScope<P>,
+    control: watch::Receiver<Control>,
+    shared: &SliceShared,
+    exit: &Exit,
+    nodes: &[NodeId],
+    prepared: Prepared,
+) -> Vec<<P::Task as TaskProvider>::JoinHandle> {
+    let env = &params.env;
+    let topology = &params.topology;
+    let settings = topology.spec.settings.clone();
+    let now = env.providers.time().now();
+    let root = params.key.slice.root().clone();
+    let Prepared {
+        mut ops,
+        start,
+        mut restored,
+    } = prepared;
+
+    let ident = |node: &NodeId, kind: ActorKind| ActorIdent {
+        tenant: params.key.tenant.clone(),
+        graph: params.key.graph.clone(),
+        slice: params.key.slice.clone(),
+        node: node.clone(),
+        kind,
+        op: topology.descriptors[node].op.clone(),
+    };
+    let metrics: BTreeMap<NodeId, Arc<ActorMetrics>> = nodes
+        .iter()
+        .map(|node| {
+            (
+                node.clone(),
+                ActorMetrics::new(ident(node, actor_kind(&ops[node])), now),
+            )
+        })
+        .collect();
+    let commit_metrics = ActorMetrics::new(ident(&root, ActorKind::Commit), now);
+    {
+        let mut actors = shared.actors.lock();
+        actors.clear();
+        actors.extend(metrics.values().cloned());
+        actors.push(commit_metrics.clone());
+    }
+
+    let mut inputs: BTreeMap<NodeId, Vec<mpsc::Receiver<Msg>>> = BTreeMap::new();
+    let mut outputs: BTreeMap<NodeId, Vec<mpsc::Sender<Msg>>> = BTreeMap::new();
+    for (from, to) in topology.slice_edges(&params.key.slice) {
+        let (tx, rx) = mpsc::channel(settings.mailbox_capacity.max(1));
+        metrics[&to].watch_input(&tx);
+        outputs.entry(from).or_default().push(tx);
+        inputs.entry(to).or_default().push(rx);
+    }
+
+    let (commits_tx, commits_rx) = mpsc::unbounded_channel();
+    let (committed_tx, committed_rx) = watch::channel(start.epoch);
+    let terminals = nodes
+        .iter()
+        .filter(|node| **node != root)
+        .filter(|node| matches!(topology.kind(node), OpKind::Aggregate | OpKind::Sink))
+        .count();
+    shared.metrics.epoch.store(start.epoch, Ordering::Relaxed);
+    *shared.metrics.position.lock() = start.position;
+    shared
+        .metrics
+        .watermark
+        .store(start.watermark, Ordering::Relaxed);
+
+    let ctx = |node: &NodeId, metrics: Arc<ActorMetrics>| ActorCtx {
+        env: env.clone(),
+        key: params.key.clone(),
+        node: node.clone(),
+        node_hash: hash_str(node.as_str()),
+        meter: Meter::new(&env.providers, metrics),
+        control: control.clone(),
+        settings: settings.clone(),
+    };
+    let name = |node: &NodeId, role: &str| format!("slice/{}/{node}{role}", params.key);
+    let owner = format!(
+        "{}#{:016x}",
+        params.worker,
+        moonpool_core::RandomProvider::random::<u64>(env.providers.random())
+    );
+
+    let mut handles = Vec::with_capacity(nodes.len() + 1);
+    handles.push(spawn_actor(
+        scope,
+        name(&root, "#commit"),
+        commit_metrics.clone(),
+        exit.clone(),
+        params.catch_panics,
+        run_committer(
+            ctx(&root, commit_metrics),
+            terminals,
+            commits_rx,
+            committed_tx,
+            start.epoch,
+            owner,
+            shared.metrics.clone(),
+            exit.clone(),
+        ),
+    ));
+
+    let mut start = Some(start);
+    for node in nodes {
+        let Some(op) = ops.remove(node) else { continue };
+        let actor_ctx = ctx(node, metrics[node].clone());
+        let node_inputs = Inputs::new(inputs.remove(node).unwrap_or_default());
+        let node_outputs = Outputs::new(outputs.remove(node).unwrap_or_default());
+        let make_root = |ctx: ActorCtx<P>, outputs: Outputs, epoch: u64| Root {
+            ctx,
+            outputs,
+            commits: commits_tx.clone(),
+            committed: committed_rx.clone(),
+            in_flight: VecDeque::new(),
+            epoch,
+            slice: shared.metrics.clone(),
+            exit: exit.clone(),
+        };
+        let actor: std::pin::Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send>> = match op
+        {
+            NodeOp::Source(connector) => {
+                let Some(start) = start.take() else { continue };
+                let partition = match &params.key.slice {
+                    SliceId::Source { partition, .. } => *partition,
+                    SliceId::Emitter { .. } => 0,
+                };
+                Box::pin(run_source(
+                    make_root(actor_ctx, node_outputs, start.epoch),
+                    connector,
+                    partition,
+                    start,
+                ))
+            }
+            NodeOp::Emitter(aggregator, lateness_ms) => {
+                let Some(start) = start.take() else { continue };
+                let feeding = topology
+                    .feeding_slices(node, &params.plan.slices)
+                    .into_iter()
+                    .map(|slice| SliceKey {
+                        tenant: params.key.tenant.clone(),
+                        graph: params.key.graph.clone(),
+                        slice,
+                    })
+                    .collect();
+                Box::pin(run_emitter(
+                    make_root(actor_ctx, node_outputs, start.epoch),
+                    aggregator,
+                    lateness_ms,
+                    feeding,
+                    start,
+                ))
+            }
+            NodeOp::Map(map) => {
+                let mut scratch = Vec::new();
+                Box::pin(run_transform(
+                    actor_ctx,
+                    node_inputs,
+                    node_outputs,
+                    move |record, hash, out| {
+                        scratch.clear();
+                        map.apply(&record.value, &mut scratch)?;
+                        for (index, value) in scratch.drain(..).enumerate() {
+                            out.push(Record {
+                                value,
+                                ts: record.ts,
+                                key: record.key.clone(),
+                                window: record.window,
+                                origin: record.origin.derive(hash, index as u32),
+                            });
+                        }
+                        Ok(())
+                    },
+                ))
+            }
+            NodeOp::Key(key) => Box::pin(run_transform(
+                actor_ctx,
+                node_inputs,
+                node_outputs,
+                move |record, hash, out| {
+                    out.push(Record {
+                        key: Some(key.key(&record.value)?),
+                        origin: record.origin.derive(hash, 0),
+                        ..record.clone()
+                    });
+                    Ok(())
+                },
+            )),
+            NodeOp::Window(assigner) => {
+                let mut windows = Vec::new();
+                Box::pin(run_transform(
+                    actor_ctx,
+                    node_inputs,
+                    node_outputs,
+                    move |record, hash, out| {
+                        windows.clear();
+                        assigner.assign(record.ts, &mut windows);
+                        for (index, window) in windows.iter().enumerate() {
+                            out.push(Record {
+                                window: Some(*window),
+                                origin: record.origin.derive(hash, index as u32),
+                                ..record.clone()
+                            });
+                        }
+                        Ok(())
+                    },
+                ))
+            }
+            NodeOp::Aggregate(aggregator, lateness_ms) => {
+                let watermark = shared.metrics.watermark.load(Ordering::Relaxed);
+                Box::pin(run_aggregate(
+                    actor_ctx,
+                    aggregator,
+                    lateness_ms,
+                    node_inputs,
+                    commits_tx.clone(),
+                    restored.remove(node).unwrap_or_default(),
+                    watermark,
+                ))
+            }
+            NodeOp::Sink(sink) => {
+                Box::pin(run_sink(actor_ctx, sink, node_inputs, commits_tx.clone()))
+            }
+        };
+        handles.push(spawn_actor(
+            scope,
+            name(node, ""),
+            metrics[node].clone(),
+            exit.clone(),
+            params.catch_panics,
+            actor,
+        ));
+    }
+    shared.metrics.set_state(ActorState::Running);
+    handles
+}

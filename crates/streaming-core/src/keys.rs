@@ -12,7 +12,7 @@
 //! t:<tenant>:g:<graph>:desired                   string DesiredState (JSON)
 //! t:<tenant>:g:<graph>:plan                      string GraphPlan (JSON)
 //! t:<tenant>:g:<graph>:out:<node>                hash  emit id       -> OutputRow (JSON)
-//! t:<tenant>:g:<graph>:s:<slice>:log             hash  c:<epoch>     -> commit record, m -> materialized epoch
+//! t:<tenant>:g:<graph>:s:<slice>:log             hash  c:<epoch>     -> commit record
 //! t:<tenant>:g:<graph>:s:<slice>:idx:<node>      hash  <window>      -> "1"
 //! t:<tenant>:g:<graph>:s:<slice>:w:<node>:<win>  hash  <hexkey>@<epoch> -> accumulator
 //! ```
@@ -31,9 +31,6 @@ pub const CLUSTER_CATALOG: &str = "cluster:catalog";
 pub const CLUSTER_GRAPHS: &str = "cluster:graphs";
 /// Which worker runs which slice.
 pub const CLUSTER_PLACEMENT: &str = "cluster:placement";
-
-/// Field of a slice log holding the last epoch whose changes were materialized.
-pub const LOG_MATERIALIZED: &str = "m";
 
 /// Metrics snapshot of a worker.
 #[must_use]

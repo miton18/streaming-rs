@@ -252,6 +252,10 @@ impl fmt::Display for EmitId {
 pub struct Emit {
     /// Deterministic identifier, identical on every re-emission.
     pub id: EmitId,
+    /// Where the element comes from. Inside one slice, positions never
+    /// decrease from one element to the next, which lets a sink derive a
+    /// monotonic sequence number when its destination deduplicates on one.
+    pub origin: Origin,
     /// Event time.
     pub ts: Timestamp,
     /// Grouping key, when the element went through a `key_by`.

@@ -7,6 +7,7 @@ members = [
     "crates/streaming-gossip",
     "crates/streaming-kv-redis",
     "crates/streaming-warp10",
+    "crates/streaming-pulsar",
     "crates/streaming-api",
     "crates/streamd",
 ]
@@ -24,6 +25,7 @@ streaming-gossip = { path = "crates/streaming-gossip" }
 streaming-kv-redis = { path = "crates/streaming-kv-redis" }
 streaming-warp10 = { path = "crates/streaming-warp10" }
 streaming-api = { path = "crates/streaming-api" }
+streaming-pulsar = { path = "crates/streaming-pulsar" }
 
 moonpool-core = "0.8.0"
 moonpool-sim = "0.8.0"

@@ -1,8 +1,24 @@
 [package]
 name = "streaming-runtime"
+description = "The streaming-rs execution engine: actors, backpressure, exactly-once commits, workers and placement."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+streaming-core.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+moonpool-core.workspace = true
+parking_lot.workspace = true
+postcard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }

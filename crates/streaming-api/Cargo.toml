@@ -1,8 +1,27 @@
 [package]
 name = "streaming-api"
+description = "HTTP API server of streaming-rs: reads and writes control-plane documents in the KV and serves the web UI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+streaming-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "macros", "sync"] }
+tracing.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+rust-embed = "8"
+mime_guess = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+moonpool-core.workspace = true
