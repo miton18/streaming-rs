@@ -194,6 +194,7 @@ fn actor(graph: &str, node: &str, kind: ActorKind, busy: f64, backpressured: f64
         busy,
         idle: 0.0,
         backpressured,
+        waiting: 0.0,
         queue_len: 4,
         queue_cap: 8,
         late_dropped: 0,

@@ -257,6 +257,12 @@ pub struct ActorSnapshot {
     /// Share of the last interval spent waiting for room downstream.
     #[serde(default)]
     pub backpressured: f64,
+    /// Part of `busy` spent waiting for an external system to answer (a
+    /// sink's destination), as opposed to computing. An actor that is busy
+    /// mostly waiting is limited by that system, not by this worker: more
+    /// CPU does not help it.
+    #[serde(default)]
+    pub waiting: f64,
     /// Chunks waiting in the actor's input edges.
     #[serde(default)]
     pub queue_len: u32,

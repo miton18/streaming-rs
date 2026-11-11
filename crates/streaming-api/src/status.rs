@@ -248,6 +248,14 @@ pub struct Bottleneck {
     pub kind: String,
     /// Its busy ratio.
     pub busy: f64,
+    /// Part of that ratio spent waiting for an external system to answer.
+    #[serde(default)]
+    pub waiting: f64,
+    /// What holds the node back: `"destination"` when most of its busy time
+    /// is spent waiting for the system it writes to, so that neither more
+    /// CPU nor moving it helps; `"work"` otherwise.
+    #[serde(default)]
+    pub limited_by: String,
     /// Human-readable explanation.
     pub reason: String,
 }
@@ -293,6 +301,10 @@ pub struct NodeView {
     pub idle: f64,
     /// Backpressure ratio of the hot instance.
     pub backpressured: f64,
+    /// Highest share of time an instance spent waiting for an external
+    /// system to answer. Part of `busy`: a node busy mostly waiting is
+    /// limited by that system, not by its worker.
+    pub waiting: f64,
     /// Queued chunks, summed.
     pub queue_len: u64,
     /// Queue capacity, summed.
@@ -450,6 +462,7 @@ fn aggregate_node(
         |f: fn(&ActorSnapshot) -> f64| instances.iter().map(|(_, a)| f(a)).fold(0.0_f64, f64::max);
     let busy = worst(|a| a.busy);
     let backpressured = worst(|a| a.backpressured);
+    let waiting = worst(|a| a.waiting).min(busy);
     let idle = if instances.is_empty() {
         0.0
     } else {
@@ -484,6 +497,7 @@ fn aggregate_node(
         busy,
         idle,
         backpressured,
+        waiting,
         queue_len: sum_u(|a| u64::from(a.queue_len), &any),
         queue_cap: sum_u(|a| u64::from(a.queue_cap), &any),
         late_dropped: sum_u(|a| a.late_dropped, &any),
@@ -585,12 +599,22 @@ pub fn find_bottleneck(
             }
         };
         if better {
-            let reason = format!(
-                "busy {} while upstream `{}` is backpressured {}",
-                percent(node.busy),
-                upstream.id,
-                percent(upstream.backpressured)
-            );
+            let reason = if node.waiting * 2.0 >= node.busy {
+                format!(
+                    "busy {}, {} of it waiting for its destination, while upstream `{}` is backpressured {}: the destination is the limit, not this worker",
+                    percent(node.busy),
+                    percent(node.waiting),
+                    upstream.id,
+                    percent(upstream.backpressured)
+                )
+            } else {
+                format!(
+                    "busy {} while upstream `{}` is backpressured {}",
+                    percent(node.busy),
+                    upstream.id,
+                    percent(upstream.backpressured)
+                )
+            };
             best = Some((node, reason));
         }
     }
@@ -599,6 +623,12 @@ pub fn find_bottleneck(
             node: node.id.clone(),
             kind: node.kind.clone(),
             busy: node.busy,
+            waiting: node.waiting,
+            limited_by: if node.waiting * 2.0 >= node.busy {
+                "destination".to_owned()
+            } else {
+                "work".to_owned()
+            },
             reason,
         });
     }
@@ -623,6 +653,8 @@ pub fn find_bottleneck(
         node: root.id.clone(),
         kind: "commit".to_owned(),
         busy: commit.busy,
+        waiting: 0.0,
+        limited_by: "store".to_owned(),
         reason: format!(
             "KV commits of slice `{}` are busy {} while `{}` is backpressured {}",
             commit.slice,
@@ -929,6 +961,7 @@ mod tests {
             busy: 0.0,
             idle: 0.0,
             backpressured: 0.0,
+            waiting: 0.0,
             queue_len: 0,
             queue_cap: 0,
             late_dropped: 0,
@@ -1385,6 +1418,30 @@ mod tests {
         let bottleneck = bottleneck.unwrap();
         assert_eq!(bottleneck.node, node("out"));
         assert!(bottleneck.reason.contains("count"), "{}", bottleneck.reason);
+    }
+
+    #[test]
+    fn a_bottleneck_says_whether_its_destination_or_its_work_limits_it() {
+        // The same occupation, spent waiting for the destination or computing.
+        for (waiting, limited_by) in [(0.95, "destination"), (0.1, "work")] {
+            let mut sink = with_load(actor("out", ActorKind::Sink), 1.0, 0.0);
+            sink.waiting = waiting;
+            let (bottleneck, detail) = bottleneck_of(vec![
+                with_load(actor("events", ActorKind::Source), 0.1, 0.8),
+                sink,
+            ]);
+            let bottleneck = bottleneck.unwrap();
+            assert_eq!(bottleneck.node, node("out"));
+            assert_eq!(bottleneck.limited_by, limited_by);
+            assert_eq!(bottleneck.waiting, waiting);
+            assert_eq!(node_of(&detail, "out").waiting, waiting);
+            assert_eq!(
+                bottleneck.reason.contains("the destination is the limit"),
+                limited_by == "destination",
+                "{}",
+                bottleneck.reason
+            );
+        }
     }
 
     #[test]

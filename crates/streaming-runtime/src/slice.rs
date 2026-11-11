@@ -486,10 +486,13 @@ async fn run_sink<P: Providers>(
                 let mut backoff = MIN_BACKOFF;
                 // The same elements with the same ids are retried until the sink
                 // takes them: at-least-once delivery of idempotent writes.
+                // From here the actor is on the destination's time.
+                ctx.meter.waiting();
                 while let Err(error) = sink.write(&batch).await {
                     ctx.meter.metrics.error(error.to_string());
                     ctx.sleep(bump(&mut backoff)).await;
                 }
+                ctx.meter.busy();
                 ctx.meter.records_out(batch.len());
             }
             Input::Barrier(barrier) => {

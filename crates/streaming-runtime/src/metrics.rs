@@ -24,6 +24,9 @@ pub(crate) enum Phase {
     Idle = 0,
     Busy = 1,
     Backpressured = 2,
+    /// Working, but on somebody else's time: waiting for the system a
+    /// connector talks to (a sink's destination) to answer.
+    Waiting = 3,
 }
 
 fn state_to_u8(state: ActorState) -> u8 {
@@ -67,7 +70,7 @@ pub(crate) struct ActorMetrics {
     pub records_out: AtomicU64,
     pub late_dropped: AtomicU64,
     pub errors: AtomicU64,
-    phase_ns: [AtomicU64; 3],
+    phase_ns: [AtomicU64; 4],
     phase: AtomicU8,
     phase_since_ns: AtomicU64,
     last_error: Mutex<Option<String>>,
@@ -83,7 +86,12 @@ impl ActorMetrics {
             records_out: AtomicU64::new(0),
             late_dropped: AtomicU64::new(0),
             errors: AtomicU64::new(0),
-            phase_ns: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+            phase_ns: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
             phase: AtomicU8::new(Phase::Idle as u8),
             phase_since_ns: AtomicU64::new(now.as_nanos() as u64),
             last_error: Mutex::new(None),
@@ -113,19 +121,20 @@ impl ActorMetrics {
         let now_ns = now.as_nanos() as u64;
         let since = self.phase_since_ns.swap(now_ns, Ordering::Relaxed);
         let previous = self.phase.swap(phase as u8, Ordering::Relaxed);
-        self.phase_ns[usize::from(previous.min(2))]
+        self.phase_ns[usize::from(previous.min(3))]
             .fetch_add(now_ns.saturating_sub(since), Ordering::Relaxed);
     }
 
     /// Cumulative nanoseconds per phase, including the phase in progress.
-    fn phase_totals(&self, now: Duration) -> [u64; 3] {
+    fn phase_totals(&self, now: Duration) -> [u64; 4] {
         let mut totals = [
             self.phase_ns[0].load(Ordering::Relaxed),
             self.phase_ns[1].load(Ordering::Relaxed),
             self.phase_ns[2].load(Ordering::Relaxed),
+            self.phase_ns[3].load(Ordering::Relaxed),
         ];
         let since = self.phase_since_ns.load(Ordering::Relaxed);
-        let current = usize::from(self.phase.load(Ordering::Relaxed).min(2));
+        let current = usize::from(self.phase.load(Ordering::Relaxed).min(3));
         totals[current] += (now.as_nanos() as u64).saturating_sub(since);
         totals
     }
@@ -168,6 +177,11 @@ impl<P: Providers> Meter<P> {
 
     pub(crate) fn blocked(&self) {
         self.metrics.switch(self.time.now(), Phase::Backpressured);
+    }
+
+    /// Entering a call to the system a connector talks to.
+    pub(crate) fn waiting(&self) {
+        self.metrics.switch(self.time.now(), Phase::Waiting);
     }
 
     pub(crate) fn records_in(&self, count: usize) {
@@ -233,7 +247,7 @@ pub(crate) fn ts_unkey(key: u64) -> Timestamp {
 /// What the snapshotter remembers about an actor between two snapshots.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ActorSample {
-    phases: [u64; 3],
+    phases: [u64; 4],
     records_in: u64,
     records_out: u64,
     in_per_sec: f64,
@@ -261,7 +275,10 @@ pub(crate) fn snapshot_actor(
     let first = previous.is_none();
     let previous = previous.unwrap_or_default();
     let delta = |index: usize| sample.phases[index].saturating_sub(previous.phases[index]) as f64;
-    let (idle, busy, blocked) = (delta(0), delta(1), delta(2));
+    let (idle, working, blocked, waiting) = (delta(0), delta(1), delta(2), delta(3));
+    // Waiting for a destination keeps the actor as occupied as computing
+    // does: both make it the one others wait for. They are told apart below.
+    let busy = working + waiting;
     let total = idle + busy + blocked;
     let ratio = |value: f64, fallback: f64| if total > 0.0 { value / total } else { fallback };
     let seconds = interval.as_secs_f64().max(1e-9);
@@ -295,6 +312,7 @@ pub(crate) fn snapshot_actor(
         busy: ratio(busy, 0.0),
         idle: ratio(idle, 1.0),
         backpressured: ratio(blocked, 0.0),
+        waiting: ratio(waiting, 0.0),
         queue_len,
         queue_cap,
         late_dropped: metrics.late_dropped.load(Ordering::Relaxed),

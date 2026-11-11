@@ -550,7 +550,7 @@ class NodePanel {
     text(r.tout, shortType(n.output_type)); attr(r.tout, 'title', n.output_type);
     text(r.workers, n.workers?.length ? n.workers.join(', ') : '–');
     setMbar(r.bar, n.busy, n.idle, n.backpressured);
-    text(r.nb, `busy ${pct(n.busy)}`); text(r.ni, `idle ${pct(n.idle)}`); text(r.np, `backpressure ${pct(n.backpressured)}`);
+    text(r.nb, n.waiting >= 0.005 ? `busy ${pct(n.busy)} (attente destination ${pct(n.waiting)})` : `busy ${pct(n.busy)}`); text(r.ni, `idle ${pct(n.idle)}`); text(r.np, `backpressure ${pct(n.backpressured)}`);
     const m = (el, v, bad) => { text(el._r.v, v); toggle(el, 'bad', !!bad); };
     m(r.mIn, n.kind === 'source' ? '–' : rate(n.in_per_sec));
     m(r.mOut, rate(n.out_per_sec));

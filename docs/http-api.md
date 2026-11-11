@@ -103,6 +103,12 @@ aggregate node additionally has one `emitter` actor):
   independently: an instance waiting for room downstream is never the busiest
   one (for an aggregate node, typically its `emitter` instance waits while its
   `aggregate` instances work). `idle`: `1 - busy - backpressured`, floored at 0.
+- `waiting`: the part of `busy` spent waiting for an external system to answer
+  (a sink's destination), highest over the instances. `busy` is occupation,
+  not CPU: a sink busy mostly waiting is limited by its destination, and
+  neither more CPU nor another worker helps. The bottleneck carries
+  `waiting` and `limited_by` (`"destination"`, `"work"`, or `"store"` for
+  commits) accordingly.
 - `records_in`, `in_per_sec`: summed over instances whose kind is not `emitter`.
 - `records_out`, `out_per_sec`: summed over instances whose kind is not
   `aggregate`; if the node has no `emitter` instance, summed over all.

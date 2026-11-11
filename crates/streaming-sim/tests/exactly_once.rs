@@ -354,6 +354,8 @@ fn exactly_once_in_random_configurations() {
     let mut failed = Vec::new();
     for seed in seeds {
         let scenario = Scenario::random(seed);
+        // Said before the run as well: a draw that never ends can be replayed.
+        eprintln!("[CONFIG] SIM_CONFIG_SEED={seed} starts");
         let started = std::time::Instant::now();
         let report = run(scenario.clone(), 3, true, 3);
         let clean = report.failed_runs == 0 && report.assertion_violations.is_empty();
