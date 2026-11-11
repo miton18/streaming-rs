@@ -102,6 +102,10 @@ pub struct WorkerConfig {
     pub rebalance_cooldown: Duration,
     /// Whether this worker may act as controller.
     pub controller: bool,
+    /// How long after its start a worker waits before acting as controller,
+    /// so that it first learns who else is there. Without it, a cluster
+    /// starting up would see its first worker place everything on itself.
+    pub controller_grace: Duration,
     /// Turn an actor panic into a slice restart instead of letting it unwind.
     /// On in production so that one tenant's operator cannot take the process
     /// down; off in simulation so that a bug fails the run.
@@ -123,6 +127,7 @@ impl WorkerConfig {
             restart_backoff: Duration::from_secs(1),
             rebalance_cooldown: Duration::from_secs(30),
             controller: true,
+            controller_grace: Duration::from_secs(3),
             catch_panics: true,
             ignore_placement: false,
         }
@@ -482,6 +487,7 @@ impl<P: Providers> Worker<P> {
                     state: ActorState::Failed,
                     epoch: 0,
                     position: None,
+                    window: None,
                     watermark_ms: None,
                     commits: 0,
                     commit_ms: 0.0,
@@ -523,6 +529,7 @@ impl<P: Providers> Worker<P> {
         let mut controller_state = ControllerState::default();
         let mut catalog_published = false;
         let mut last_tick = time.now();
+        let started = last_tick;
 
         loop {
             if !catalog_published {
@@ -558,7 +565,8 @@ impl<P: Providers> Worker<P> {
                 tracing::warn!(%error, "cannot publish metrics");
             }
 
-            if self.config.controller {
+            if self.config.controller && now.saturating_sub(started) >= self.config.controller_grace
+            {
                 let mut alive = self
                     .membership
                     .alive(self.env.clock.now_ms(), timeout_ms)

@@ -219,6 +219,7 @@ fn worker_snapshot(worker: &str, graph: &str) -> WorkerSnapshot {
             state: ActorState::Running,
             epoch: 3,
             position: None,
+            window: None,
             watermark_ms: Some(NOW - 1000),
             commits: 3,
             commit_ms: 2.0,

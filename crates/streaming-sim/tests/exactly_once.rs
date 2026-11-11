@@ -112,3 +112,13 @@ fn exactly_once_when_every_worker_runs_every_slice() {
     let report = run(scenario, 3, true, 15);
     assert_clean(&report);
 }
+
+#[test]
+fn exactly_once_with_gossip_membership() {
+    let scenario = Scenario {
+        gossip: true,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 15);
+    assert_clean(&report);
+}

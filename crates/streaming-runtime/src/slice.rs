@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::RuntimeEnv;
 use crate::mailbox::{Barrier, Input, Inputs, Msg, Outputs};
-use crate::metrics::{ActorIdent, ActorMetrics, Meter, SliceMetrics};
+use crate::metrics::{ActorIdent, ActorMetrics, Meter, SliceMetrics, ts_key};
 use crate::scope::TaskScope;
 use crate::state::{
     self, CommitOutcome, CommitRecord, NO_WATERMARK, NodeChanges, StateEntry, StateError,
@@ -148,11 +148,6 @@ type AggState = HashMap<(Window, Key), (DynAcc, u64)>;
 
 fn is_closed(window: &Window, lateness_ms: i64, watermark: Timestamp) -> bool {
     watermark != NO_WATERMARK && window.end.saturating_add(lateness_ms) <= watermark
-}
-
-/// Order-preserving mapping of a timestamp onto an unsigned position component.
-fn ts_key(ts: Timestamp) -> u64 {
-    (ts as u64) ^ (1 << 63)
 }
 
 fn bump(backoff: &mut Duration) -> Duration {
@@ -622,6 +617,39 @@ async fn run_source<P: Providers>(
             fresh
         });
 
+        // One epoch costs one commit: once a first record is in, keep reading
+        // for up to `linger` so that the epoch is worth it.
+        let mut lost_reader = false;
+        if !polled.is_empty() {
+            let time = root.ctx.env.providers.time().clone();
+            let max_batch = settings.max_batch.max(1);
+            let deadline = time.now() + settings.linger;
+            root.ctx.meter.idle();
+            while polled.len() < max_batch {
+                let now = time.now();
+                if now >= deadline {
+                    break;
+                }
+                match open.poll(max_batch - polled.len(), deadline - now).await {
+                    Ok(more) => {
+                        for record in more {
+                            if last.is_none_or(|seen| record.position > seen) {
+                                last = Some(record.position);
+                                polled.push(record);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // What was read is good; the reader is reopened afterwards.
+                        root.ctx.meter.metrics.error(error.to_string());
+                        lost_reader = true;
+                        break;
+                    }
+                }
+            }
+            root.ctx.meter.busy();
+        }
+
         let mut new_watermark = watermark;
         if polled.is_empty() {
             let now = root.ctx.env.providers.time().now();
@@ -671,6 +699,9 @@ async fn run_source<P: Providers>(
             .collect();
         position = last;
         watermark = new_watermark;
+        if lost_reader {
+            reader = None;
+        }
         root.emit(records, position, watermark).await;
     }
 }

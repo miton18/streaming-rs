@@ -6,8 +6,14 @@ edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+default = ["gossip"]
+# Membership through the Scuttlebutt gossip of `streaming-gossip`.
+gossip = ["dep:streaming-gossip"]
+
 [dependencies]
 streaming-core.workspace = true
+streaming-gossip = { workspace = true, optional = true }
 async-trait.workspace = true
 futures.workspace = true
 moonpool-core.workspace = true

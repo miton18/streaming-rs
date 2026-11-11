@@ -1,8 +1,32 @@
 [package]
 name = "streamd"
+description = "The streaming-rs daemon: a worker with the stock connectors, the HTTP API and the web UI. `streamd standalone` runs a whole demo cluster in one process."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# TLS towards Redis / Materia KV (`rediss://`) and Warp 10 (`https://`).
+tls = ["streaming-kv-redis/tls", "streaming-warp10/tls"]
+# Apache Pulsar source and sink (Magnetar client).
+pulsar = ["dep:streaming-pulsar"]
+
 [dependencies]
+streaming-core.workspace = true
+streaming-runtime.workspace = true
+streaming-api.workspace = true
+streaming-kv-redis.workspace = true
+streaming-warp10.workspace = true
+streaming-pulsar = { workspace = true, optional = true }
+async-trait.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+moonpool-core.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }

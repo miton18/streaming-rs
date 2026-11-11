@@ -30,10 +30,41 @@ pub fn datum<T: Any + Send + Sync>(value: T) -> Datum {
 /// source-defined: Pulsar uses `(ledger, entry, batch index)`, a log with plain
 /// offsets uses `(0, offset, 0)`, and the emitting half of an aggregate node
 /// uses `(window end, window start, key index)`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Position(pub u64, pub u64, pub u64);
+
+// Text formats (JSON) carry a position as the string `a.b.c`: its components
+// are full 64-bit integers, which JavaScript consumers would silently round.
+// Binary formats keep the three integers.
+impl Serialize for Position {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            serializer.collect_str(self)
+        } else {
+            (self.0, self.1, self.2).serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Position {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum Repr {
+                Text(String),
+                Parts(u64, u64, u64),
+            }
+            match Repr::deserialize(deserializer)? {
+                Repr::Text(text) => text.parse().map_err(serde::de::Error::custom),
+                Repr::Parts(a, b, c) => Ok(Position(a, b, c)),
+            }
+        } else {
+            let (a, b, c) = <(u64, u64, u64)>::deserialize(deserializer)?;
+            Ok(Position(a, b, c))
+        }
+    }
+}
 
 impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -311,6 +342,22 @@ mod tests {
         assert!(Position(1, 9, 9) < Position(2, 0, 0));
         assert!(Position(1, 2, 3) < Position(1, 2, 4));
         assert_eq!("7.8.9".parse::<Position>().unwrap(), Position(7, 8, 9));
+    }
+
+    #[test]
+    fn position_keeps_64_bits_in_json_and_stays_compact_in_binary() {
+        let position = Position(u64::MAX, 1 << 63, 3);
+        let json = serde_json::to_string(&position).unwrap();
+        assert_eq!(json, "\"18446744073709551615.9223372036854775808.3\"");
+        assert_eq!(serde_json::from_str::<Position>(&json).unwrap(), position);
+        assert_eq!(
+            serde_json::from_str::<Position>("[7,8,9]").unwrap(),
+            Position(7, 8, 9)
+        );
+        let small = Position(0, 5, 0);
+        let bytes = postcard::to_allocvec(&small).unwrap();
+        assert_eq!(bytes, [0, 5, 0]);
+        assert_eq!(postcard::from_bytes::<Position>(&bytes).unwrap(), small);
     }
 
     #[test]

@@ -121,6 +121,7 @@ async fn counts_every_record_exactly_once() {
 
     let mut config = WorkerConfig::new(WorkerId::new("worker-a").unwrap());
     config.tick = Duration::from_millis(50);
+    config.controller_grace = Duration::ZERO;
     let worker = Worker::new(
         RuntimeEnv {
             providers,

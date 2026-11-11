@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
 use parking_lot::Mutex;
-use streaming_core::control::{ActorKind, ActorSnapshot, ActorState, SliceSnapshot};
+use streaming_core::control::{ActorKind, ActorSnapshot, ActorState, EmittedWindow, SliceSnapshot};
 use streaming_core::{GraphId, NodeId, OpRef, Position, SliceId, TenantId, Timestamp};
 use tokio::sync::mpsc;
 
@@ -218,13 +218,29 @@ impl SliceMetrics {
     }
 }
 
+/// Order-preserving mapping of a timestamp onto an unsigned position component.
+pub(crate) fn ts_key(ts: Timestamp) -> u64 {
+    (ts as u64) ^ (1 << 63)
+}
+
+/// Inverse of [`ts_key`].
+pub(crate) fn ts_unkey(key: u64) -> Timestamp {
+    (key ^ (1 << 63)) as Timestamp
+}
+
 /// What the snapshotter remembers about an actor between two snapshots.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ActorSample {
     phases: [u64; 3],
     records_in: u64,
     records_out: u64,
+    in_per_sec: f64,
+    out_per_sec: f64,
 }
+
+/// Weight of the latest interval in the published rates. Actors work in
+/// bursts (an epoch at a time), so raw per-interval rates jump around.
+const RATE_SMOOTHING: f64 = 0.5;
 
 /// Build the snapshot of an actor and the sample to diff against next time.
 pub(crate) fn snapshot_actor(
@@ -233,18 +249,34 @@ pub(crate) fn snapshot_actor(
     now: Duration,
     interval: Duration,
 ) -> (ActorSnapshot, ActorSample) {
-    let sample = ActorSample {
+    let mut sample = ActorSample {
         phases: metrics.phase_totals(now),
         records_in: metrics.records_in.load(Ordering::Relaxed),
         records_out: metrics.records_out.load(Ordering::Relaxed),
+        in_per_sec: 0.0,
+        out_per_sec: 0.0,
     };
+    let first = previous.is_none();
     let previous = previous.unwrap_or_default();
     let delta = |index: usize| sample.phases[index].saturating_sub(previous.phases[index]) as f64;
     let (idle, busy, blocked) = (delta(0), delta(1), delta(2));
     let total = idle + busy + blocked;
     let ratio = |value: f64, fallback: f64| if total > 0.0 { value / total } else { fallback };
     let seconds = interval.as_secs_f64().max(1e-9);
-    let rate = |current: u64, before: u64| current.saturating_sub(before) as f64 / seconds;
+    let rate = |current: u64, before: u64, smoothed: f64| {
+        let instant = current.saturating_sub(before) as f64 / seconds;
+        if first {
+            instant
+        } else {
+            RATE_SMOOTHING * instant + (1.0 - RATE_SMOOTHING) * smoothed
+        }
+    };
+    sample.in_per_sec = rate(sample.records_in, previous.records_in, previous.in_per_sec);
+    sample.out_per_sec = rate(
+        sample.records_out,
+        previous.records_out,
+        previous.out_per_sec,
+    );
     let (queue_len, queue_cap) = metrics.queue();
     let snapshot = ActorSnapshot {
         tenant: metrics.ident.tenant.clone(),
@@ -256,8 +288,8 @@ pub(crate) fn snapshot_actor(
         state: metrics.state(),
         records_in: sample.records_in,
         records_out: sample.records_out,
-        in_per_sec: rate(sample.records_in, previous.records_in),
-        out_per_sec: rate(sample.records_out, previous.records_out),
+        in_per_sec: sample.in_per_sec,
+        out_per_sec: sample.out_per_sec,
         busy: ratio(busy, 0.0),
         idle: ratio(idle, 1.0),
         backpressured: ratio(blocked, 0.0),
@@ -305,13 +337,23 @@ pub(crate) fn snapshot_slice(
         0.0
     };
     let watermark: Timestamp = metrics.watermark.load(Ordering::Relaxed);
+    let position = *metrics.position.lock();
+    let window = match (slice, position) {
+        (SliceId::Emitter { .. }, Some(at)) => Some(EmittedWindow {
+            start_ms: ts_unkey(at.1),
+            end_ms: ts_unkey(at.0),
+            complete: at.2 == u64::MAX,
+        }),
+        _ => None,
+    };
     let snapshot = SliceSnapshot {
         tenant: tenant.clone(),
         graph: graph.clone(),
         slice: slice.clone(),
         state: metrics.state(),
         epoch: metrics.epoch.load(Ordering::Relaxed),
-        position: *metrics.position.lock(),
+        position,
+        window,
         watermark_ms: (watermark != i64::MIN).then_some(watermark),
         commits: sample.commits,
         commit_ms,
@@ -355,7 +397,8 @@ mod tests {
         // Next interval: blocked the whole time.
         let (snapshot, _) = snapshot_actor(&metrics, Some(sample), ms(2000), ms(1000));
         assert!((snapshot.backpressured - 1.0).abs() < 1e-9, "{snapshot:?}");
-        assert_eq!(snapshot.in_per_sec, 0.0);
+        // Rates are smoothed: an interval without records halves the rate.
+        assert!((snapshot.in_per_sec - 250.0).abs() < 1e-9);
     }
 
     #[test]
@@ -372,5 +415,47 @@ mod tests {
             Duration::from_secs(1),
         );
         assert_eq!((snapshot.queue_len, snapshot.queue_cap), (2, 4));
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn emitter_positions_decode_into_windows() {
+        for ts in [-5_000_i64, 0, 1_790_000_000_000] {
+            assert_eq!(ts_unkey(ts_key(ts)), ts);
+        }
+        assert!(ts_key(-1) < ts_key(0) && ts_key(0) < ts_key(1));
+        let metrics = SliceMetrics::new();
+        *metrics.position.lock() = Some(Position(ts_key(20_000), ts_key(10_000), u64::MAX));
+        let tenant = TenantId::new("acme").unwrap();
+        let graph = GraphId::new("g").unwrap();
+        let (emitter, _) = snapshot_slice(
+            &tenant,
+            &graph,
+            &"agg.count".parse().unwrap(),
+            &metrics,
+            SliceLifetime::default(),
+            None,
+        );
+        assert_eq!(
+            emitter.window,
+            Some(EmittedWindow {
+                start_ms: 10_000,
+                end_ms: 20_000,
+                complete: true
+            })
+        );
+        let (source, _) = snapshot_slice(
+            &tenant,
+            &graph,
+            &"src.events.0".parse().unwrap(),
+            &metrics,
+            SliceLifetime::default(),
+            None,
+        );
+        assert_eq!(source.window, None);
     }
 }

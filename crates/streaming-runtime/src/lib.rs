@@ -21,6 +21,8 @@ use streaming_core::{Clock, DynKv, Registry, SecretProvider};
 
 pub mod builtin;
 mod controller;
+#[cfg(feature = "gossip")]
+mod gossip;
 mod load;
 mod mailbox;
 pub mod memlog;
@@ -30,6 +32,8 @@ mod slice;
 mod state;
 mod worker;
 
+#[cfg(feature = "gossip")]
+pub use gossip::{GossipConfig, GossipError, GossipMembership};
 pub use load::{LoadProbe, NoLoad, ProcessLoad};
 pub use scope::TaskScope;
 pub use worker::{KvMembership, Membership, Worker, WorkerConfig};

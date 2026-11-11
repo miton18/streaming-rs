@@ -1,8 +1,25 @@
 [package]
 name = "streaming-pulsar"
+description = "Apache Pulsar source and sink connectors for streaming-rs, built on Magnetar's moonpool engine."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+moonpool-core.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+streaming-core.workspace = true
+tracing.workspace = true
+# crates.io package `magnetar-driver`, imported as `magnetar`. The `moonpool`
+# feature (which implies `tokio`) gives the provider-generic engine; `crypto-ring`
+# avoids compiling aws-lc-rs.
+magnetar = { package = "magnetar-driver", version = "1.8.0", default-features = false, features = ["moonpool", "crypto-ring"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

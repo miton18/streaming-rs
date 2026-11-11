@@ -1,8 +1,25 @@
 [package]
 name = "streaming-gossip"
+description = "Cluster membership over gossip (Scuttlebutt anti-entropy), runtime-agnostic via moonpool providers."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Only the provider traits + select! macro: no tokio runtime is pulled by this crate.
+moonpool-core = { version = "0.8.0", default-features = false, features = ["select"] }
+futures.workspace = true
+parking_lot.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+moonpool-core = { version = "0.8.0", features = ["tokio-providers", "select"] }
+moonpool-sim.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "time", "sync"] }

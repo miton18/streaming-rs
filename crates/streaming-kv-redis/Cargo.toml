@@ -1,8 +1,30 @@
 [package]
 name = "streaming-kv-redis"
+description = "Redis-protocol (RESP2) client implementing streaming_core::Kv, for Redis and Clever Cloud Materia KV, written against the Moonpool provider traits."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# TLS (rediss://) through rustls over the futures-io stream, ring crypto, webpki-roots trust anchors.
+tls = ["dep:futures-rustls", "dep:webpki-roots"]
+
 [dependencies]
+streaming-core.workspace = true
+moonpool-core.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+tracing.workspace = true
+futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
+
+[dev-dependencies]
+moonpool-sim.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "net", "process", "io-util", "sync"] }
+tokio-util = { workspace = true, features = ["compat"] }

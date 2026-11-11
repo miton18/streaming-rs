@@ -33,7 +33,7 @@ use streaming_core::{
     TypeTag, Window, Windowed, WorkerId, datum, keys,
 };
 use streaming_runtime::memlog::MemLog;
-use streaming_runtime::{NoLoad, RuntimeEnv, Worker, WorkerConfig};
+use streaming_runtime::{GossipConfig, GossipMembership, NoLoad, RuntimeEnv, Worker, WorkerConfig};
 
 /// Wall-clock origin of every simulation, in milliseconds since the epoch.
 pub const EPOCH_MS: Timestamp = 1_790_000_000_000;
@@ -517,6 +517,9 @@ pub struct Scenario {
     pub window: Duration,
     /// Every worker runs every slice, whatever the placement says.
     pub duel: bool,
+    /// Workers find each other through gossip over the simulated network
+    /// instead of KV heartbeats.
+    pub gossip: bool,
     /// How long the driver waits for the pipeline to settle.
     pub settle_timeout: Duration,
 }
@@ -530,6 +533,7 @@ impl Default for Scenario {
             produce_for: Duration::from_secs(20),
             window: Duration::from_secs(2),
             duel: false,
+            gossip: false,
             settle_timeout: Duration::from_secs(900),
         }
     }
@@ -621,6 +625,7 @@ impl Process for WorkerProcess {
         config.tick = Duration::from_millis(200);
         config.member_timeout = Duration::from_millis(1_500);
         config.restart_backoff = Duration::from_millis(150);
+        config.controller_grace = Duration::from_millis(600);
         config.catch_panics = false;
         config.ignore_placement = self.scenario.duel;
         let runtime = RuntimeEnv {
@@ -630,10 +635,48 @@ impl Process for WorkerProcess {
             kv,
             providers,
         };
-        Worker::new(runtime, config)
-            .with_load_probe(Arc::new(NoLoad))
-            .run(ctx.shutdown().clone())
-            .await;
+        let mut worker = Worker::new(runtime, config).with_load_probe(Arc::new(NoLoad));
+        if self.scenario.gossip {
+            // The seed is the process with the lowest address; a process's
+            // topology lists every address but its own.
+            let mut addresses: Vec<std::net::IpAddr> = ctx
+                .topology()
+                .all_process_ips()
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(ctx.my_ip()))
+                .filter_map(|ip| ip.parse().ok())
+                .collect();
+            addresses.sort();
+            let seed = addresses
+                .first()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let providers = ctx.providers().clone();
+            let membership = loop {
+                // A new generation at every boot: what the previous incarnation
+                // gossiped is replaced.
+                let generation = providers.time().now().as_millis() as u64 + 1;
+                let mut gossip = GossipConfig::new(
+                    "sim",
+                    format!("worker-{}", ctx.my_ip()),
+                    generation,
+                    ctx.my_ip(),
+                );
+                gossip.seeds = vec![seed.clone()];
+                gossip.gossip_interval = Duration::from_millis(250);
+                gossip.dead_after = Duration::from_millis(2_500);
+                gossip.forget_after = Duration::from_secs(30);
+                match GossipMembership::join(providers.clone(), gossip, env.kv.clone()).await {
+                    Ok(membership) => break membership,
+                    Err(_) => {
+                        let _ = providers.time().sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            };
+            worker = worker.with_membership(Arc::new(membership));
+        }
+        worker.run(ctx.shutdown().clone()).await;
         Ok(())
     }
 }

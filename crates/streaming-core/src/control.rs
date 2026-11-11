@@ -251,6 +251,17 @@ pub struct ActorSnapshot {
     pub last_error: Option<String>,
 }
 
+/// How far the emitting half of an aggregate node got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmittedWindow {
+    /// Start of the window, inclusive.
+    pub start_ms: Timestamp,
+    /// End of the window, exclusive.
+    pub end_ms: Timestamp,
+    /// Whether every element of the window is out.
+    pub complete: bool,
+}
+
 /// Progress of one slice, as of one snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SliceSnapshot {
@@ -269,6 +280,10 @@ pub struct SliceSnapshot {
     /// Last committed source position.
     #[serde(default)]
     pub position: Option<Position>,
+    /// For the emitting half of an aggregate node: the last window it
+    /// committed elements of.
+    #[serde(default)]
+    pub window: Option<EmittedWindow>,
     /// Last committed watermark.
     #[serde(default)]
     pub watermark_ms: Option<Timestamp>,
@@ -299,7 +314,8 @@ pub struct TenantUsage {
     pub actors: u32,
     /// Records its source actors read over the last interval, per second.
     pub in_per_sec: f64,
-    /// Sum of the busy ratios of its actors: an estimate of the cores it uses.
+    /// Sum of the busy ratios of its actors. Busy time includes waiting on
+    /// I/O (a sink write, a KV command), so this is occupation, not CPU.
     pub busy: f64,
 }
 
