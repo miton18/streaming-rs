@@ -156,6 +156,52 @@ fn bump(backoff: &mut Duration) -> Duration {
     current
 }
 
+/// Whether repeating a store call can cure its error.
+trait Retry {
+    fn transient(&self) -> bool;
+}
+
+impl Retry for KvError {
+    fn transient(&self) -> bool {
+        !matches!(self, KvError::TooLarge { .. })
+    }
+}
+
+impl Retry for StateError {
+    fn transient(&self) -> bool {
+        matches!(self, StateError::Kv(error) if error.transient())
+    }
+}
+
+/// Repeat an idempotent store call until it gets through, however long the
+/// store stays away. An error that repeating cannot cure is returned.
+///
+/// A slice that gave up on the first error would have to get every call of a
+/// sequence through in a row: with a store failing one call in six, thirty
+/// calls in a row succeed less than once in two hundred attempts.
+async fn persist<P, T, E, Fut>(
+    env: &RuntimeEnv<P>,
+    note: impl Fn(String),
+    mut call: impl FnMut() -> Fut,
+) -> Result<T, E>
+where
+    P: Providers,
+    E: Retry + std::fmt::Display,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let mut backoff = MIN_BACKOFF;
+    loop {
+        match call().await {
+            Ok(value) => return Ok(value),
+            Err(error) if error.transient() => {
+                note(error.to_string());
+                let _ = env.providers.time().sleep(bump(&mut backoff)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn context<P: Providers>(env: &RuntimeEnv<P>, key: &SliceKey, node: &NodeId) -> OpContext<P> {
     OpContext {
         providers: env.providers.clone(),
@@ -242,6 +288,19 @@ struct ActorCtx<P: Providers> {
 impl<P: Providers> ActorCtx<P> {
     async fn sleep(&self, duration: Duration) {
         let _ = self.env.providers.time().sleep(duration).await;
+    }
+
+    fn now(&self) -> Duration {
+        self.env.providers.time().now()
+    }
+
+    /// Repeat an idempotent store call until it gets through.
+    async fn persist<T, E, Fut>(&self, call: impl FnMut() -> Fut) -> Result<T, E>
+    where
+        E: Retry + std::fmt::Display,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        persist(&self.env, |error| self.meter.metrics.error(error), call).await
     }
 
     /// Suspend while the node is paused by the control plane.
@@ -724,7 +783,12 @@ async fn run_emitter<P: Providers>(
     // Watermark of what this slice emits: results carry the timestamp
     // `window end - 1`, and windows are emitted in closing order.
     let mut watermark = start.watermark;
-    let mut backoff = MIN_BACKOFF;
+    let grace = root.ctx.settings.gc_grace;
+    // Emitted windows on their way out of the store, per feeding slice: `None`
+    // while a commit record of that slice still carries changes to the window,
+    // then the instant from which none did.
+    let mut lingering: Vec<BTreeMap<Window, Option<Duration>>> =
+        vec![BTreeMap::new(); feeding.len()];
     loop {
         if let Some(covered) = root.settle() {
             committed = Some(covered);
@@ -735,56 +799,91 @@ async fn run_emitter<P: Providers>(
         root.ctx.meter.busy();
 
         // Logs first: they give, in one read per slice, the watermark and the
-        // commits that may not be materialized yet.
+        // commits that are not copied out yet.
         let mut logs = Vec::with_capacity(feeding.len());
         let mut global = Timestamp::MAX;
-        let mut failed = None;
         for slice in &feeding {
-            match state::read_log(kv.as_ref(), slice).await {
-                Ok(log) => {
-                    global = global.min(log.head().map_or(NO_WATERMARK, |head| head.watermark));
-                    logs.push(log);
-                }
-                Err(StateError::Kv(error)) => {
-                    failed = Some(error);
-                    break;
-                }
-                Err(error) => return Err(error.into()),
-            }
+            let log = root
+                .ctx
+                .persist(|| state::read_log(kv.as_ref(), slice))
+                .await?;
+            global = global.min(log.head().map_or(NO_WATERMARK, |head| head.watermark));
+            logs.push(log);
         }
-        let mut windows = BTreeSet::new();
-        if failed.is_none() {
-            for (slice, log) in feeding.iter().zip(&logs) {
-                match state::list_windows(kv.as_ref(), slice, &node, &log.records).await {
-                    Ok(found) => windows.extend(found),
-                    Err(error) => {
-                        failed = Some(error);
-                        break;
-                    }
-                }
-            }
+        let mut indexed = Vec::with_capacity(feeding.len());
+        for slice in &feeding {
+            let found = root
+                .ctx
+                .persist(|| state::indexed_windows(kv.as_ref(), slice, &node))
+                .await?;
+            indexed.push(found);
         }
-        if let Some(error) = failed {
-            root.ctx.meter.metrics.error(error.to_string());
-            root.ctx.meter.idle();
-            root.ctx.sleep(bump(&mut backoff)).await;
-            continue;
+        let read_at = root.ctx.now();
+        let mut windows: BTreeSet<Window> = BTreeSet::new();
+        for (log, found) in logs.iter().zip(&indexed) {
+            windows.extend(found.iter().copied());
+            windows.extend(state::pending_windows(&log.records, &node));
         }
-        backoff = MIN_BACKOFF;
 
-        // Windows whose emission is committed are garbage, including any
-        // resurrected by a fenced worker finishing late.
+        // Windows whose emission is committed are garbage. Their state goes at
+        // once; their index entry stays until no commit record has carried a
+        // change to them for `gc_grace`, so that a write issued meanwhile by
+        // an instance that lost the slice is deleted too (see `state`).
         let emitted = |window: &Window, upto: Option<Position>| {
             upto.is_some_and(|at| {
                 let this = (ts_key(window.end), ts_key(window.start));
                 this < (at.0, at.1) || (this == (at.0, at.1) && at.2 == u64::MAX)
             })
         };
-        for window in windows.iter().filter(|window| emitted(window, committed)) {
-            for slice in &feeding {
-                if let Err(error) = state::drop_window(kv.as_ref(), slice, &node, window).await {
-                    root.ctx.meter.metrics.error(error.to_string());
+        for (((slice, log), found), lingering) in
+            feeding.iter().zip(&logs).zip(&indexed).zip(&mut lingering)
+        {
+            let changing = state::pending_windows(&log.records, &node);
+            lingering.retain(|window, _| found.contains(window));
+            let mut release = Vec::new();
+            let mut forget = Vec::new();
+            for window in found.iter().filter(|window| emitted(window, committed)) {
+                let quiet = !changing.contains(window);
+                match lingering.get(window).copied() {
+                    None => {
+                        release.push(*window);
+                        lingering.insert(*window, quiet.then_some(read_at));
+                    }
+                    Some(_) if !quiet => {
+                        lingering.insert(*window, None);
+                    }
+                    Some(None) => {
+                        lingering.insert(*window, Some(read_at));
+                    }
+                    Some(Some(since)) => {
+                        if read_at.saturating_sub(since) >= grace {
+                            forget.push(*window);
+                        }
+                    }
                 }
+            }
+            if let Err(error) = state::delete_windows(kv.as_ref(), slice, &node, &release).await {
+                root.ctx.meter.metrics.error(error.to_string());
+                for window in &release {
+                    lingering.remove(window);
+                }
+            }
+            if forget.is_empty() {
+                continue;
+            }
+            // State first: stopped between the two, the entries are still
+            // there for whoever comes next.
+            let forgotten = async {
+                state::delete_windows(kv.as_ref(), slice, &node, &forget).await?;
+                state::unindex_windows(kv.as_ref(), slice, &node, &forget).await
+            };
+            match forgotten.await {
+                Ok(()) => {
+                    for window in &forget {
+                        lingering.remove(window);
+                    }
+                }
+                Err(error) => root.ctx.meter.metrics.error(error.to_string()),
             }
         }
 
@@ -812,27 +911,17 @@ async fn run_emitter<P: Providers>(
             continue;
         }
 
-        'windows: for window in ready {
+        for window in ready {
             // A closed window is frozen: every feeding slice has a committed
             // watermark past its end, so no later commit can change it.
             let mut merged: BTreeMap<Key, DynAcc> = BTreeMap::new();
             for (slice, log) in feeding.iter().zip(&logs) {
-                let partial = match state::read_window(
-                    kv.as_ref(),
-                    slice,
-                    &node,
-                    &window,
-                    &log.records,
-                )
-                .await
-                {
-                    Ok(partial) => partial,
-                    Err(error) => {
-                        root.ctx.meter.metrics.error(error.to_string());
-                        root.ctx.sleep(bump(&mut backoff)).await;
-                        break 'windows;
-                    }
-                };
+                let partial = root
+                    .ctx
+                    .persist(|| {
+                        state::read_window(kv.as_ref(), slice, &node, &window, &log.records)
+                    })
+                    .await?;
                 for (key, (bytes, _)) in partial {
                     let acc = aggregator
                         .decode(&bytes)
@@ -851,23 +940,17 @@ async fn run_emitter<P: Providers>(
             // emitted in our place meanwhile: another instance committing this
             // window would then delete the very state we were reading. Its
             // commit comes first, so checking the log after the read settles it.
-            match state::read_log(kv.as_ref(), &root.ctx.key).await {
-                Ok(log) => {
-                    let ours = match log.head() {
-                        None => root.start_epoch == 0,
-                        Some(head) => head.owner == root.owner || head.epoch == root.start_epoch,
-                    };
-                    if !ours {
-                        root.exit.finish(SliceExit::Fenced);
-                        return futures::future::pending().await;
-                    }
-                }
-                Err(StateError::Kv(error)) => {
-                    root.ctx.meter.metrics.error(error.to_string());
-                    root.ctx.sleep(bump(&mut backoff)).await;
-                    break 'windows;
-                }
-                Err(error) => return Err(error.into()),
+            let own = root
+                .ctx
+                .persist(|| state::read_log(kv.as_ref(), &root.ctx.key))
+                .await?;
+            let ours = match own.head() {
+                None => root.start_epoch == 0,
+                Some(head) => head.owner == root.owner || head.epoch == root.start_epoch,
+            };
+            if !ours {
+                root.exit.finish(SliceExit::Fenced);
+                return futures::future::pending().await;
             }
             let window_position = (ts_key(window.end), ts_key(window.start));
             let resume = match position {
@@ -944,6 +1027,70 @@ struct Pending {
     changes: Vec<NodeChanges>,
 }
 
+/// Copy the accumulators of `records` into the window hashes, oldest record
+/// first. `false` means another instance took the slice over: nothing more may
+/// be written.
+///
+/// A write is only safe while the record it comes from still holds its payload
+/// in the log: until then the emitter keeps the window indexed (see `state`).
+/// `proven` is the last instant at which that was known to be true; a quarter
+/// of `gc_grace` later, the log is read again before going on.
+async fn copy_out<P: Providers>(
+    ctx: &ActorCtx<P>,
+    head: u64,
+    owner: &str,
+    records: &[&CommitRecord],
+    proven: &mut Duration,
+) -> Result<bool, ActorError> {
+    let kv = ctx.env.kv.as_ref();
+    let validity = ctx.settings.gc_grace / 4;
+    // Inherited records that somebody else finished and emptied meanwhile.
+    let mut gone: BTreeSet<u64> = BTreeSet::new();
+    let mut backoff = MIN_BACKOFF;
+    for record in records {
+        for node in &record.changes {
+            for changes in &node.windows {
+                while !gone.contains(&record.epoch) {
+                    if ctx.now().saturating_sub(*proven) > validity {
+                        let asked = ctx.now();
+                        let view = ctx.persist(|| state::read_log(kv, &ctx.key)).await?;
+                        let ours = view
+                            .head()
+                            .is_some_and(|at| at.epoch == head && at.owner == owner);
+                        if !ours {
+                            return Ok(false);
+                        }
+                        let present: BTreeSet<u64> =
+                            view.records.iter().map(|record| record.epoch).collect();
+                        gone.extend(
+                            records
+                                .iter()
+                                .map(|record| record.epoch)
+                                .filter(|epoch| !present.contains(epoch)),
+                        );
+                        *proven = asked;
+                        continue;
+                    }
+                    match state::materialize_window(kv, &ctx.key, &node.node, changes, record.epoch)
+                        .await
+                    {
+                        Ok(()) => {
+                            backoff = MIN_BACKOFF;
+                            break;
+                        }
+                        Err(error) if error.transient() => {
+                            ctx.meter.metrics.error(error.to_string());
+                            ctx.sleep(bump(&mut backoff)).await;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_committer<P: Providers>(
     ctx: ActorCtx<P>,
@@ -952,20 +1099,19 @@ async fn run_committer<P: Providers>(
     committed: watch::Sender<u64>,
     start_epoch: u64,
     owner: String,
-    log: LogState,
     slice: Arc<SliceMetrics>,
     exit: Exit,
 ) -> Result<(), ActorError> {
     let kv = ctx.env.kv.clone();
     let mut next = start_epoch + 1;
     let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
-    let LogState {
-        mut live,
-        mut floor,
-        head_is_heavy,
-    } = log;
-    // The record the next commit supersedes, and whether it is worth emptying.
-    let mut superseded = (start_epoch > 0).then_some((start_epoch, head_is_heavy));
+    // What this instance knows of the log, from the read that follows its
+    // first commit: the epochs present above the seal, and the seal.
+    let mut taken_over = false;
+    let mut live: Vec<u64> = Vec::new();
+    let mut floor = 0;
+    // Records copied out whose payload is still to be emptied.
+    let mut heavy: Vec<u64> = Vec::new();
     ctx.meter.metrics.set_state(ActorState::Running);
     loop {
         ctx.meter.idle();
@@ -1011,15 +1157,16 @@ async fn run_committer<P: Providers>(
                 watermark: ready.1,
                 changes,
             };
-            let started = ctx.env.providers.time().now();
+            let started = ctx.now();
             let mut backoff = MIN_BACKOFF;
+            // The last instant at which the payloads this instance copies out
+            // were known to be in the log.
+            let mut proven;
             let outcome = loop {
+                proven = ctx.now();
                 match state::try_commit(kv.as_ref(), &ctx.key, &record).await {
                     Ok(outcome) => break outcome,
-                    Err(StateError::Kv(error @ KvError::TooLarge { .. })) => {
-                        return Err(error.into());
-                    }
-                    Err(StateError::Kv(error)) => {
+                    Err(error) if error.transient() => {
                         // Outcome unknown: the next attempt recognises our own record.
                         ctx.meter.metrics.error(error.to_string());
                         ctx.sleep(bump(&mut backoff)).await;
@@ -1031,36 +1178,70 @@ async fn run_committer<P: Providers>(
                 exit.finish(SliceExit::Fenced);
                 return futures::future::pending().await;
             }
-            let mut backoff = MIN_BACKOFF;
-            while let Err(error) = state::materialize(kv.as_ref(), &ctx.key, &record).await {
-                if matches!(error, KvError::TooLarge { .. }) {
-                    return Err(error.into());
+
+            // The first commit of an instance makes the slice its own. What
+            // earlier instances committed without copying it out is ours to
+            // finish, as of a read that comes after our commit.
+            let mut inherited: Vec<CommitRecord> = Vec::new();
+            if taken_over {
+                live.push(next);
+            } else {
+                let asked = ctx.now();
+                let view = ctx
+                    .persist(|| state::read_log(kv.as_ref(), &ctx.key))
+                    .await?;
+                let ours = view
+                    .head()
+                    .is_some_and(|head| head.epoch == next && head.owner == owner);
+                if !ours {
+                    exit.finish(SliceExit::Fenced);
+                    return futures::future::pending().await;
                 }
-                ctx.meter.metrics.error(error.to_string());
-                ctx.sleep(bump(&mut backoff)).await;
+                proven = asked;
+                // What sits at or below the seal is final or void.
+                let _ = state::sweep(kv.as_ref(), &ctx.key, &view.sealed).await;
+                live = view.live;
+                floor = view.floor;
+                inherited = view
+                    .records
+                    .into_iter()
+                    .filter(|record| record.epoch < next && !record.changes.is_empty())
+                    .collect();
+                taken_over = true;
             }
-            // The record this one supersedes is materialized: empty it. Its
-            // field stays, so that a worker left behind cannot take the epoch.
-            // Best effort: a payload not emptied now goes at the next sweep.
-            if let Some((epoch, true)) = superseded {
-                let _ = state::tombstone(kv.as_ref(), &ctx.key, epoch).await;
+            let mut work: Vec<&CommitRecord> = inherited.iter().collect();
+            work.push(&record);
+            if !copy_out(&ctx, next, &owner, &work, &mut proven).await? {
+                exit.finish(SliceExit::Fenced);
+                return futures::future::pending().await;
             }
-            superseded = Some((next, !record.changes.is_empty()));
-            live.push(next);
+            // Everything below this epoch is copied out: empty it. The fields
+            // stay, so that a worker left behind cannot take those epochs.
+            // Best effort: what is not emptied now is at the next commit.
+            heavy.extend(inherited.iter().map(|record| record.epoch));
+            if state::tombstone(kv.as_ref(), &ctx.key, &heavy)
+                .await
+                .is_ok()
+            {
+                heavy.clear();
+            }
+            if !record.changes.is_empty() {
+                heavy.push(next);
+            }
             if live.len() > COMPACT_AT {
-                // Everything before this epoch is materialized: seal it, then
-                // delete the fields below the seal.
+                // Seal what is copied out, then delete the fields below the seal.
                 let sealed = next - 1;
                 if state::compact(kv.as_ref(), &ctx.key, sealed, &live, floor)
                     .await
                     .is_ok()
                 {
                     live.retain(|epoch| *epoch > sealed);
+                    heavy.retain(|epoch| *epoch > sealed);
                     floor = sealed;
                 }
             }
 
-            let elapsed = ctx.env.providers.time().now().saturating_sub(started);
+            let elapsed = ctx.now().saturating_sub(started);
             slice.epoch.store(next, Ordering::Relaxed);
             if let Some(position) = record.position {
                 *slice.position.lock() = Some(position);
@@ -1078,21 +1259,10 @@ async fn run_committer<P: Providers>(
     }
 }
 
-/// What the commit actor needs to know about the log it continues.
-struct LogState {
-    /// Epochs present in the log above the seal.
-    live: Vec<u64>,
-    /// The seal as of the last read.
-    floor: u64,
-    /// Whether the head record carries state changes worth emptying later.
-    head_is_heavy: bool,
-}
-
 struct Prepared {
     ops: BTreeMap<NodeId, NodeOp>,
     start: Start,
     restored: BTreeMap<NodeId, AggState>,
-    log: LogState,
 }
 
 /// Number of fields a log may hold before it is sealed and swept.
@@ -1101,6 +1271,7 @@ const COMPACT_AT: usize = 24;
 async fn prepare<P: Providers>(
     params: &SliceParams<P>,
     nodes: &[NodeId],
+    metrics: &SliceMetrics,
 ) -> Result<Prepared, ActorError> {
     let env = &params.env;
     let kv = env.kv.as_ref();
@@ -1112,19 +1283,12 @@ async fn prepare<P: Providers>(
             build_op(env, &params.topology, &params.key, node, node == root)?,
         );
     }
+    let note = |error: String| *metrics.last_error.lock() = Some(error);
 
-    // Whatever the previous owner committed but did not finish copying out is
-    // copied out now. What sits at or below the seal is final or void.
-    let log = state::read_log(kv, &params.key).await?;
-    for record in &log.records {
-        state::materialize(kv, &params.key, record).await?;
-    }
-    state::sweep(kv, &params.key, &log.sealed).await?;
-    let log_state = LogState {
-        head_is_heavy: log.head().is_some_and(|head| !head.changes.is_empty()),
-        live: log.live.clone(),
-        floor: log.floor,
-    };
+    // Reading only: copying records out is for the instance that owns the
+    // slice, and this one does not before its first commit. Commits not copied
+    // out yet are laid over what the window hashes hold.
+    let log = persist(env, &note, || state::read_log(kv, &params.key)).await?;
     let start = log.head().map_or(
         Start {
             epoch: 0,
@@ -1144,13 +1308,19 @@ async fn prepare<P: Providers>(
             continue;
         };
         let mut state = AggState::new();
-        for window in state::list_windows(kv, &params.key, node, &[]).await? {
+        let windows = persist(env, &note, || {
+            state::list_windows(kv, &params.key, node, &log.records)
+        })
+        .await?;
+        for window in windows {
             if is_closed(&window, *lateness_ms, start.watermark) {
                 continue;
             }
-            for (key, (bytes, epoch)) in
-                state::read_window(kv, &params.key, node, &window, &[]).await?
-            {
+            let entries = persist(env, &note, || {
+                state::read_window(kv, &params.key, node, &window, &log.records)
+            })
+            .await?;
+            for (key, (bytes, epoch)) in entries {
                 state.insert((window, key), (aggregator.decode(&bytes)?, epoch));
             }
         }
@@ -1160,7 +1330,6 @@ async fn prepare<P: Providers>(
         ops,
         start,
         restored,
-        log: log_state,
     })
 }
 
@@ -1219,7 +1388,7 @@ pub(crate) async fn run_slice<P: Providers>(
     let nodes = params.topology.slice_nodes(&params.key.slice);
     let prepared = moonpool_core::select! {
         () = scope.token().cancelled() => None,
-        prepared = prepare(&params, &nodes) => Some(prepared),
+        prepared = prepare(&params, &nodes, &shared.metrics) => Some(prepared),
     };
     let handles = match prepared {
         None => Vec::new(),
@@ -1269,7 +1438,6 @@ fn start_actors<P: Providers>(
         mut ops,
         start,
         mut restored,
-        log: log_state,
     } = prepared;
 
     let ident = |node: &NodeId, kind: ActorKind| ActorIdent {
@@ -1353,7 +1521,6 @@ fn start_actors<P: Providers>(
             committed_tx,
             start.epoch,
             owner.clone(),
-            log_state,
             shared.metrics.clone(),
             exit.clone(),
         ),

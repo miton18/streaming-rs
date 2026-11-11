@@ -23,6 +23,7 @@ pub mod builtin;
 mod controller;
 #[cfg(feature = "gossip")]
 mod gossip;
+pub mod inspect;
 mod load;
 mod mailbox;
 pub mod memlog;

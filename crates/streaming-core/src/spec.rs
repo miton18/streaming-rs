@@ -51,6 +51,9 @@ fn default_flush_interval() -> Duration {
 fn default_max_in_flight_epochs() -> usize {
     2
 }
+fn default_gc_grace() -> Duration {
+    Duration::from_secs(30)
+}
 
 /// Engine settings of a graph. Every field has a default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +84,12 @@ pub struct GraphSettings {
     /// How many epochs a slice may have read but not yet committed.
     #[serde(default = "default_max_in_flight_epochs")]
     pub max_in_flight_epochs: usize,
+    /// How long the index entry of an emitted window outlives its state. A
+    /// store command issued by a worker that has since lost its slice may
+    /// still land: the entry is what lets such a write be found and deleted.
+    /// Must exceed three times the command timeout of the store.
+    #[serde(with = "duration_str", default = "default_gc_grace")]
+    pub gc_grace: Duration,
 }
 
 impl Default for GraphSettings {
@@ -94,6 +103,7 @@ impl Default for GraphSettings {
             chunk_size: default_chunk_size(),
             flush_interval: default_flush_interval(),
             max_in_flight_epochs: default_max_in_flight_epochs(),
+            gc_grace: default_gc_grace(),
         }
     }
 }

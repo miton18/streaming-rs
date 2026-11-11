@@ -32,6 +32,7 @@ use streaming_core::{
     Position, Registry, SinkConnector, SinkError, SourceConnector, SourceError, SourceRecord,
     Timestamp, TypeTag, Window, Windowed, WorkerId, datum, keys,
 };
+use streaming_runtime::inspect::{SliceHead, slice_head};
 use streaming_runtime::memlog::MemLog;
 use streaming_runtime::{GossipConfig, GossipMembership, NoLoad, RuntimeEnv, Worker, WorkerConfig};
 
@@ -152,6 +153,10 @@ pub struct SimEnv {
     pub kv_latency_ms: u64,
     /// Number of actions the operator took, per kind.
     pub operator_actions: Mutex<BTreeMap<&'static str, u64>>,
+    /// What the auditor found wrong while the run was in progress.
+    pub audit: Mutex<Vec<String>>,
+    /// Number of times the auditor looked at the commit logs.
+    pub audits: Mutex<u64>,
 }
 
 impl SimEnv {
@@ -174,6 +179,8 @@ impl SimEnv {
             boots: Mutex::new(0),
             production_done: Mutex::new(false),
             operator_actions: Mutex::default(),
+            audit: Mutex::default(),
+            audits: Mutex::new(0),
         })
     }
 }
@@ -551,6 +558,8 @@ pub struct Scenario {
     pub kv_latency_ms: u64,
     /// Silence after which a fully-read partition follows the wall clock.
     pub idle_timeout: Duration,
+    /// Number of partitions, among the last ones, that never receive an event.
+    pub silent_partitions: u32,
     /// Every worker runs every slice, whatever the placement says.
     pub duel: bool,
     /// Workers find each other through gossip over the simulated network
@@ -576,6 +585,7 @@ impl Default for Scenario {
             fault_scale: 1.0,
             kv_latency_ms: 6,
             idle_timeout: Duration::from_millis(1_500),
+            silent_partitions: 0,
             duel: false,
             gossip: false,
             settle_timeout: Duration::from_secs(900),
@@ -633,7 +643,9 @@ impl Scenario {
                 "max_batch": self.max_batch,
                 "chunk_size": 7,
                 "mailbox_capacity": 2,
-                "max_in_flight_epochs": 2
+                "max_in_flight_epochs": 2,
+                // Above three times the slowest store command of `ChaosKv`.
+                "gc_grace": "2s"
             },
             "nodes": [
                 {"id": "events", "op": "sim/log@1"},
@@ -843,6 +855,35 @@ async fn dump(env: &SimEnv) {
             eprintln!("--- member {worker} = {}", String::from_utf8_lossy(&info));
         }
     }
+    for key in env.kv.keys() {
+        let state = key.ends_with(":log")
+            || key.ends_with(":seal")
+            || key.contains(":idx:")
+            || key.contains(":w:");
+        if !state {
+            continue;
+        }
+        if let Ok(fields) = kv.hgetall(&key).await {
+            let heavy: Vec<String> = fields
+                .iter()
+                .filter(|(_, value)| value.len() > 1)
+                .map(|(field, value)| format!("{field}({}b)", value.len()))
+                .collect();
+            let names: Vec<&str> = fields.iter().map(|(field, _)| field.as_str()).collect();
+            if key.ends_with(":log") {
+                eprintln!(
+                    "--- {key}: {} fields, with payload: {heavy:?}",
+                    fields.len()
+                );
+            } else {
+                eprintln!(
+                    "--- {key}: {} fields {:?}",
+                    fields.len(),
+                    &names[..names.len().min(12)]
+                );
+            }
+        }
+    }
 }
 
 fn violation(message: String) -> SimulationError {
@@ -896,7 +937,11 @@ impl Workload for Driver {
             let key = format!("key-{}", ctx.random().random_range(0..scenario.keys.max(1)));
             // Events are stamped in the past, as if they had travelled.
             let ts = clock.now_ms() - ctx.random().random_range(0..max_age);
-            let partition = ctx.random().random_range(0..scenario.partitions.max(1));
+            let fed = scenario
+                .partitions
+                .saturating_sub(scenario.silent_partitions)
+                .max(1);
+            let partition = ctx.random().random_range(0..fed);
             {
                 let mut produced = env.produced.lock();
                 produced.total += 1;
@@ -930,6 +975,47 @@ impl Workload for Driver {
             }
             let _ = ctx.time().sleep(Duration::from_millis(500)).await;
         }
+
+        // Everything is out: the state of the emitted windows must leave the
+        // KV, and the commit logs must have stayed small. Leaks would not
+        // falsify a count, but they would fill a real store.
+        let started = ctx.time().now();
+        loop {
+            let leaked: Vec<String> = env
+                .kv
+                .keys()
+                .into_iter()
+                .filter(|key| key.contains(":w:") || key.contains(":idx:"))
+                .collect();
+            if leaked.is_empty() {
+                break;
+            }
+            if ctx.time().now().saturating_sub(started) > Duration::from_secs(300) {
+                dump(&env).await;
+                return Err(violation(format!(
+                    "window state was not garbage-collected: {} keys left, e.g. {:?}",
+                    leaked.len(),
+                    &leaked[..leaked.len().min(3)]
+                )));
+            }
+            let _ = ctx.time().sleep(Duration::from_millis(500)).await;
+        }
+        let store: DynKv = env.kv.clone();
+        for key in env.kv.keys() {
+            if !key.ends_with(":log") {
+                continue;
+            }
+            let fields = store
+                .hgetall(&key)
+                .await
+                .map(|fields| fields.len())
+                .unwrap_or(0);
+            if fields > 60 {
+                return Err(violation(format!(
+                    "commit log `{key}` grew to {fields} fields"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -942,6 +1028,19 @@ impl Workload for Driver {
                 counts: produced.counts.clone(),
             }
         };
+
+        let audit = env.audit.lock().clone();
+        assert_always!(
+            audit.is_empty(),
+            "the committed history of a slice never goes backwards"
+        );
+        if let Some(finding) = audit.first() {
+            return Err(violation(finding.clone()));
+        }
+        assert_sometimes!(
+            *env.audits.lock() > 10,
+            "the auditor watched the commit logs"
+        );
 
         for probe in [&env.counts, &env.raw, &env.both, &env.totals] {
             let conflicts = probe.conflicts();
@@ -1224,5 +1323,69 @@ impl Workload for Operator {
         desire(RunState::Running, None).await.map_err(failed)?;
         ctx.shutdown().cancelled().await;
         Ok(())
+    }
+}
+
+/// Watches the commit logs while the run is in progress and records anything
+/// that goes backwards: an epoch, a position or a watermark of a slice must
+/// never decrease, whoever commits and however often workers are replaced.
+pub struct Auditor {
+    slot: EnvSlot,
+}
+
+impl Auditor {
+    /// An auditor for the current run.
+    #[must_use]
+    pub fn new(slot: EnvSlot) -> Self {
+        Self { slot }
+    }
+}
+
+/// `t:<tenant>:g:<graph>:s:<slice>:log` -> `tenant/graph/slice`.
+fn slice_of_log(key: &str) -> Option<streaming_core::SliceKey> {
+    let rest = key.strip_prefix("t:")?.strip_suffix(":log")?;
+    let (tenant, rest) = rest.split_once(":g:")?;
+    let (graph, slice) = rest.split_once(":s:")?;
+    format!("{tenant}/{graph}/{slice}").parse().ok()
+}
+
+#[async_trait]
+impl Workload for Auditor {
+    fn name(&self) -> &str {
+        "auditor"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let env = env_of(&self.slot)?;
+        let kv: DynKv = env.kv.clone();
+        let mut seen: BTreeMap<String, SliceHead> = BTreeMap::new();
+        loop {
+            moonpool_sim::select! {
+                () = ctx.shutdown().cancelled() => return Ok(()),
+                _ = ctx.time().sleep(Duration::from_millis(100)) => {}
+            }
+            *env.audits.lock() += 1;
+            for key in env.kv.keys() {
+                let Some(slice) = slice_of_log(&key) else {
+                    continue;
+                };
+                let Ok(Some(head)) = slice_head(kv.as_ref(), &slice).await else {
+                    continue;
+                };
+                if let Some(before) = seen.get(&key) {
+                    let backwards = head.epoch < before.epoch
+                        || head.position < before.position
+                        || head.watermark_ms < before.watermark_ms
+                        || head.sealed < before.sealed
+                        || (head.epoch == before.epoch && head.owner != before.owner);
+                    if backwards {
+                        env.audit.lock().push(format!(
+                            "slice {slice} went backwards: {before:?} then {head:?}"
+                        ));
+                    }
+                }
+                seen.insert(key, head);
+            }
+        }
     }
 }

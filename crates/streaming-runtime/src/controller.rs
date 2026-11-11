@@ -231,9 +231,13 @@ async fn purge_graph(kv: &dyn Kv, graph: &GraphKey) -> Result<(), KvError> {
             slice,
         };
         for node in &nodes {
-            for window in state::list_windows(kv, &slice, &node.id, &[]).await? {
-                state::drop_window(kv, &slice, &node.id, &window).await?;
-            }
+            let windows: Vec<_> = state::indexed_windows(kv, &slice, &node.id)
+                .await?
+                .into_iter()
+                .collect();
+            state::delete_windows(kv, &slice, &node.id, &windows).await?;
+            kv.del(vec![keys::slice_window_index(&slice, &node.id)])
+                .await?;
         }
         kv.del(vec![keys::slice_log(&slice), keys::slice_seal(&slice)])
             .await?;

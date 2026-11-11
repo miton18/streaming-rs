@@ -34,8 +34,30 @@
 //! Accumulators are copied out of the commit record into one hash per window,
 //! under versioned fields `<key>@<epoch>`. Versioned fields make the copy safe
 //! to repeat and safe against a fenced worker finishing late: a reader keeps,
-//! for each key, the field with the highest epoch. Whoever opens a log replays
-//! every record still holding its payload, in order.
+//! for each key, the field with the highest epoch.
+//!
+//! Only the instance that owns the slice copies records out: its own, and
+//! those it inherited when it took the slice over. Until a record is copied
+//! out it keeps its payload in the log, where every reader finds it; whoever
+//! empties a record has copied it out entirely.
+//!
+//! # Forgetting a window
+//!
+//! The store offers no atomicity across keys, and a write issued by an
+//! instance that has since lost the slice may still land. Three rules make
+//! sure such a write never leaves a window hash that nobody will delete:
+//!
+//! - a window is entered in the index of its slice *before* anything is
+//!   written to its hash;
+//! - a writer only writes while the record it copies still holds its payload
+//!   in the log, as of a read at most a quarter of `gc_grace` old;
+//! - once a window is emitted its hash is deleted at once, but its index entry
+//!   stays until no record in the log has mentioned the window for `gc_grace`.
+//!   The hash is then deleted once more, and only then the entry.
+//!
+//! A store command takes effect within its timeout or not at all: with a
+//! `gc_grace` above three timeouts, every write to a window lands before the
+//! last delete.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -214,7 +236,50 @@ pub(crate) async fn try_commit(
     Ok(CommitOutcome::Committed)
 }
 
-/// Copy the accumulators of a commit record into the window hashes. Idempotent.
+/// Copy the changes of one epoch to one window into the hash of that window.
+/// Idempotent.
+///
+/// The index entry goes first: whatever a writer leaves behind when it stops
+/// half-way is listed, so it can be found and deleted.
+pub(crate) async fn materialize_window(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    node: &NodeId,
+    changes: &WindowChanges,
+    epoch: u64,
+) -> Result<(), KvError> {
+    if changes.entries.is_empty() {
+        return Ok(());
+    }
+    kv.hset(
+        &keys::slice_window_index(slice, node),
+        vec![(changes.window.to_string(), b"1".to_vec())],
+    )
+    .await?;
+    let window_key = keys::slice_window(slice, node, &changes.window);
+    kv.hset(
+        &window_key,
+        changes
+            .entries
+            .iter()
+            .map(|entry| (keys::state_field(&entry.key, epoch), entry.acc.clone()))
+            .collect(),
+    )
+    .await?;
+    let superseded: Vec<String> = changes
+        .entries
+        .iter()
+        .filter(|entry| entry.prev_epoch != 0 && entry.prev_epoch != epoch)
+        .map(|entry| keys::state_field(&entry.key, entry.prev_epoch))
+        .collect();
+    if !superseded.is_empty() {
+        kv.hdel(&window_key, superseded).await?;
+    }
+    Ok(())
+}
+
+/// Copy every change of a commit record into the window hashes.
+#[cfg(test)]
 pub(crate) async fn materialize(
     kv: &dyn Kv,
     slice: &SliceKey,
@@ -222,50 +287,28 @@ pub(crate) async fn materialize(
 ) -> Result<(), KvError> {
     for node in &record.changes {
         for changes in &node.windows {
-            if changes.entries.is_empty() {
-                continue;
-            }
-            // Index first: a window hash is never unknown to the index.
-            kv.hset(
-                &keys::slice_window_index(slice, &node.node),
-                vec![(changes.window.to_string(), b"1".to_vec())],
-            )
-            .await?;
-            let window_key = keys::slice_window(slice, &node.node, &changes.window);
-            kv.hset(
-                &window_key,
-                changes
-                    .entries
-                    .iter()
-                    .map(|entry| {
-                        (
-                            keys::state_field(&entry.key, record.epoch),
-                            entry.acc.clone(),
-                        )
-                    })
-                    .collect(),
-            )
-            .await?;
-            let superseded: Vec<String> = changes
-                .entries
-                .iter()
-                .filter(|entry| entry.prev_epoch != 0 && entry.prev_epoch != record.epoch)
-                .map(|entry| keys::state_field(&entry.key, entry.prev_epoch))
-                .collect();
-            if !superseded.is_empty() {
-                kv.hdel(&window_key, superseded).await?;
-            }
+            materialize_window(kv, slice, &node.node, changes, record.epoch).await?;
         }
     }
     Ok(())
 }
 
-/// Empty a superseded, materialized record. Its field stays and keeps
-/// refusing late writers.
-pub(crate) async fn tombstone(kv: &dyn Kv, slice: &SliceKey, epoch: u64) -> Result<(), KvError> {
+/// Empty records that are superseded and copied out. Their fields stay and
+/// keep refusing late writers.
+pub(crate) async fn tombstone(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    epochs: &[u64],
+) -> Result<(), KvError> {
+    if epochs.is_empty() {
+        return Ok(());
+    }
     kv.hset(
         &keys::slice_log(slice),
-        vec![(keys::commit_field(epoch), Vec::new())],
+        epochs
+            .iter()
+            .map(|epoch| (keys::commit_field(*epoch), Vec::new()))
+            .collect(),
     )
     .await
 }
@@ -373,43 +416,79 @@ pub(crate) async fn read_window(
     Ok(state)
 }
 
-/// Windows a slice holds accumulators for, for one aggregate node.
+/// Windows the index of a slice lists for one aggregate node.
+pub(crate) async fn indexed_windows(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    node: &NodeId,
+) -> Result<BTreeSet<Window>, KvError> {
+    Ok(kv
+        .hgetall(&keys::slice_window_index(slice, node))
+        .await?
+        .iter()
+        .filter_map(|(field, _)| field.parse::<Window>().ok())
+        .collect())
+}
+
+/// Windows changed by commit records that still hold their payload.
+pub(crate) fn pending_windows(records: &[CommitRecord], node: &NodeId) -> BTreeSet<Window> {
+    records
+        .iter()
+        .flat_map(|record| &record.changes)
+        .filter(|changes| &changes.node == node)
+        .flat_map(|changes| changes.windows.iter().map(|w| w.window))
+        .collect()
+}
+
+/// Windows a slice holds accumulators for, for one aggregate node: those
+/// indexed and those only present in `pending` commit records.
 pub(crate) async fn list_windows(
     kv: &dyn Kv,
     slice: &SliceKey,
     node: &NodeId,
     pending: &[CommitRecord],
 ) -> Result<BTreeSet<Window>, KvError> {
-    let mut windows = BTreeSet::new();
-    for (field, _) in kv.hgetall(&keys::slice_window_index(slice, node)).await? {
-        if let Ok(window) = field.parse::<Window>() {
-            windows.insert(window);
-        }
-    }
-    for record in pending {
-        for changes in record
-            .changes
-            .iter()
-            .filter(|changes| &changes.node == node)
-        {
-            windows.extend(changes.windows.iter().map(|w| w.window));
-        }
-    }
+    let mut windows = indexed_windows(kv, slice, node).await?;
+    windows.extend(pending_windows(pending, node));
     Ok(windows)
 }
 
-/// Delete the accumulators of a window once it has been emitted. Idempotent.
-pub(crate) async fn drop_window(
+/// Largest number of keys one delete may carry.
+const DELETE_BATCH: usize = 100;
+
+/// Delete the accumulators of windows. Their index entries stay.
+pub(crate) async fn delete_windows(
     kv: &dyn Kv,
     slice: &SliceKey,
     node: &NodeId,
-    window: &Window,
+    windows: &[Window],
 ) -> Result<(), KvError> {
-    kv.del(vec![keys::slice_window(slice, node, window)])
+    for batch in windows.chunks(DELETE_BATCH) {
+        kv.del(
+            batch
+                .iter()
+                .map(|window| keys::slice_window(slice, node, window))
+                .collect(),
+        )
         .await?;
+    }
+    Ok(())
+}
+
+/// Remove windows from the index of a slice. Only once nothing can write to
+/// their hashes any more, and after a last [`delete_windows`].
+pub(crate) async fn unindex_windows(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    node: &NodeId,
+    windows: &[Window],
+) -> Result<(), KvError> {
+    if windows.is_empty() {
+        return Ok(());
+    }
     kv.hdel(
         &keys::slice_window_index(slice, node),
-        vec![window.to_string()],
+        windows.iter().map(ToString::to_string).collect(),
     )
     .await
 }
@@ -502,13 +581,23 @@ mod tests {
                 list_windows(&kv, &slice(), &node(), &[]).await.unwrap(),
                 BTreeSet::from([window])
             );
-            drop_window(&kv, &slice(), &node(), &window).await.unwrap();
+            delete_windows(&kv, &slice(), &node(), &[window])
+                .await
+                .unwrap();
             assert!(
                 read_window(&kv, &slice(), &node(), &window, &[])
                     .await
                     .unwrap()
                     .is_empty()
             );
+            // The entry outlives the state: it is what a late write is found by.
+            assert_eq!(
+                indexed_windows(&kv, &slice(), &node()).await.unwrap(),
+                BTreeSet::from([window])
+            );
+            unindex_windows(&kv, &slice(), &node(), &[window])
+                .await
+                .unwrap();
             assert!(
                 list_windows(&kv, &slice(), &node(), &[])
                     .await
@@ -550,8 +639,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            tombstone(&kv, &slice(), 1).await.unwrap();
-            tombstone(&kv, &slice(), 2).await.unwrap();
+            tombstone(&kv, &slice(), &[1, 2]).await.unwrap();
             let log = read_log(&kv, &slice()).await.unwrap();
             assert_eq!(log.records.len(), 1);
             assert_eq!(log.head().unwrap().epoch, 3);

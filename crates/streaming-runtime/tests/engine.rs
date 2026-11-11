@@ -54,6 +54,7 @@ fn spec() -> GraphSpec {
             "idle_timeout": "200ms",
             "linger": "20ms",
             "flush_interval": "50ms",
+            "gc_grace": "200ms",
             "max_batch": 64,
             "chunk_size": 16
         },
@@ -211,16 +212,25 @@ async fn counts_every_record_exactly_once() {
     );
     assert_eq!((0..3).map(|p| log.retained(p)).sum::<usize>(), 0);
 
-    // Emitted windows are garbage-collected from the KV.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let leftovers: Vec<String> = store
-        .keys()
-        .into_iter()
-        .filter(|key| key.contains(":w:") || key.contains(":idx:"))
-        .collect();
+    // Emitted windows are garbage-collected from the KV: their state at once,
+    // their index entries once `gc_grace` has passed.
+    let leftovers = || -> Vec<String> {
+        store
+            .keys()
+            .into_iter()
+            .filter(|key| key.contains(":w:") || key.contains(":idx:"))
+            .collect()
+    };
+    for _ in 0..100 {
+        if leftovers().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(
-        leftovers.is_empty(),
-        "window state left behind: {leftovers:?}"
+        leftovers().is_empty(),
+        "window state left behind: {:?}",
+        leftovers()
     );
 
     shutdown.cancel();

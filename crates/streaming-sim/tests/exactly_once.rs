@@ -11,7 +11,7 @@ use moonpool_sim::{
     Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport,
 };
 use parking_lot::Mutex;
-use streaming_sim::{Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
+use streaming_sim::{Auditor, Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
 
 fn iterations(default: usize) -> usize {
     std::env::var("SIM_ITERATIONS")
@@ -40,6 +40,7 @@ fn run(
         })
         .workload(Driver::new(slot.clone(), scenario.clone()))
         .workload(Operator::new(slot.clone(), scenario.clone()))
+        .workload(Auditor::new(slot.clone()))
         .run_time_budget(Duration::from_secs(3_600));
     if attrition {
         builder = builder
@@ -224,6 +225,19 @@ fn exactly_once_in_a_hostile_mix() {
         events: 1_200,
         produce_for: Duration::from_secs(30),
         fault_scale: 3.0,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_a_silent_partition() {
+    // One partition never receives anything: its watermark only ever moves
+    // with the wall clock, and windows must still close.
+    let scenario = Scenario {
+        partitions: 4,
+        silent_partitions: 1,
         ..Scenario::default()
     };
     let report = run(scenario, 3, true, 10);

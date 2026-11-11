@@ -89,6 +89,13 @@ atomicity (no `MULTI`, no scripting), so the protocol also runs on Materia KV:
   are only deleted below a write-once *seal* that every committer re-reads
   after its `HSETNX`, so that a worker left far behind cannot revive an old
   epoch;
+- accumulators are copied out of the log into one hash per window, by the
+  instance that owns the slice and by it alone. Once a window is emitted its
+  state is deleted at once; its index entry stays until no log record has
+  mentioned the window for `gc_grace` (30 s by default), then state and entry
+  go for good. A write still in flight from a worker that lost the slice thus
+  cannot leave a window behind, provided a store command takes effect within
+  a third of `gc_grace` or not at all;
 - sinks receive each element with a deterministic `EmitId` and must be
   idempotent on it: after a failure the same elements are written again with
   the same ids.
@@ -184,11 +191,21 @@ SIM_SEEDS=12685844343199869141 cargo test -p streaming-sim -- --nocapture   # re
 The harness runs workers in processes that the simulator crashes and reboots,
 against a KV whose commands fail before or after being applied, a source that
 redelivers and cuts batches anywhere, and sinks that fail halfway through a
-batch. A driver then checks that every event was counted exactly once on a
-graph combining a windowed count, a stateless path, a diamond and a
-second-level aggregation. Scenarios: quiet cluster, reboots, gossip
-membership over the simulated network, and "every worker runs every slice",
-where three workers fight over each commit.
+batch. A driver then checks, on a graph combining a windowed count, a
+stateless path, a diamond and a second-level aggregation, that:
+
+- every event was counted exactly once, on every path;
+- the committed history of a slice never went backwards (an auditor reads the
+  commit logs every 100 ms);
+- once everything is emitted, no window state is left in the store and the
+  commit logs stayed small.
+
+Thirteen scenarios: quiet cluster, reboots, gossip membership over the
+simulated network, "every worker runs every slice" (three workers fighting
+over each commit), windows wider than an epoch, allowed lateness, sliding
+windows, an operator pausing, draining and re-submitting the graph, a larger
+cluster, a slow store, eager idle watermarks, a silent partition, and a
+hostile mix of the above with three times the faults.
 
 The gossip, the KV client and the Warp 10 sink have their own simulation
 tests. The Pulsar connector is tested against a real broker instead
