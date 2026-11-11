@@ -57,7 +57,7 @@ mod tls;
 use std::sync::Arc;
 
 use moonpool_core::Providers;
-use streaming_core::{Registry, SinkConnector, TypeTag};
+use streaming_core::{ParamSpec, Registry, SinkConnector, TypeTag};
 
 pub use config::Warp10Config;
 pub use gts::{Gts, GtsValue, TimeUnit};
@@ -78,4 +78,105 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
             Ok(Arc::new(sink) as Arc<dyn SinkConnector>)
         },
     );
+    registry.with_params(SINK_OP, sink_params());
+}
+
+/// What the configuration of `std/warp10-sink@1` is made of.
+fn sink_params() -> Vec<ParamSpec> {
+    vec![
+        ParamSpec::new(
+            "endpoint",
+            "text",
+            "Update endpoint of the platform, e.g. `https://host/api/v0/update`. `https://` \
+             needs a build with the `tls` feature.",
+        )
+        .required(),
+        ParamSpec::new(
+            "token",
+            "secret",
+            "Write token, sent as `X-Warp10-Token`. Never logged.",
+        )
+        .required(),
+        ParamSpec::new(
+            "time_unit",
+            "text",
+            "Time unit the platform was configured with; timestamps are converted to it.",
+        )
+        .choices(["ms", "us", "ns"])
+        .default("us"),
+        ParamSpec::new(
+            "timeout",
+            "duration",
+            "Deadline of one request: connect, send, and receive the answer.",
+        )
+        .default("10s"),
+        ParamSpec::new(
+            "max_batch_bytes",
+            "integer",
+            "Largest body of one request, in bytes; a larger batch is split into several \
+             requests.",
+        )
+        .default(config::DEFAULT_MAX_BATCH_BYTES),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moonpool_core::TokioProviders;
+    use serde_json::{Value, json};
+    use streaming_core::{OpError, OpRef};
+
+    fn parse(config: &Value) -> Result<Warp10Config, OpError> {
+        Warp10Config::from_json(config, |token| {
+            token
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| OpError::Config("token must be a string".into()))
+        })
+    }
+
+    /// The descriptions shown by the designer match what the parser accepts:
+    /// every described parameter exists, the required ones are required and
+    /// nothing else is, the defaults are the parser's and every choice parses.
+    #[test]
+    fn parameter_descriptions_match_the_parser() {
+        let mut registry = Registry::<TokioProviders>::empty();
+        register(&mut registry);
+        let params = registry
+            .catalog()
+            .get(&OpRef::new(SINK_OP).unwrap())
+            .unwrap()
+            .params
+            .clone();
+        assert!(!params.is_empty());
+        let samples = json!({"endpoint": "http://warp10.example/api/v0/update", "token": "t"});
+        let config = |pick: &dyn Fn(&ParamSpec) -> bool| {
+            let mut config = json!({});
+            for p in params.iter().filter(|p| pick(p)) {
+                assert!(!p.description.is_empty(), "`{}` is not described", p.name);
+                config[&p.name] = p
+                    .default
+                    .clone()
+                    .or_else(|| samples.get(&p.name).cloned())
+                    .unwrap_or_else(|| panic!("no sample value for `{}`", p.name));
+            }
+            config
+        };
+        let required = config(&|p| p.required);
+        let minimal = parse(&required).unwrap();
+        assert_eq!(parse(&config(&|_| true)).unwrap(), minimal);
+        for p in params.iter().filter(|p| p.required) {
+            let mut without = required.clone();
+            without.as_object_mut().unwrap().remove(&p.name);
+            assert!(parse(&without).is_err(), "`{}` is not required", p.name);
+        }
+        for p in &params {
+            for choice in &p.choices {
+                let mut with = required.clone();
+                with[&p.name] = json!(choice);
+                parse(&with).unwrap_or_else(|e| panic!("{}={choice}: {e}", p.name));
+            }
+        }
+    }
 }

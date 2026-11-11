@@ -7,7 +7,7 @@ const KINDS = [
   ['source', 'Source'], ['map', 'Transformation'], ['key_by', 'Clé'],
   ['window', 'Fenêtre'], ['aggregate', 'Agrégat'], ['sink', 'Puits'],
 ];
-const HINT = { duration: 'ex. 5m, 10s, 500ms', integer: 'entier', number: 'nombre', text: 'texte', secret: 'valeur, ou secret:<nom>' };
+const HINT = { duration: 'ex. 5m, 10s, 500ms', integer: 'entier', number: 'nombre', text: 'texte', secret: 'valeur, ou secret:<nom>', json: 'JSON' };
 // What may follow what: an aggregate takes a window, a window takes a key.
 const NEEDS = { window: 'key_by', aggregate: 'window' };
 
@@ -103,6 +103,9 @@ export class DesignView {
             if (Number.isNaN(n) || (p.kind === 'integer' && !Number.isInteger(n))) problems.push(`${s.id} : « ${p.name} » doit être un ${p.kind === 'integer' ? 'entier' : 'nombre'}`);
             config[p.name] = n;
           } else if (p.kind === 'boolean') config[p.name] = v === true || v === 'true';
+          else if (p.kind === 'json') {
+            try { config[p.name] = JSON.parse(v); } catch { problems.push(`${s.id} : « ${p.name} » n'est pas du JSON valide`); }
+          }
           else if (p.kind === 'secret' && String(v).startsWith('secret:')) config[p.name] = { secret: String(v).slice(7) };
           else config[p.name] = v;
         }
@@ -170,7 +173,13 @@ export class DesignView {
         const common = { class: 'input mono', placeholder: p.default != null ? `défaut : ${typeof p.default === 'string' ? p.default : JSON.stringify(p.default)}` : (HINT[p.kind] || ''), oninput: (e) => { s.values[p.name] = e.target.type === 'checkbox' ? e.target.checked : e.target.value; this.refresh(); } };
         const control = p.kind === 'boolean'
           ? h('input', { type: 'checkbox', checked: s.values[p.name] === true, onchange: common.oninput })
-          : h('input', { ...common, type: p.kind === 'integer' || p.kind === 'number' ? 'number' : 'text', value: s.values[p.name] ?? '' });
+          : p.choices && p.choices.length
+            ? h('select', { class: 'input mono', onchange: common.oninput },
+              h('option', { value: '', selected: !s.values[p.name] }, p.default != null ? `défaut : ${p.default}` : '—'),
+              ...p.choices.map((c) => h('option', { value: c, selected: s.values[p.name] === c }, c)))
+            : p.kind === 'json'
+              ? h('textarea', { ...common, class: 'input mono design-raw', rows: 1, value: s.values[p.name] ?? '' })
+              : h('input', { ...common, type: p.kind === 'integer' || p.kind === 'number' ? 'number' : 'text', value: s.values[p.name] ?? '' });
         return this.field(`${p.name}${p.required ? ' *' : ''}`, control, p.description);
       })
       : [this.field('Configuration (JSON, facultative)', h('textarea', { class: 'input mono design-raw', rows: 1, placeholder: '{ }', value: s.raw, oninput: (e) => { s.raw = e.target.value; this.refresh(); } }), "Cet opérateur ne décrit pas ses paramètres : laissez vide s'il n'en prend pas.")];

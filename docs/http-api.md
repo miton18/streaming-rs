@@ -47,8 +47,11 @@ embedding process provides KV statistics (standalone mode), otherwise `null`.
 Each operator may carry `params`, the parameters of its configuration, for
 tools that build graphs: `{"name": "size", "kind": "duration", "required":
 true, "default": null, "description": "..."}`. `kind` is `duration`,
-`integer`, `number`, `text`, `boolean` or `secret`. An empty list means the
-operator takes no parameter, or does not say.
+`integer`, `number`, `text`, `boolean`, `secret` (a text or a
+`{"secret": "<name>"}` reference) or `json` (any JSON value, such as an
+object). A parameter restricted to a fixed set of texts also carries
+`"choices": ["...", ...]`. An empty list means the operator takes no
+parameter, or does not say.
 
 ### `GET /api/v1/tenants`
 ```json

@@ -106,7 +106,7 @@ mod source;
 use std::sync::Arc;
 
 use moonpool_core::Providers;
-use streaming_core::{Registry, SinkConnector, SourceConnector, TypeTag};
+use streaming_core::{ParamSpec, Registry, SinkConnector, SourceConnector, TypeTag};
 
 pub use config::{
     ConnectionSettings, DedupConfig, EventTimeMode, InitialPosition, ServiceUrl, SinkConfig,
@@ -146,6 +146,117 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
                 as Arc<dyn SinkConnector>)
         },
     );
+    registry.with_params(SOURCE_OP, source_params());
+    registry.with_params(SINK_OP, sink_params());
+}
+
+/// The connection parameters shared by both operators.
+fn connection_params() -> [ParamSpec; 3] {
+    [
+        ParamSpec::new(
+            "service_url",
+            "text",
+            "Broker to connect to: `pulsar://host:6650`, or `pulsar+ssl://host:6651` for TLS. \
+             A single host; the port defaults to 6650 (6651 with TLS).",
+        )
+        .required(),
+        ParamSpec::new(
+            "token",
+            "secret",
+            "JWT sent to the broker for authentication. Absent: no authentication.",
+        ),
+        ParamSpec::new(
+            "tls_trust_certs_file",
+            "text",
+            "PEM file holding the certificate authorities to trust instead of the system \
+             store. Only with a `pulsar+ssl://` service_url.",
+        ),
+    ]
+}
+
+/// What the configuration of `std/pulsar-source@1` is made of.
+fn source_params() -> Vec<ParamSpec> {
+    let [service_url, token, tls] = connection_params();
+    vec![
+        service_url,
+        ParamSpec::new(
+            "topic",
+            "text",
+            "Topic to read, as a full name `persistent://tenant/namespace/name`. A partitioned \
+             topic gives one slice per partition.",
+        )
+        .required(),
+        ParamSpec::new(
+            "subscription",
+            "text",
+            "Name of the durable Failover subscription. Its cursor holds the read position: \
+             keep it stable for the lifetime of the graph.",
+        )
+        .required(),
+        token,
+        tls,
+        ParamSpec::new(
+            "event_time",
+            "text",
+            "Event time of a record: `publish` takes the broker's publish time, `event` the \
+             producer-set event time (the publish time when a message has none).",
+        )
+        .choices(["publish", "event"])
+        .default("publish"),
+        ParamSpec::new(
+            "initial_position",
+            "text",
+            "Where a subscription that does not exist yet starts: `earliest` reads the topic \
+             from its oldest retained message, `latest` only what is published afterwards.",
+        )
+        .choices(["earliest", "latest"])
+        .default("earliest"),
+        ParamSpec::new(
+            "receiver_queue_size",
+            "integer",
+            "Messages the broker may push ahead of consumption, per partition. Positive.",
+        )
+        .default(1000),
+    ]
+}
+
+/// What the configuration of `std/pulsar-sink@1` is made of.
+fn sink_params() -> Vec<ParamSpec> {
+    let [service_url, token, tls] = connection_params();
+    vec![
+        service_url,
+        ParamSpec::new(
+            "topic",
+            "text",
+            "Topic to publish to, as a full name `persistent://tenant/namespace/name` \
+             (partitioned or not).",
+        )
+        .required(),
+        token,
+        tls,
+        ParamSpec::new(
+            "producer_name",
+            "text",
+            "Base name of the producers; the slice id is appended to it. Required by \
+             broker_dedup. Absent: the broker names them.",
+        ),
+        ParamSpec::new(
+            "send_timeout_ms",
+            "integer",
+            "Milliseconds to wait for the broker to acknowledge a message before the write \
+             fails and is retried. 0 waits forever.",
+        )
+        .default(30_000),
+        ParamSpec::new(
+            "broker_dedup",
+            "json",
+            "Opt-in broker-side deduplication (effectively-once towards Pulsar), e.g. \
+             `{\"position_bits\": [24, 39, 0], \"index_bits\": 0}`: bits of the sequence id \
+             given to the three components of the origin position and to the index of an \
+             element within it (63 bits at most in all). Needs producer_name and deduplication \
+             enabled on the namespace. Absent: at-least-once.",
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -347,5 +458,87 @@ mod tests {
             client::connection_config(&anonymous.connection).auth_data,
             None
         );
+    }
+
+    /// A configuration made of the described parameters: `pick` decides
+    /// which, with their default or else the sample value.
+    fn described(
+        params: &[ParamSpec],
+        samples: &Value,
+        pick: impl Fn(&ParamSpec) -> bool,
+    ) -> Value {
+        let mut config = json!({});
+        for p in params.iter().filter(|p| pick(p)) {
+            let value = p
+                .default
+                .clone()
+                .or_else(|| samples.get(&p.name).cloned())
+                .unwrap_or_else(|| panic!("no sample value for `{}`", p.name));
+            config[&p.name] = value;
+        }
+        config
+    }
+
+    /// The descriptions shown by the designer match what the parsers accept:
+    /// every described parameter exists, the required ones are required and
+    /// nothing else is, the defaults are the parser's and every choice parses.
+    fn check_descriptions<T: PartialEq + std::fmt::Debug>(
+        op: &str,
+        samples: &Value,
+        parse: impl Fn(&Value) -> Result<T, OpError>,
+    ) {
+        let mut registry = Registry::<TokioProviders>::empty();
+        register(&mut registry);
+        let params = registry
+            .catalog()
+            .get(&OpRef::new(op).unwrap())
+            .unwrap()
+            .params
+            .clone();
+        assert!(!params.is_empty(), "{op} describes no parameter");
+        for p in &params {
+            assert!(
+                !p.description.is_empty(),
+                "{op}: `{}` is not described",
+                p.name
+            );
+        }
+        let everything = described(&params, samples, |_| true);
+        parse(&everything).unwrap_or_else(|e| panic!("{op}: {e}"));
+        let required = described(&params, samples, |p| p.required);
+        let minimal = parse(&required).unwrap_or_else(|e| panic!("{op}: {e}"));
+        let defaults = described(&params, samples, |p| p.required || p.default.is_some());
+        assert_eq!(
+            parse(&defaults).unwrap(),
+            minimal,
+            "{op}: a default is not the parser's"
+        );
+        for p in params.iter().filter(|p| p.required) {
+            let mut config = required.clone();
+            config.as_object_mut().unwrap().remove(&p.name);
+            assert!(
+                parse(&config).is_err(),
+                "{op}: `{}` is not required",
+                p.name
+            );
+        }
+        for p in &params {
+            for choice in &p.choices {
+                let mut config = required.clone();
+                config[&p.name] = json!(choice);
+                parse(&config).unwrap_or_else(|e| panic!("{op}: {}={choice}: {e}", p.name));
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_descriptions_match_the_parsers() {
+        let tls = json!({"service_url": "pulsar+ssl://broker",
+                         "topic": "persistent://public/default/t", "subscription": "s",
+                         "token": {"secret": "pulsar-jwt"}, "tls_trust_certs_file": "/ca.pem",
+                         "producer_name": "writer",
+                         "broker_dedup": {"position_bits": [24, 39, 0], "index_bits": 0}});
+        check_descriptions(SOURCE_OP, &tls, source);
+        check_descriptions(SINK_OP, &tls, sink);
     }
 }

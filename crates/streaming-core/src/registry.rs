@@ -132,8 +132,9 @@ pub struct OpDescriptor {
 pub struct ParamSpec {
     /// Key in the configuration object.
     pub name: String,
-    /// `duration` (`"5m"`), `integer`, `number`, `text`, `boolean`, or
-    /// `secret` (a text or a `{"secret": "<name>"}` reference).
+    /// `duration` (`"5m"`), `integer`, `number`, `text`, `boolean`,
+    /// `secret` (a text or a `{"secret": "<name>"}` reference), or `json`
+    /// (any JSON value, such as an object).
     pub kind: String,
     /// Whether the operator refuses a configuration without it.
     #[serde(default)]
@@ -144,6 +145,10 @@ pub struct ParamSpec {
     /// What it does.
     #[serde(default)]
     pub description: String,
+    /// The only values accepted, when the parameter is one of a fixed set of
+    /// texts. Empty when any value of `kind` is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<String>,
 }
 
 impl ParamSpec {
@@ -156,6 +161,7 @@ impl ParamSpec {
             required: false,
             default: None,
             description: description.to_owned(),
+            choices: Vec::new(),
         }
     }
 
@@ -170,6 +176,13 @@ impl ParamSpec {
     #[must_use]
     pub fn default(mut self, value: impl Into<serde_json::Value>) -> Self {
         self.default = Some(value.into());
+        self
+    }
+
+    /// Restrict it to a fixed set of texts.
+    #[must_use]
+    pub fn choices<'a>(mut self, choices: impl IntoIterator<Item = &'a str>) -> Self {
+        self.choices = choices.into_iter().map(str::to_owned).collect();
         self
     }
 }

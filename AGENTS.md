@@ -209,7 +209,10 @@ with its live instances; a half-done purge leaving an unreadable log.
 workers, two demo graphs (`acme/count-per-key`, `globex/clicks`) and the UI
 on `http://127.0.0.1:8080`. Views: overview, cluster, catalogue, graph
 (topology, metrics, bottleneck, results), and **Concevoir** (`#/design`), the
-pipeline designer built from the catalogue's `ParamSpec`s.
+pipeline designer built from the catalogue's `ParamSpec`s (a `choices` list
+becomes a drop-down, the `json` kind a JSON field). Every connector describes
+its parameters; a test per connector checks the descriptions against the
+parser (names accepted, required flags, defaults, choices).
 
 Observability vocabulary: an actor is *busy*, *idle* or *backpressured*;
 `waiting` is the part of busy spent inside a sink's write. A node shows the
@@ -231,8 +234,6 @@ After changing anything under `crates/streaming-api/ui/`, rebuild `streamd`
   late drop from a silent loss (a "late records" side output would fix both).
 - A partition removed then re-added under the same index resumes the old
   state.
-- Pulsar and Warp 10 operators do not describe their parameters yet: the
-  designer shows them a JSON field.
 - `replan_interval` is a `WorkerConfig` field without a CLI flag.
 - The Pulsar sink is at-least-once (emit id in a property); messages it
   writes carry a wrong publish time (Magnetar's moonpool engine clock).
