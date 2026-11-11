@@ -90,7 +90,8 @@ pub struct GraphSettings {
     /// How long the index entry of an emitted window outlives its state. A
     /// store command issued by a worker that has since lost its slice may
     /// still land: the entry is what lets such a write be found and deleted.
-    /// Must exceed three times the command timeout of the store.
+    /// Must exceed three times the command timeout of the store, plus the
+    /// clock difference between workers.
     #[serde(with = "duration_str", default = "default_gc_grace")]
     pub gc_grace: Duration,
     /// How many windows a slice may have closed, per aggregate, without their

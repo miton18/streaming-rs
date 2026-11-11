@@ -28,6 +28,7 @@ mod load;
 mod mailbox;
 pub mod memlog;
 mod metrics;
+pub mod mutation;
 mod scope;
 mod slice;
 mod state;

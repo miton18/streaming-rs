@@ -272,3 +272,74 @@ fn exactly_once_with_every_window_held_back() {
     let report = run(scenario, 3, true, 10);
     assert_clean(&report);
 }
+
+#[test]
+fn exactly_once_with_long_stalls() {
+    // Now and then a store command freezes for seconds, as its sender would
+    // under a long pause: whoever resumes finds the world changed.
+    let scenario = Scenario {
+        stall_ms: 6_000,
+        gc_grace: Duration::from_secs(24),
+        duel: true,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_a_tardy_store() {
+    // Store commands often take effect long after their sender was told they
+    // had failed, on sliding windows that close all the time: late writes
+    // keep landing on windows that are being forgotten.
+    let scenario = Scenario {
+        late_ms: 800,
+        gc_grace: Duration::from_secs(5),
+        fault_scale: 3.0,
+        slide: Duration::from_millis(500),
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_in_random_configurations() {
+    // Swarm testing: every knob drawn at random, a few seeds per draw.
+    // `SIM_CONFIGS=200` draws more, `SIM_CONFIG_SEED=<n>` replays one draw.
+    let pinned: Option<u64> = std::env::var("SIM_CONFIG_SEED")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    let draws: u64 = std::env::var("SIM_CONFIGS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(6);
+    let base = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos() as u64);
+    let seeds: Vec<u64> = match pinned {
+        Some(seed) => vec![seed],
+        None => (0..draws)
+            .map(|draw| base.wrapping_add(draw.wrapping_mul(0x9E37_79B9)))
+            .collect(),
+    };
+    let mut failed = Vec::new();
+    for seed in seeds {
+        let scenario = Scenario::random(seed);
+        let started = std::time::Instant::now();
+        let report = run(scenario.clone(), 3, true, 3);
+        let clean = report.failed_runs == 0 && report.assertion_violations.is_empty();
+        eprintln!(
+            "[CONFIG] SIM_CONFIG_SEED={seed} {} in {:.0?} {scenario:?}",
+            if clean { "ok" } else { "FAILED" },
+            started.elapsed()
+        );
+        if !clean {
+            failed.push((seed, report.seeds_failing.clone()));
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "failing configurations (SIM_CONFIG_SEED, seeds): {failed:?}"
+    );
+}

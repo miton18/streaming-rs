@@ -70,13 +70,15 @@ impl<P: Providers> Membership for GossipMembership<P> {
         }
     }
 
-    async fn alive(&self, _now_ms: Timestamp, _timeout_ms: i64) -> Vec<MemberInfo> {
-        self.gossip
-            .live_members()
-            .iter()
-            .filter_map(|member| member.values.get(MEMBER_KEY))
-            .filter_map(|json| serde_json::from_str::<MemberInfo>(json).ok())
-            .collect()
+    async fn alive(&self, _now_ms: Timestamp, _timeout_ms: i64) -> Option<Vec<MemberInfo>> {
+        Some(
+            self.gossip
+                .live_members()
+                .iter()
+                .filter_map(|member| member.values.get(MEMBER_KEY))
+                .filter_map(|json| serde_json::from_str::<MemberInfo>(json).ok())
+                .collect(),
+        )
     }
 
     async fn leave(&self, worker: &WorkerId) {

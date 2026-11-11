@@ -36,7 +36,9 @@ pub trait Membership: Send + Sync + 'static {
     /// Advertise this worker and its load.
     async fn announce(&self, me: &MemberInfo);
     /// Workers currently believed alive. May or may not include the caller.
-    async fn alive(&self, now_ms: Timestamp, timeout_ms: i64) -> Vec<MemberInfo>;
+    /// `None` when that cannot be told right now: not knowing who is there
+    /// must never be mistaken for being alone.
+    async fn alive(&self, now_ms: Timestamp, timeout_ms: i64) -> Option<Vec<MemberInfo>>;
     /// Withdraw a worker that is shutting down cleanly.
     async fn leave(&self, worker: &WorkerId);
 }
@@ -66,15 +68,19 @@ impl Membership for KvMembership {
         }
     }
 
-    async fn alive(&self, now_ms: Timestamp, timeout_ms: i64) -> Vec<MemberInfo> {
-        self.kv
+    async fn alive(&self, now_ms: Timestamp, timeout_ms: i64) -> Option<Vec<MemberInfo>> {
+        let members = self
+            .kv
             .hgetall_json::<MemberInfo>(keys::CLUSTER_MEMBERS)
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(_, member)| member)
-            .filter(|member| member.is_alive(now_ms, timeout_ms))
-            .collect()
+            .ok()?;
+        Some(
+            members
+                .into_iter()
+                .map(|(_, member)| member)
+                .filter(|member| member.is_alive(now_ms, timeout_ms))
+                .collect(),
+        )
     }
 
     async fn leave(&self, worker: &WorkerId) {
@@ -566,12 +572,19 @@ impl<P: Providers> Worker<P> {
                 tracing::warn!(%error, "cannot publish metrics");
             }
 
-            if self.config.controller && now.saturating_sub(started) >= self.config.controller_grace
+            // A worker that cannot tell who is alive leaves the controller's
+            // work alone for this round: taking a failed read for an empty
+            // cluster would make it claim every slice.
+            let alive = if self.config.controller
+                && now.saturating_sub(started) >= self.config.controller_grace
             {
-                let mut alive = self
-                    .membership
+                self.membership
                     .alive(self.env.clock.now_ms(), timeout_ms)
-                    .await;
+                    .await
+            } else {
+                None
+            };
+            if let Some(mut alive) = alive {
                 alive.retain(|member| member.worker != me);
                 alive.push(info);
                 alive.sort_by(|a, b| a.worker.cmp(&b.worker));

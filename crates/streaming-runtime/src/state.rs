@@ -53,16 +53,20 @@
 //!   in the log, as of a read at most a quarter of `gc_grace` old;
 //! - once a window is emitted its hash is deleted at once, but its index entry
 //!   stays until no record in the log has mentioned the window for `gc_grace`.
-//!   The hash is then deleted once more, and only then the entry.
+//!   The hash is then deleted once more, and only then the entry. The instant
+//!   the countdown started is kept in the entry itself, so that it carries on
+//!   across instances of the emitter.
 //!
 //! A store command takes effect within its timeout or not at all: with a
-//! `gc_grace` above three timeouts, every write to a window lands before the
-//! last delete.
+//! `gc_grace` above three timeouts plus the clock difference between workers,
+//! every write to a window lands before the last delete.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use streaming_core::{Key, Kv, KvError, NodeId, Position, SliceKey, Timestamp, Window, keys};
+
+use crate::mutation::{Mutant, planted};
 
 /// Watermark of a slice that has not seen any event time yet.
 pub(crate) const NO_WATERMARK: Timestamp = i64::MIN;
@@ -223,13 +227,13 @@ pub(crate) async fn try_commit(
             }
             _ => false,
         };
-        if !ours {
+        if !ours && !planted(Mutant::CommitWithoutFencing) {
             return Ok(CommitOutcome::Fenced);
         }
     }
     // The field is ours. It only counts if the epoch was not already final:
     // below the seal, the field we created is a deleted one coming back.
-    if record.epoch <= read_floor(kv, slice).await? {
+    if !planted(Mutant::CommitBelowTheSeal) && record.epoch <= read_floor(kv, slice).await? {
         let _ = kv.hdel(&log, vec![field]).await;
         return Ok(CommitOutcome::Fenced);
     }
@@ -416,18 +420,55 @@ pub(crate) async fn read_window(
     Ok(state)
 }
 
-/// Windows the index of a slice lists for one aggregate node.
+/// Prefix of the value of an index entry once an emitter has seen that no
+/// commit record mentions the window any more, followed by that instant.
+const QUIET: &str = "q:";
+
+/// Windows the index of a slice lists for one aggregate node. Each comes with
+/// the wall-clock instant from which no commit record mentioned it, once an
+/// emitter has recorded one (see [`mark_quiet`]).
 pub(crate) async fn indexed_windows(
     kv: &dyn Kv,
     slice: &SliceKey,
     node: &NodeId,
-) -> Result<BTreeSet<Window>, KvError> {
+) -> Result<BTreeMap<Window, Option<Timestamp>>, KvError> {
     Ok(kv
         .hgetall(&keys::slice_window_index(slice, node))
         .await?
         .iter()
-        .filter_map(|(field, _)| field.parse::<Window>().ok())
+        .filter_map(|(field, value)| {
+            let window = field.parse::<Window>().ok()?;
+            let since = std::str::from_utf8(value)
+                .ok()
+                .and_then(|text| text.strip_prefix(QUIET))
+                .and_then(|instant| instant.parse().ok());
+            Some((window, since))
+        })
         .collect())
+}
+
+/// Record in the index that, as of `since`, no commit record mentions these
+/// emitted windows any more: the countdown to [`unindex_windows`] starts, and
+/// carries on whichever instance of the emitter comes next. A writer entering
+/// a window in the index again erases the instant, which restarts it.
+pub(crate) async fn mark_quiet(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    node: &NodeId,
+    windows: &[Window],
+    since: Timestamp,
+) -> Result<(), KvError> {
+    if windows.is_empty() {
+        return Ok(());
+    }
+    kv.hset(
+        &keys::slice_window_index(slice, node),
+        windows
+            .iter()
+            .map(|window| (window.to_string(), format!("{QUIET}{since}").into_bytes()))
+            .collect(),
+    )
+    .await
 }
 
 /// Windows changed by commit records that still hold their payload.
@@ -448,7 +489,10 @@ pub(crate) async fn list_windows(
     node: &NodeId,
     pending: &[CommitRecord],
 ) -> Result<BTreeSet<Window>, KvError> {
-    let mut windows = indexed_windows(kv, slice, node).await?;
+    let mut windows: BTreeSet<Window> = indexed_windows(kv, slice, node)
+        .await?
+        .into_keys()
+        .collect();
     windows.extend(pending_windows(pending, node));
     Ok(windows)
 }
@@ -591,10 +635,19 @@ mod tests {
                     .is_empty()
             );
             // The entry outlives the state: it is what a late write is found by.
-            assert_eq!(
-                indexed_windows(&kv, &slice(), &node()).await.unwrap(),
-                BTreeSet::from([window])
-            );
+            let indexed = || async { indexed_windows(&kv, &slice(), &node()).await.unwrap() };
+            assert_eq!(indexed().await, BTreeMap::from([(window, None)]));
+            // The countdown to forgetting the window is kept in the entry...
+            mark_quiet(&kv, &slice(), &node(), &[window], 1_234)
+                .await
+                .unwrap();
+            assert_eq!(indexed().await, BTreeMap::from([(window, Some(1_234))]));
+            // ... and a writer entering the window again restarts it.
+            materialize(&kv, &slice(), &first).await.unwrap();
+            assert_eq!(indexed().await, BTreeMap::from([(window, None)]));
+            delete_windows(&kv, &slice(), &node(), &[window])
+                .await
+                .unwrap();
             unindex_windows(&kv, &slice(), &node(), &[window])
                 .await
                 .unwrap();

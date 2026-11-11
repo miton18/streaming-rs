@@ -105,7 +105,8 @@ atomicity (no `MULTI`, no scripting), so the protocol also runs on Materia KV:
   mentioned the window for `gc_grace` (30 s by default), then state and entry
   go for good. A write still in flight from a worker that lost the slice thus
   cannot leave a window behind, provided a store command takes effect within
-  a third of `gc_grace` or not at all;
+  a third of `gc_grace` or not at all, clock difference between workers
+  included;
 - sinks receive each element with a deterministic `EmitId` and must be
   idempotent on it: after a failure the same elements are written again with
   the same ids.
@@ -199,25 +200,45 @@ SIM_SEEDS=12685844343199869141 cargo test -p streaming-sim -- --nocapture   # re
 ```
 
 The harness runs workers in processes that the simulator crashes and reboots,
-against a KV whose commands fail before or after being applied, a source that
-redelivers and cuts batches anywhere, and sinks that fail halfway through a
-batch. A driver then checks, on a graph combining a windowed count, a
-stateless path, a diamond and a second-level aggregation, that:
+against a source that redelivers and cuts batches anywhere, sinks that fail
+halfway through a batch, and a KV whose commands are lost, applied without
+their reply reaching the caller, applied long after the caller was told they
+had failed (even after its death), or frozen for seconds. A driver then
+checks, on a graph combining a windowed count, a stateless path, a diamond
+and a second-level aggregation, that:
 
 - every event was counted exactly once, on every path;
 - the committed history of a slice never went backwards (an auditor reads the
   commit logs every 100 ms);
+- nothing was acknowledged to the source before being committed;
 - once everything is emitted, no window state is left in the store and the
   commit logs stayed small.
 
-Fifteen scenarios: quiet cluster, reboots, gossip membership over the
-simulated network, "every worker runs every slice" (three workers fighting
-over each commit), windows wider than an epoch, allowed lateness, sliding
-windows, an operator pausing, draining and re-submitting the graph, a larger
-cluster, a slow store, eager idle watermarks, a silent partition, a hostile
-mix of the above with three times the faults, a sink behind the aggregate
-slower than the windows close, and the tightest limit on pending windows
-with workers fighting over every slice.
+Seventeen hand-written scenarios: quiet cluster, reboots, gossip membership
+over the simulated network, "every worker runs every slice" (three workers
+fighting over each commit), windows wider than an epoch, allowed lateness,
+sliding windows, an operator pausing, draining and re-submitting the graph, a
+larger cluster, a slow store, eager idle watermarks, a silent partition, a
+hostile mix of the above with three times the faults, a sink behind the
+aggregate slower than the windows close, the tightest limit on pending
+windows with workers fighting over every slice, long stalls, and a store
+applying commands late on windows that close all the time. On top of them,
+`exactly_once_in_random_configurations` draws every knob at random
+(`SIM_CONFIGS=200` for more draws, `SIM_CONFIG_SEED=<n>` to replay one).
+
+A simulation that passes says little unless it is known to fail when the
+engine is wrong. `streaming_runtime::mutation` holds eight bugs, each one
+precaution of the protocol removed (commit without fencing, commit below the
+seal, acknowledge before commit, emit without checking ownership, forget a
+window at once, restart without the watermark, restore without the pending
+commits, empty inherited records without copying them out). They are only
+compiled in with the `mutants` feature, and
+
+```sh
+cargo test --release -p streaming-sim --features mutants --test mutants -- --nocapture
+```
+
+plants them one at a time and requires the scenarios to notice every one.
 
 The gossip, the KV client and the Warp 10 sink have their own simulation
 tests. The Pulsar connector is tested against a real broker instead

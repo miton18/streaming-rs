@@ -15,11 +15,12 @@
 //! once.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moonpool_core::{Providers, RandomProvider, TimeProvider};
+use moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider};
 use moonpool_sim::providers::SimProviders;
 use moonpool_sim::{
     Process, SimContext, SimulationError, SimulationResult, Workload, assert_always,
@@ -153,6 +154,14 @@ pub struct SimEnv {
     pub kv_latency_ms: u64,
     /// Upper bound of the delay of one write to the per-key counts sink.
     pub sink_latency_ms: u64,
+    /// Upper bound of a rare, long stall of a KV command (`0`: none).
+    pub stall_ms: u64,
+    /// How long after its sender gave up a KV command may still be applied.
+    pub late_ms: u64,
+    /// KV commands applied after their sender had been told they failed.
+    pub kv_late: Mutex<u64>,
+    /// KV commands that stalled.
+    pub kv_stalls: Mutex<u64>,
     /// Number of actions the operator took, per kind.
     pub operator_actions: Mutex<BTreeMap<&'static str, u64>>,
     /// What the auditor found wrong while the run was in progress.
@@ -169,6 +178,10 @@ impl SimEnv {
             fault_scale: scenario.fault_scale,
             kv_latency_ms: scenario.kv_latency_ms.max(1),
             sink_latency_ms: scenario.sink_latency_ms.max(1),
+            stall_ms: scenario.stall_ms,
+            late_ms: scenario.late_ms,
+            kv_late: Mutex::new(0),
+            kv_stalls: Mutex::new(0),
             kv: MemKv::shared(),
             log: MemLog::with_retention(scenario.partitions, true),
             counts: Arc::default(),
@@ -244,27 +257,60 @@ impl<P: Providers> ChaosKv<P> {
         Self { env, providers }
     }
 
-    async fn before(&self) -> Result<(), KvError> {
-        let scale = self.env.fault_scale;
-        let max_ms = if buggify_with_prob!(0.02 * scale) {
-            400
-        } else {
-            self.env.kv_latency_ms
-        };
-        let delay = self.providers.random().random_range(0..max_ms);
+    async fn pause(&self, upto_ms: u64) {
+        let delay = self.providers.random().random_range(0..upto_ms.max(1));
         let _ = self
             .providers
             .time()
             .sleep(Duration::from_millis(delay))
             .await;
+    }
+
+    /// Carry one command to the store the way a network would: late, not at
+    /// all, without the reply, or after its sender stopped waiting for it.
+    async fn carry<T, F, Fut>(&self, command: F) -> Result<T, KvError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<MemKv>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, KvError>> + Send + 'static,
+    {
+        let scale = self.env.fault_scale;
+        if self.env.stall_ms > 0 && buggify_with_prob!(0.004 * scale) {
+            // A frozen process, a stalled connection: rare and long.
+            *self.env.kv_stalls.lock() += 1;
+            self.pause(self.env.stall_ms).await;
+        }
+        let max_ms = if buggify_with_prob!(0.02 * scale) {
+            400
+        } else {
+            self.env.kv_latency_ms
+        };
+        self.pause(max_ms).await;
         if buggify_with_prob!(0.03 * scale) {
             return Err(KvError::Unavailable("injected: request lost".into()));
         }
-        Ok(())
-    }
-
-    fn after<T>(&self, value: T) -> Result<T, KvError> {
-        if buggify_with_prob!(0.03 * self.env.fault_scale) {
+        if buggify_with_prob!(0.02 * scale) {
+            // The request is on the wire when its sender gives up: the store
+            // applies it later, whatever became of the sender meanwhile. The
+            // task is not tied to the worker, so it outlives a crash.
+            let late = self
+                .providers
+                .random()
+                .random_range(0..self.env.late_ms.max(1));
+            let kv = self.env.kv.clone();
+            let env = self.env.clone();
+            let time = self.providers.time().clone();
+            let applied_late = self.providers.task().spawn_task("kv-late", async move {
+                let _ = time.sleep(Duration::from_millis(late)).await;
+                let _ = command(kv).await;
+                *env.kv_late.lock() += 1;
+            });
+            // Detached: nobody waits for it.
+            drop(applied_late);
+            return Err(KvError::Unavailable("injected: timed out".into()));
+        }
+        let value = command(self.env.kv.clone()).await?;
+        if buggify_with_prob!(0.03 * scale) {
             *self.env.kv_replies_lost.lock() += 1;
             return Err(KvError::Unavailable("injected: reply lost".into()));
         }
@@ -275,48 +321,56 @@ impl<P: Providers> ChaosKv<P> {
 #[async_trait]
 impl<P: Providers> Kv for ChaosKv<P> {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, KvError> {
-        self.before().await?;
-        self.after(self.env.kv.get(key).await?)
+        let key = key.to_owned();
+        self.carry(move |kv| async move { kv.get(&key).await })
+            .await
     }
 
     async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> {
-        self.before().await?;
-        self.after(self.env.kv.set(key, value).await?)
+        let key = key.to_owned();
+        self.carry(move |kv| async move { kv.set(&key, value).await })
+            .await
     }
 
     async fn del(&self, keys: Vec<String>) -> Result<(), KvError> {
-        self.before().await?;
-        self.after(self.env.kv.del(keys).await?)
+        self.carry(move |kv| async move { kv.del(keys).await })
+            .await
     }
 
     async fn incr(&self, key: &str) -> Result<i64, KvError> {
-        self.before().await?;
-        self.after(self.env.kv.incr(key).await?)
+        let key = key.to_owned();
+        self.carry(move |kv| async move { kv.incr(&key).await })
+            .await
     }
 
     async fn hsetnx(&self, key: &str, field: &str, value: Vec<u8>) -> Result<bool, KvError> {
-        self.before().await?;
-        self.after(self.env.kv.hsetnx(key, field, value).await?)
+        let (key, field) = (key.to_owned(), field.to_owned());
+        self.carry(move |kv| async move { kv.hsetnx(&key, &field, value).await })
+            .await
     }
 
     async fn hset(&self, key: &str, entries: Vec<(String, Vec<u8>)>) -> Result<(), KvError> {
-        self.before().await?;
-        self.after(self.env.kv.hset(key, entries).await?)
+        let key = key.to_owned();
+        self.carry(move |kv| async move { kv.hset(&key, entries).await })
+            .await
     }
 
     async fn hget(&self, key: &str, field: &str) -> Result<Option<Vec<u8>>, KvError> {
-        self.before().await?;
-        self.after(self.env.kv.hget(key, field).await?)
+        let (key, field) = (key.to_owned(), field.to_owned());
+        self.carry(move |kv| async move { kv.hget(&key, &field).await })
+            .await
     }
 
     async fn hgetall(&self, key: &str) -> Result<Vec<(String, Vec<u8>)>, KvError> {
-        self.before().await?;
-        self.after(self.env.kv.hgetall(key).await?)
+        let key = key.to_owned();
+        self.carry(move |kv| async move { kv.hgetall(&key).await })
+            .await
     }
 
     async fn hdel(&self, key: &str, fields: Vec<String>) -> Result<(), KvError> {
-        self.before().await?;
-        self.after(self.env.kv.hdel(key, fields).await?)
+        let key = key.to_owned();
+        self.carry(move |kv| async move { kv.hdel(&key, fields).await })
+            .await
     }
 }
 
@@ -404,6 +458,23 @@ impl<P: Providers> PartitionReader for ChaosReader<P> {
     }
 
     async fn ack(&mut self, upto: Position) -> Result<(), SourceError> {
+        // An acknowledged record is gone from the topic for good: whatever is
+        // acknowledged must already be committed.
+        if let Ok(slice) =
+            format!("acme/sim/src.events.{}", self.partition).parse::<streaming_core::SliceKey>()
+        {
+            let committed = slice_head(self.env.kv.as_ref(), &slice)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|head| head.position);
+            if committed.is_none_or(|at| at < upto) {
+                self.env.audit.lock().push(format!(
+                    "partition {} was acknowledged up to {upto:?} while {committed:?} is committed",
+                    self.partition
+                ));
+            }
+        }
         if buggify_with_prob!(0.1) {
             return Err(SourceError("injected: ack lost".into()));
         }
@@ -573,6 +644,14 @@ pub struct Scenario {
     /// Closed windows a slice may have waiting to be emitted before it stops
     /// reading (`0`: no limit).
     pub max_pending_windows: usize,
+    /// Upper bound of a rare, long stall of a KV command, in milliseconds
+    /// (`0`: none). `gc_grace` must cover three of them.
+    pub stall_ms: u64,
+    /// How long after its sender gave up a KV command may still be applied,
+    /// in milliseconds. `gc_grace` must cover this as well.
+    pub late_ms: u64,
+    /// How long the index entry of an emitted window outlives its state.
+    pub gc_grace: Duration,
     /// Silence after which a fully-read partition follows the wall clock.
     pub idle_timeout: Duration,
     /// Number of partitions, among the last ones, that never receive an event.
@@ -603,6 +682,11 @@ impl Default for Scenario {
             kv_latency_ms: 6,
             sink_latency_ms: 8,
             max_pending_windows: 16,
+            stall_ms: 0,
+            late_ms: 300,
+            // Above three times the slowest ordinary command of `ChaosKv`, late
+            // application included, plus the drift of the workers' clocks.
+            gc_grace: Duration::from_secs(3),
             idle_timeout: Duration::from_millis(1_500),
             silent_partitions: 0,
             duel: false,
@@ -613,6 +697,58 @@ impl Default for Scenario {
 }
 
 impl Scenario {
+    /// A configuration drawn from `seed`, every knob at once: runs then meet
+    /// combinations no hand-written scenario has.
+    #[must_use]
+    pub fn random(seed: u64) -> Self {
+        let mut state = seed;
+        let mut draw = move |bound: u64| {
+            // SplitMix64.
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            (z ^ (z >> 31)) % bound
+        };
+        let mut pick = |choices: &[u64]| choices[draw(choices.len() as u64) as usize];
+        let window = pick(&[500, 1_000, 2_000, 3_000]);
+        let slide = window / pick(&[1, 1, 2, 4]);
+        let partitions = pick(&[1, 2, 3, 3, 5]) as u32;
+        let stall_ms = pick(&[0, 0, 0, 5_000]);
+        let mut scenario = Self {
+            partitions,
+            events: pick(&[300, 800, 1_500, 2_000]),
+            keys: pick(&[1, 3, 8, 60, 200]),
+            produce_for: Duration::from_secs(pick(&[6, 12, 20, 30])),
+            window: Duration::from_millis(window),
+            slide: Duration::from_millis(slide),
+            allowed_lateness: Duration::from_millis(pick(&[0, 0, 300, 1_500])),
+            max_event_age: Duration::from_millis(pick(&[20, 150])),
+            max_batch: pick(&[5, 40, 200]) as usize,
+            operator: pick(&[0, 0, 1]) == 1,
+            fault_scale: pick(&[0, 5, 10, 20, 30]) as f64 / 10.0,
+            kv_latency_ms: pick(&[1, 6, 40]),
+            sink_latency_ms: pick(&[8, 8, 600, 3_000]),
+            max_pending_windows: pick(&[0, 1, 2, 16]) as usize,
+            stall_ms,
+            late_ms: 300,
+            gc_grace: Duration::from_secs(if stall_ms > 0 { 24 } else { 3 }),
+            idle_timeout: Duration::from_millis(pick(&[300, 1_500, 5_000])),
+            silent_partitions: u32::from(partitions > 1 && pick(&[0, 0, 0, 1]) == 1),
+            duel: pick(&[0, 0, 1]) == 1,
+            gossip: pick(&[0, 0, 0, 1]) == 1,
+            settle_timeout: Duration::from_secs(900),
+        };
+        // A slow sink must leave the run time to finish: every window costs
+        // one write per epoch needed to emit its keys.
+        let windows = (scenario.produce_for + scenario.window).as_millis() as u64 / slide.max(1);
+        let epochs = scenario.keys.div_ceil(scenario.max_batch as u64).max(1);
+        if windows * epochs * scenario.sink_latency_ms > 300_000 {
+            scenario.sink_latency_ms = 8;
+        }
+        scenario
+    }
+
     /// The first-level windows an event stamped `ts` belongs to.
     #[must_use]
     pub fn windows_of(&self, ts: Timestamp) -> Vec<Window> {
@@ -664,8 +800,7 @@ impl Scenario {
                 "mailbox_capacity": 2,
                 "max_in_flight_epochs": 2,
                 "max_pending_windows": self.max_pending_windows,
-                // Above three times the slowest store command of `ChaosKv`.
-                "gc_grace": "2s"
+                "gc_grace": millis(self.gc_grace)
             },
             "nodes": [
                 {"id": "events", "op": "sim/log@1"},
@@ -1209,6 +1344,11 @@ impl Workload for Driver {
             *env.kv_replies_lost.lock() > 0,
             "a KV reply was lost after the command applied"
         );
+        assert_sometimes!(
+            *env.kv_late.lock() > 0,
+            "a KV command was applied after its sender gave up"
+        );
+        assert_sometimes!(*env.kv_stalls.lock() > 0, "a KV command stalled");
         assert_sometimes!(
             *env.redeliveries.lock() > 0,
             "the source redelivered records"

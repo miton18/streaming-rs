@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use crate::RuntimeEnv;
 use crate::mailbox::{Barrier, Input, Inputs, Msg, Outputs};
 use crate::metrics::{ActorIdent, ActorMetrics, Meter, SliceMetrics, ts_key};
+use crate::mutation::{Mutant, planted};
 use crate::scope::TaskScope;
 use crate::state::{
     self, CommitOutcome, CommitRecord, NO_WATERMARK, NodeChanges, StateEntry, StateError,
@@ -843,6 +844,11 @@ async fn run_source<P: Providers>(
             reader = None;
         }
         root.emit(records, position, watermark).await;
+        if planted(Mutant::AckBeforeCommit)
+            && let (Some(upto), Some(reader)) = (position, reader.as_mut())
+        {
+            let _ = reader.ack(upto).await;
+        }
     }
 }
 
@@ -864,12 +870,10 @@ async fn run_emitter<P: Providers>(
     // Watermark of what this slice emits: results carry the timestamp
     // `window end - 1`, and windows are emitted in closing order.
     let mut watermark = start.watermark;
-    let grace = root.ctx.settings.gc_grace;
-    // Emitted windows on their way out of the store, per feeding slice: `None`
-    // while a commit record of that slice still carries changes to the window,
-    // then the instant from which none did.
-    let mut lingering: Vec<BTreeMap<Window, Option<Duration>>> =
-        vec![BTreeMap::new(); feeding.len()];
+    let grace_ms = root.ctx.settings.gc_grace.as_millis() as i64;
+    // Emitted windows whose state this instance has deleted already, per
+    // feeding slice: no need to delete it at every round.
+    let mut released: Vec<BTreeSet<Window>> = vec![BTreeSet::new(); feeding.len()];
     loop {
         if let Some(covered) = root.settle() {
             committed = Some(covered);
@@ -899,10 +903,10 @@ async fn run_emitter<P: Providers>(
                 .await?;
             indexed.push(found);
         }
-        let read_at = root.ctx.now();
+        let read_at = root.ctx.env.clock.now_ms();
         let mut windows: BTreeSet<Window> = BTreeSet::new();
         for (log, found) in logs.iter().zip(&indexed) {
-            windows.extend(found.iter().copied());
+            windows.extend(found.keys().copied());
             windows.extend(state::pending_windows(&log.records, &node));
         }
 
@@ -910,55 +914,47 @@ async fn run_emitter<P: Providers>(
         // once; their index entry stays until no commit record has carried a
         // change to them for `gc_grace`, so that a write issued meanwhile by
         // an instance that lost the slice is deleted too (see `state`).
-        for (((slice, log), found), lingering) in
-            feeding.iter().zip(&logs).zip(&indexed).zip(&mut lingering)
+        for (((slice, log), found), released) in
+            feeding.iter().zip(&logs).zip(&indexed).zip(&mut released)
         {
             let changing = state::pending_windows(&log.records, &node);
-            lingering.retain(|window, _| found.contains(window));
+            released.retain(|window| found.contains_key(window));
             let mut release = Vec::new();
+            let mut quiet = Vec::new();
             let mut forget = Vec::new();
-            for window in found.iter().filter(|window| emitted(window, committed)) {
-                let quiet = !changing.contains(window);
-                match lingering.get(window).copied() {
-                    None => {
-                        release.push(*window);
-                        lingering.insert(*window, quiet.then_some(read_at));
+            for (window, since) in found
+                .iter()
+                .filter(|(window, _)| emitted(window, committed))
+            {
+                if !released.contains(window) {
+                    release.push(*window);
+                }
+                match since {
+                    _ if planted(Mutant::ForgetAtOnce) => forget.push(*window),
+                    _ if changing.contains(window) => {}
+                    None => quiet.push(*window),
+                    Some(since) if read_at.saturating_sub(*since) >= grace_ms => {
+                        forget.push(*window);
                     }
-                    Some(_) if !quiet => {
-                        lingering.insert(*window, None);
-                    }
-                    Some(None) => {
-                        lingering.insert(*window, Some(read_at));
-                    }
-                    Some(Some(since)) => {
-                        if read_at.saturating_sub(since) >= grace {
-                            forget.push(*window);
-                        }
-                    }
+                    Some(_) => {}
                 }
             }
-            if let Err(error) = state::delete_windows(kv.as_ref(), slice, &node, &release).await {
-                root.ctx.meter.metrics.error(error.to_string());
-                for window in &release {
-                    lingering.remove(window);
+            let outcome = async {
+                state::delete_windows(kv.as_ref(), slice, &node, &release).await?;
+                released.extend(release.iter().copied());
+                // The countdown starts once the state is known to be deleted.
+                quiet.retain(|window| released.contains(window));
+                state::mark_quiet(kv.as_ref(), slice, &node, &quiet, read_at).await?;
+                if forget.is_empty() {
+                    return Ok(());
                 }
-            }
-            if forget.is_empty() {
-                continue;
-            }
-            // State first: stopped between the two, the entries are still
-            // there for whoever comes next.
-            let forgotten = async {
+                // State first: stopped between the two, the entries are still
+                // there for whoever comes next.
                 state::delete_windows(kv.as_ref(), slice, &node, &forget).await?;
                 state::unindex_windows(kv.as_ref(), slice, &node, &forget).await
             };
-            match forgotten.await {
-                Ok(()) => {
-                    for window in &forget {
-                        lingering.remove(window);
-                    }
-                }
-                Err(error) => root.ctx.meter.metrics.error(error.to_string()),
+            if let Err::<(), KvError>(error) = outcome.await {
+                root.ctx.meter.metrics.error(error.to_string());
             }
         }
 
@@ -1023,7 +1019,7 @@ async fn run_emitter<P: Providers>(
                 None => root.start_epoch == 0,
                 Some(head) => head.owner == root.owner || head.epoch == root.start_epoch,
             };
-            if !ours {
+            if !ours && !planted(Mutant::EmitWithoutOwnership) {
                 root.exit.finish(SliceExit::Fenced);
                 return futures::future::pending().await;
             }
@@ -1162,6 +1158,12 @@ async fn copy_out<P: Providers>(
                 }
             }
         }
+        // An inherited record is emptied as soon as it is copied out, not
+        // once all of them are: an instance that does not live long enough
+        // to finish still leaves less to do to the next one. Best effort.
+        if record.epoch < head && !gone.contains(&record.epoch) {
+            let _ = state::tombstone(kv, &ctx.key, &[record.epoch]).await;
+        }
     }
     Ok(true)
 }
@@ -1284,7 +1286,11 @@ async fn run_committer<P: Providers>(
                     .collect();
                 taken_over = true;
             }
-            let mut work: Vec<&CommitRecord> = inherited.iter().collect();
+            let mut work: Vec<&CommitRecord> = if planted(Mutant::EmptyWithoutCopy) {
+                Vec::new()
+            } else {
+                inherited.iter().collect()
+            };
             work.push(&record);
             if !copy_out(&ctx, next, &owner, &work, &mut proven).await? {
                 exit.finish(SliceExit::Fenced);
@@ -1376,9 +1382,19 @@ async fn prepare<P: Providers>(
         |head| Start {
             epoch: head.epoch,
             position: head.position,
-            watermark: head.watermark,
+            watermark: if planted(Mutant::RestartWithoutWatermark) {
+                NO_WATERMARK
+            } else {
+                head.watermark
+            },
         },
     );
+    // Commits not copied out yet, laid over what the window hashes hold.
+    let pending: &[CommitRecord] = if planted(Mutant::RestoreWithoutPending) {
+        &[]
+    } else {
+        &log.records
+    };
 
     let mut restored = BTreeMap::new();
     let mut closed: BTreeMap<NodeId, BTreeSet<Window>> = BTreeMap::new();
@@ -1388,7 +1404,7 @@ async fn prepare<P: Providers>(
         };
         let mut state = AggState::new();
         let windows = persist(env, &note, || {
-            state::list_windows(kv, &params.key, node, &log.records)
+            state::list_windows(kv, &params.key, node, pending)
         })
         .await?;
         for window in windows {
@@ -1397,7 +1413,7 @@ async fn prepare<P: Providers>(
                 continue;
             }
             let entries = persist(env, &note, || {
-                state::read_window(kv, &params.key, node, &window, &log.records)
+                state::read_window(kv, &params.key, node, &window, pending)
             })
             .await?;
             for (key, (bytes, epoch)) in entries {
