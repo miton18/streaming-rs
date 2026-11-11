@@ -141,6 +141,15 @@ mod tests {
     #[test]
     fn durations() {
         assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
+        assert_eq!(parse_duration("3s").unwrap(), Duration::from_secs(3));
+        assert_eq!(
+            parse_duration("3h").unwrap(),
+            Duration::from_secs(3 * 3_600)
+        );
+        assert_eq!(
+            parse_duration("3d").unwrap(),
+            Duration::from_secs(3 * 86_400)
+        );
         assert_eq!(parse_duration("250ms").unwrap(), Duration::from_millis(250));
         assert_eq!(parse_duration("42").unwrap(), Duration::from_millis(42));
         assert!(parse_duration("5 parsecs").is_err());

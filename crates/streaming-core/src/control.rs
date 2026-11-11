@@ -415,4 +415,35 @@ mod tests {
         let state: RunState = serde_json::from_str("\"draining\"").unwrap();
         assert_eq!(state, RunState::Draining);
     }
+
+    #[test]
+    fn a_worker_is_saturated_by_either_resource() {
+        let load = |cpu, memory| Load {
+            cpu,
+            memory,
+            memory_bytes: 0,
+        };
+        assert!(!load(0.5, 0.5).is_saturated());
+        assert!(load(0.85, 0.1).is_saturated());
+        assert!(load(0.1, 0.85).is_saturated());
+        assert!(!load(0.849, 0.849).is_saturated());
+    }
+
+    #[test]
+    fn a_member_is_alive_until_its_heartbeat_times_out() {
+        let member = MemberInfo {
+            worker: WorkerId::new("w").unwrap(),
+            generation: 1,
+            heartbeat_ms: 10_000,
+            load: Load::default(),
+            actors: 0,
+            slices: 0,
+            api_addr: None,
+            version: String::new(),
+        };
+        assert!(member.is_alive(10_000, 3_000));
+        assert!(member.is_alive(13_000, 3_000));
+        assert!(!member.is_alive(13_001, 3_000));
+        assert!(member.is_alive(9_000, 3_000));
+    }
 }

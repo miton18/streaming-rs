@@ -97,6 +97,9 @@ mod tests {
         // which every member of that entry reaches.
         let coarse = end_position_of(&id(12, 5, -1, -1)).unwrap();
         assert!(position_of(&id(12, 5, 0, 3)) >= coarse);
+        // Ledger and entry 0 are real positions, not the empty marker.
+        assert_eq!(end_position_of(&id(0, 0, -1, -1)), Some(Position(0, 0, 0)));
+        assert_eq!(end_position_of(&id(u64::MAX, 4, -1, -1)), None);
     }
 
     #[test]

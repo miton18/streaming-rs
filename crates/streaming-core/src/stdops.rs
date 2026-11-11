@@ -253,6 +253,31 @@ mod tests {
             vec![Window::new(10_000, 20_000), Window::new(5_000, 15_000)]
         );
         assert!(out.iter().all(|w| w.contains(12_000)));
+
+        // On a window boundary, the window ending there is not included.
+        out.clear();
+        assigner.assign(10_000, &mut out);
+        assert_eq!(
+            out,
+            vec![Window::new(10_000, 20_000), Window::new(5_000, 15_000)]
+        );
+    }
+
+    #[test]
+    fn window_configs_are_validated() {
+        let registry = crate::registry::Registry::<moonpool_core::TokioProviders>::standard();
+        let check = |op: &str, config: serde_json::Value| match registry
+            .get(&crate::ids::OpRef::new(op).unwrap())
+        {
+            Some((_, crate::registry::OpFactory::Window(factory))) => factory(&config).is_ok(),
+            _ => panic!("{op} is not a window"),
+        };
+        let sliding = |size: &str, slide: &str| serde_json::json!({"size": size, "slide": slide});
+        assert!(check("std/sliding@1", sliding("10s", "5s")));
+        assert!(check("std/sliding@1", sliding("10s", "10s")));
+        assert!(!check("std/sliding@1", sliding("10s", "11s")));
+        assert!(!check("std/sliding@1", sliding("10s", "0ms")));
+        assert!(!check("std/tumbling@1", serde_json::json!({"size": "0ms"})));
     }
 
     #[test]

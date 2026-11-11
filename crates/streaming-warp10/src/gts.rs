@@ -588,11 +588,20 @@ mod tests {
             "1/zz/ m{} 1",
             "1 m{} 1",
             "1// m%zz{} 1",
+            "1/48.5:x/ m{} 1",
+            "1/x:2.3/ m{} 1",
+            "1// m}x{ 1",
         ] {
             assert!(parse_line(bad).is_err(), "`{bad}` should be rejected");
         }
         // location and elevation are accepted and dropped
         let p = parse_line("1/48.5:2.3/100 m{a=b} 3").unwrap();
         assert_eq!((p.ts, p.value), (1, GtsValue::Long(3)));
+    }
+
+    #[test]
+    fn plus_and_escapes_decode_anywhere() {
+        assert_eq!(percent_decode("a+b%20c+").unwrap(), "a b c ");
+        assert_eq!(percent_decode("+%2B+").unwrap(), " + ");
     }
 }

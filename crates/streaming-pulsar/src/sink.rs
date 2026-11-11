@@ -445,4 +445,17 @@ mod tests {
             .collect();
         assert!(slices.len() > 3, "slices should spread: {slices:?}");
     }
+
+    #[test]
+    fn routes_stay_within_the_partitions() {
+        for dedup in [false, true] {
+            for i in 0..64 {
+                let id = emit_id(i, Position(1, u64::from(i) * 7, 0));
+                for key in [None, Some("user-42")] {
+                    let partition = route(key, &id, 7, dedup);
+                    assert!(partition < 7, "{key:?} {dedup} -> {partition}");
+                }
+            }
+        }
+    }
 }

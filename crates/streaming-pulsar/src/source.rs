@@ -274,3 +274,28 @@ impl<P: Providers> PartitionReader for PulsarReader<P> {
         Ok(end_position_of(&last))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_property_of_a_name_wins() {
+        let message = PulsarMessage {
+            key: None,
+            payload: Bytes::new(),
+            properties: vec![
+                ("a".into(), "1".into()),
+                ("b".into(), "2".into()),
+                ("a".into(), "3".into()),
+            ],
+            publish_time_ms: 0,
+            event_time_ms: None,
+            topic: String::new(),
+            partition: 0,
+        };
+        assert_eq!(message.property("a"), Some("1"));
+        assert_eq!(message.property("b"), Some("2"));
+        assert_eq!(message.property("c"), None);
+    }
+}

@@ -1529,6 +1529,88 @@ mod tests {
     }
 
     #[test]
+    fn idle_is_what_busy_and_backpressure_leave() {
+        let (_, detail) = bottleneck_of(vec![with_load(actor("key", ActorKind::KeyBy), 0.25, 0.5)]);
+        assert_eq!(node_of(&detail, "key").idle, 0.25);
+    }
+
+    #[test]
+    fn the_most_backpressured_upstream_is_blamed() {
+        // Both upstream nodes are backpressured: the reason names the worse
+        // one, whichever is nearer, and the nearer one on a tie.
+        for (events, key, blamed) in [(0.9, 0.5, "events"), (0.5, 0.9, "key"), (0.8, 0.8, "key")] {
+            let (bottleneck, _) = bottleneck_of(vec![
+                with_load(actor("events", ActorKind::Source), 0.1, events),
+                with_load(actor("key", ActorKind::KeyBy), 0.1, key),
+                with_load(actor("count", ActorKind::Aggregate), 0.97, 0.0),
+            ]);
+            let reason = bottleneck.unwrap().reason;
+            assert!(
+                reason.contains(&format!("upstream `{blamed}` is backpressured")),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_busier_candidate_wins_wherever_it_sits() {
+        let (bottleneck, _) = bottleneck_of(vec![
+            with_load(actor("events", ActorKind::Source), 0.1, 0.8),
+            with_load(actor("key", ActorKind::KeyBy), 0.9, 0.0),
+            with_load(actor("count", ActorKind::Aggregate), 0.95, 0.0),
+        ]);
+        let bottleneck = bottleneck.unwrap();
+        assert_eq!(bottleneck.node, node("count"));
+        assert!(
+            bottleneck.reason.starts_with("busy 95% "),
+            "{}",
+            bottleneck.reason
+        );
+    }
+
+    #[test]
+    fn commit_thresholds_are_inclusive() {
+        let (bottleneck, _) = bottleneck_of(vec![
+            with_load(
+                actor("events", ActorKind::Source),
+                0.2,
+                BACKPRESSURE_THRESHOLD,
+            ),
+            with_load(actor("events", ActorKind::Commit), BUSY_THRESHOLD, 0.0),
+        ]);
+        assert_eq!(bottleneck.unwrap().kind, "commit");
+    }
+
+    #[test]
+    fn the_busiest_commit_is_reported() {
+        let commit = |partition, busy| {
+            let mut a = with_load(actor("events", ActorKind::Commit), busy, 0.0);
+            a.slice = SliceId::Source {
+                node: node("events"),
+                partition,
+            };
+            a
+        };
+        for (first, second, reported) in [(0.6, 0.9, 0.9), (0.9, 0.6, 0.9), (0.7, 0.7, 0.7)] {
+            let (bottleneck, _) = bottleneck_of(vec![
+                with_load(actor("events", ActorKind::Source), 0.2, 0.8),
+                commit(0, first),
+                commit(1, second),
+            ]);
+            let bottleneck = bottleneck.unwrap();
+            assert_eq!(bottleneck.busy, reported);
+            // On a tie, the first commit found is kept.
+            if first == second {
+                assert!(
+                    bottleneck.reason.contains("`src.events.0`"),
+                    "{}",
+                    bottleneck.reason
+                );
+            }
+        }
+    }
+
+    #[test]
     fn nothing_to_report() {
         let (bottleneck, _) = bottleneck_of(vec![]);
         assert_eq!(bottleneck, None);

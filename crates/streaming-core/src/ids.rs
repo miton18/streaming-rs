@@ -313,6 +313,8 @@ mod tests {
         assert!(NodeId::new("by.key").is_err());
         assert!(OpRef::new("std/count@1").is_ok());
         assert!(TenantId::new("").is_err());
+        assert!(TenantId::new("a".repeat(128)).is_ok());
+        assert!(TenantId::new("a".repeat(129)).is_err());
     }
 
     #[test]

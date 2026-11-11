@@ -377,4 +377,33 @@ mod tests {
             "src.events.2/0.5.0/0000000000000000"
         );
     }
+
+    #[test]
+    fn hashes_are_pinned() {
+        // Lineages and emit ids are persisted and compared across restarts
+        // and upgrades: these values must never change. `mix(0, 0)` is the
+        // first output of SplitMix64 seeded with 0, and `hash_str("abc")` the
+        // published 64-bit FNV-1a of "abc".
+        assert_eq!(mix(0, 0), 0xe220_a839_7b1d_cdaf);
+        assert_eq!(mix(1, 2), 0x3706_970b_052f_16b1);
+        assert_eq!(mix(u64::MAX, 7), 0x94ca_6496_1cc0_585f);
+        assert_eq!(hash_str(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(hash_str("abc"), 0xe71f_a219_0541_574b);
+        let id = EmitId("abc".to_owned());
+        assert_eq!(id.digest(), hash_str("abc"));
+    }
+
+    #[test]
+    fn hex_keys_decode_every_nibble() {
+        let key = Key::from_hex("00ff7a1e").unwrap();
+        assert_eq!(key.as_bytes(), [0x00, 0xff, 0x7a, 0x1e]);
+        assert_eq!(key.to_hex(), "00ff7a1e");
+        assert!(Key::from_hex("zz").is_err());
+    }
+
+    #[test]
+    fn keys_with_control_characters_display_as_hex() {
+        let key = Key::encode(&"a\nb".to_owned()).unwrap();
+        assert_eq!(key.display_lossy(), format!("0x{}", key.to_hex()));
+    }
 }

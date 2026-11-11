@@ -351,6 +351,7 @@ mod tests {
         let v6 = ServiceUrl::parse("pulsar://[::1]:7000").unwrap();
         assert_eq!(v6.host, "::1");
         assert_eq!(v6.addr(), "[::1]:7000");
+        assert_eq!(ServiceUrl::parse("pulsar://[::1]").unwrap().port, 6650);
         for bad in [
             "http://h:6650",
             "pulsar://",
@@ -358,6 +359,9 @@ mod tests {
             "pulsar://h:port",
             "pulsar://h:6650/path",
             "pulsar://[::1",
+            "pulsar://[::1]x",
+            "pulsar://user@h",
+            "pulsar://h/x",
         ] {
             assert!(ServiceUrl::parse(bad).is_err(), "{bad} should be rejected");
         }

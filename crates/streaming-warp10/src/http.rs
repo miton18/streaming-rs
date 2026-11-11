@@ -773,6 +773,77 @@ mod tests {
     }
 
     #[test]
+    fn limits_and_reason_phrases() {
+        assert_eq!(
+            (Limits::RESPONSE.max_head, Limits::RESPONSE.max_body),
+            (16_384, 8_192)
+        );
+        assert_eq!(
+            (Limits::REQUEST.max_head, Limits::REQUEST.max_body),
+            (16_384, 67_108_864)
+        );
+        for (status, phrase) in [
+            (200, "OK"),
+            (400, "Bad Request"),
+            (401, "Unauthorized"),
+            (404, "Not Found"),
+            (405, "Method Not Allowed"),
+            (413, "Payload Too Large"),
+            (500, "Internal Server Error"),
+            (502, "Bad Gateway"),
+            (503, "Service Unavailable"),
+            (504, "Gateway Timeout"),
+            (418, "Status"),
+        ] {
+            assert_eq!(reason_phrase(status), phrase);
+        }
+    }
+
+    #[test]
+    fn head_limit_is_inclusive() {
+        let head = |len: usize| {
+            // "HTTP/1.1 204 X\r\nX: " + padding + "\r\n\r\n" is `len` bytes.
+            let prefix = b"HTTP/1.1 204 X\r\nX: ";
+            let mut raw = prefix.to_vec();
+            raw.extend(std::iter::repeat_n(b'a', len - prefix.len() - 4));
+            raw.extend(b"\r\n\r\n");
+            raw
+        };
+        assert!(parse_response(&head(1024), false, L).unwrap().is_some());
+        assert_eq!(
+            parse_response(&head(1025), false, L),
+            Err(HttpError::HeadTooLarge(1024))
+        );
+        // An incomplete head of exactly the limit may still complete.
+        assert_eq!(parse_response(&[b'a'; 1024], false, L), Ok(None));
+    }
+
+    #[test]
+    fn bodies_of_exactly_the_cap_are_not_truncated() {
+        let mut raw = b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n".to_vec();
+        raw.extend(std::iter::repeat_n(b'a', 64));
+        let r = resp(&raw);
+        assert_eq!((r.body.len(), r.truncated), (64, false));
+
+        // Until close: 64 bytes may be the whole body, keep reading.
+        let mut close = b"HTTP/1.1 500 X\r\n\r\n".to_vec();
+        close.extend(std::iter::repeat_n(b'c', 64));
+        assert_eq!(parse_response(&close, false, L).unwrap(), None);
+        let r = resp(&close);
+        assert_eq!((r.body.len(), r.truncated), (64, false));
+
+        // Chunked: one chunk filling the cap exactly, then a second one.
+        let mut chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n20\r\n".to_vec();
+        chunked.extend(std::iter::repeat_n(b'x', 32));
+        chunked.extend(b"\r\n20\r\n");
+        chunked.extend(std::iter::repeat_n(b'y', 32));
+        chunked.extend(b"\r\n0\r\nA: 1\r\nB: 2\r\n\r\n");
+        let r = resp(&chunked);
+        assert_eq!((r.body.len(), r.truncated), (64, false));
+        assert_eq!(&r.body[30..34], b"xxyy");
+    }
+
+    #[test]
     fn malformed_responses() {
         for bad in [
             &b"garbage\r\n\r\n"[..],

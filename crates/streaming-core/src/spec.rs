@@ -653,4 +653,117 @@ mod tests {
             Err(SpecError::Wiring { .. })
         ));
     }
+
+    fn wiring_error_on(spec: &GraphSpec, catalog: &Catalog) -> NodeId {
+        match Topology::build(spec, catalog) {
+            Err(SpecError::Wiring { node, .. }) => node,
+            other => panic!("expected a wiring error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_loops_are_bad_edges() {
+        let looped = spec(
+            &[
+                ("s", "test/source@1"),
+                ("a", "std/identity@1"),
+                ("k", "test/sink@1"),
+            ],
+            &[("s", "a"), ("a", "a"), ("a", "k")],
+        );
+        assert!(matches!(
+            Topology::build(&looped, &catalog()),
+            Err(SpecError::BadEdge { .. })
+        ));
+    }
+
+    #[test]
+    fn every_inner_node_needs_an_input_and_an_output() {
+        let catalog = catalog();
+        // A map, a key_by and a window that each lack an output.
+        let map_without_output = spec(
+            &[
+                ("s", "test/source@1"),
+                ("a", "std/identity@1"),
+                ("k", "test/sink@1"),
+            ],
+            &[("s", "a"), ("s", "k")],
+        );
+        assert_eq!(wiring_error_on(&map_without_output, &catalog), id("a"));
+
+        let key_by_without_output = spec(
+            &[
+                ("s", "test/source@1"),
+                ("d", "test/decode@1"),
+                ("by", "test/key@1"),
+                ("k", "test/sink@1"),
+            ],
+            &[("s", "d"), ("d", "by"), ("d", "k")],
+        );
+        assert_eq!(wiring_error_on(&key_by_without_output, &catalog), id("by"));
+
+        let mut window_without_output = spec(
+            &[
+                ("s", "test/source@1"),
+                ("d", "test/decode@1"),
+                ("by", "test/key@1"),
+                ("w", "std/tumbling@1"),
+                ("k", "test/sink@1"),
+            ],
+            &[("s", "d"), ("d", "by"), ("by", "w"), ("d", "k")],
+        );
+        window_without_output.nodes[3].config = serde_json::json!({"size": "5m"});
+        assert_eq!(wiring_error_on(&window_without_output, &catalog), id("w"));
+
+        // A window with no input at all.
+        let mut window_without_input = spec(
+            &[
+                ("w", "std/tumbling@1"),
+                ("c", "std/count@1"),
+                ("k", "test/sink@1"),
+            ],
+            &[("w", "c"), ("c", "k")],
+        );
+        window_without_input.nodes[0].config = serde_json::json!({"size": "5m"});
+        assert_eq!(wiring_error_on(&window_without_input, &catalog), id("w"));
+    }
+
+    #[test]
+    fn pass_through_nodes_carry_the_type_of_their_inputs() {
+        let catalog = catalog();
+        // An untyped map after `decode` carries `Event`; one fed by two
+        // different types carries `Any`.
+        let typed = spec(
+            &[
+                ("s", "test/source@1"),
+                ("d", "test/decode@1"),
+                ("same", "std/identity@1"),
+                ("mixed", "std/identity@1"),
+                ("k", "test/sink@1"),
+                ("k2", "test/sink@1"),
+            ],
+            &[
+                ("s", "d"),
+                ("d", "same"),
+                ("same", "k"),
+                ("d", "mixed"),
+                ("s", "mixed"),
+                ("mixed", "k2"),
+            ],
+        );
+        let topology = Topology::build(&typed, &catalog).unwrap();
+        assert_eq!(topology.types[&id("same")], TypeTag::of::<Event>());
+        assert_eq!(topology.types[&id("mixed")], TypeTag::Any);
+        // A typed map produces its declared output, not its input.
+        assert_eq!(topology.types[&id("d")], TypeTag::of::<Event>());
+        assert_eq!(topology.nodes_of(OpKind::Sink), [id("k"), id("k2")]);
+        assert_eq!(topology.nodes_of(OpKind::Source), [id("s")]);
+    }
+
+    #[test]
+    fn nodes_are_looked_up_by_id() {
+        let spec = count_per_key();
+        assert_eq!(spec.node(&id("win")).unwrap().id, id("win"));
+        assert!(spec.node(&id("nope")).is_none());
+    }
 }
