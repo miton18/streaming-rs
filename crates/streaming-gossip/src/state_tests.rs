@@ -173,6 +173,38 @@ fn delta_respects_budget_and_version_order_and_converges() {
 }
 
 #[test]
+fn a_budget_of_exactly_the_delta_size_is_enough() {
+    let mut a = node("a", 1);
+    let mut c = node("c", 1);
+    for i in 0..10 {
+        a.set_local(&format!("key-{i}"), &"x".repeat(50), Duration::ZERO)
+            .unwrap();
+    }
+    // `a` also relays what it knows of `c`.
+    let (to_a, _) = c.compute_delta(&a.digest(), usize::MAX, 0);
+    a.apply_delta(to_a, S);
+    let peer = node("b", 1).digest();
+    let (full, info) = a.compute_delta(&peer, usize::MAX, 3);
+    assert!(!info.truncated);
+    assert_eq!(full.nodes.len(), 2);
+    let size = info.bytes;
+
+    let (exact, info) = a.compute_delta(&peer, size, 3);
+    assert!(
+        !info.truncated,
+        "a budget equal to the size must fit it all"
+    );
+    assert_eq!((info.bytes, exact), (size, full));
+
+    for budget in [size - 1, size / 2, 40] {
+        let (part, info) = a.compute_delta(&peer, budget, 3);
+        assert!(info.truncated, "budget {budget} of {size}");
+        assert!(info.bytes <= budget);
+        assert_eq!(info.bytes, delta_size(&part));
+    }
+}
+
+#[test]
 fn heartbeats_are_not_starved_by_a_large_backlog() {
     let mut a = node("a", 1);
     let mut b = node("b", 1);
@@ -478,6 +510,72 @@ fn invalid_incoming_deltas_are_rejected() {
             .collect(),
     };
     assert!(b.validate_digest(&big).is_err());
+}
+
+#[test]
+fn incoming_limits_are_inclusive() {
+    let b = node("b", 1);
+    let l = Limits::default();
+    let delta = |node_id: &str, addr: &str, key: &str, value: &str| NodeDelta {
+        node_id: node_id.into(),
+        generation: 1,
+        addr: addr.into(),
+        heartbeat: 1,
+        reset: false,
+        from_version: 1,
+        to_version: 3,
+        last_gc_version: 0,
+        updates: vec![KeyUpdate {
+            key: key.into(),
+            value: Some(value.into()),
+            version: 3,
+        }],
+    };
+    let ok = |d: &NodeDelta| b.validate_node_delta(d).is_ok();
+    let id = "n".repeat(l.max_node_id_len);
+    let addr = "a".repeat(l.max_addr_len);
+    let key = "k".repeat(l.max_key_len);
+    let value = "v".repeat(l.max_value_len);
+    assert!(ok(&delta(&id, &addr, &key, &value)));
+    assert!(!ok(&delta("", "a:1", "k", "v")));
+    assert!(!ok(&delta(&format!("{id}n"), "a:1", "k", "v")));
+    assert!(!ok(&delta("a", &format!("{addr}a"), "k", "v")));
+
+    // Versions: (from, to] with from <= to, an update at `to` is fine.
+    let mut d = delta("a", "a:1", "k", "v");
+    d.from_version = 3;
+    d.updates.clear();
+    assert!(ok(&d), "an empty range is valid");
+    d.from_version = 4;
+    assert!(!ok(&d), "from > to");
+    let mut d = delta("a", "a:1", "k", "v");
+    d.updates[0].version = 4;
+    assert!(!ok(&d), "update beyond to_version");
+    d.updates[0].version = 1;
+    assert!(!ok(&d), "update not above from_version");
+
+    // Digests: exactly `max_nodes` entries and ids of the maximum length.
+    let entry = |node_id: String| DigestEntry {
+        node_id,
+        generation: 0,
+        heartbeat: 0,
+        max_version: 0,
+        last_gc_version: 0,
+    };
+    let full = Digest {
+        entries: (0..l.max_nodes).map(|i| entry(format!("n{i}"))).collect(),
+    };
+    assert!(b.validate_digest(&full).is_ok());
+    let long = Digest {
+        entries: vec![entry(id.clone())],
+    };
+    assert!(b.validate_digest(&long).is_ok());
+    for bad in [String::new(), format!("{id}n")] {
+        let d = Digest {
+            entries: vec![entry(bad)],
+        };
+        assert!(b.validate_digest(&d).is_err());
+    }
 }
 
 #[test]

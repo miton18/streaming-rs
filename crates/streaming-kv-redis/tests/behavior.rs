@@ -89,6 +89,55 @@ async fn hset_hdel_del_are_chunked_only_above_the_threshold() {
 }
 
 #[tokio::test]
+async fn hset_is_split_above_eight_mebibytes() {
+    let fake = FakeRedis::new();
+    let (addr, _t) = start_fake(fake.clone()).await;
+    let kv = RedisKv::new(
+        TokioProviders::new(),
+        RedisConfig {
+            command_timeout: Duration::from_secs(10),
+            ..cfg(&addr)
+        },
+    );
+    const MIB: usize = 1024 * 1024;
+    // Field name plus value: exactly 8 MiB in two entries, one command.
+    let half = || vec![7u8; 4 * MIB - 1];
+    kv.hset("h1", vec![("a".into(), half()), ("b".into(), half())])
+        .await
+        .unwrap();
+    assert_eq!(fake.command_count("HSET"), 1);
+    // One byte more, and the second entry goes into a command of its own.
+    let mut more = half();
+    more.push(7);
+    kv.hset("h2", vec![("a".into(), half()), ("b".into(), more)])
+        .await
+        .unwrap();
+    assert_eq!(fake.command_count("HSET"), 3);
+    // Three 3 MiB entries: two fit in the first command, one in the next.
+    let third = || vec![1u8; 3 * MIB];
+    kv.hset(
+        "h3",
+        vec![
+            ("a".into(), third()),
+            ("b".into(), third()),
+            ("c".into(), third()),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(fake.command_count("HSET"), 5);
+    for (key, field, len) in [
+        ("h1", "b", 4 * MIB - 1),
+        ("h2", "b", 4 * MIB),
+        ("h3", "c", 3 * MIB),
+    ] {
+        assert_eq!(fake.peek_field(key, field).map(|v| v.len()), Some(len));
+    }
+    // Keys of exactly the limit are accepted.
+    assert_eq!(kv.get(&"k".repeat(8192)).await, Ok(None));
+}
+
+#[tokio::test]
 async fn too_large_values_are_refused_before_sending() {
     let fake = FakeRedis::new();
     let (addr, _t) = start_fake(fake.clone()).await;

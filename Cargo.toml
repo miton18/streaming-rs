@@ -49,10 +49,13 @@ debug = "line-tables-only"
 debug = "line-tables-only"
 
 # For `cargo mutants --profile mutants`: the simulations run about ten times
-# faster than in the dev profile, and incremental builds stay short.
+# faster than in the dev profile, and incremental builds stay short. Debug
+# assertions and overflow checks stay on: some mutants are only caught by them.
 [profile.mutants]
 inherits = "release"
 opt-level = 1
 debug = false
+debug-assertions = true
+overflow-checks = true
 incremental = true
 codegen-units = 256
