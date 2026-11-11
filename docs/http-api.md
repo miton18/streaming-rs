@@ -44,6 +44,11 @@ embedding process provides KV statistics (standalone mode), otherwise `null`.
 {"op": "std/count@1", "kind": "aggregate", "input": "*",
  "output": "streaming_core::data::Windowed<u64>", "description": "..."}
 ```
+Each operator may carry `params`, the parameters of its configuration, for
+tools that build graphs: `{"name": "size", "kind": "duration", "required":
+true, "default": null, "description": "..."}`. `kind` is `duration`,
+`integer`, `number`, `text`, `boolean` or `secret`. An empty list means the
+operator takes no parameter, or does not say.
 
 ### `GET /api/v1/tenants`
 ```json

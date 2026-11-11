@@ -216,6 +216,26 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
             }) as Arc<dyn SinkConnector>)
         },
     );
+    registry.with_params(
+        "demo/generator@1",
+        [
+            streaming_core::ParamSpec::new("partitions", "integer", "Number of partitions.")
+                .default(4),
+            streaming_core::ParamSpec::new("rate_per_sec", "integer", "Events per second.")
+                .default(2000),
+            streaming_core::ParamSpec::new("keys", "integer", "Number of distinct users.")
+                .default(50),
+        ],
+    );
+    registry.with_params(
+        "demo/slow-sink@1",
+        [streaming_core::ParamSpec::new(
+            "latency_ms",
+            "integer",
+            "Delay of each write, in milliseconds.",
+        )
+        .default(0)],
+    );
 }
 
 /// The graphs submitted when the demonstration cluster starts.

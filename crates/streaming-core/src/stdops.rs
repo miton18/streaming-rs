@@ -192,10 +192,34 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
             input: TypeTag::Any,
             output: TypeTag::Any,
             description: "Forwards every element unchanged.".to_owned(),
+            params: Vec::new(),
         },
         OpFactory::Map(Arc::new(|_config: &Value| {
             Ok(Arc::new(Identity) as Arc<dyn DynMap>)
         })),
+    );
+    let lateness = || {
+        crate::ParamSpec::new(
+            "allowed_lateness",
+            "duration",
+            "How long after its end a window still accepts records.",
+        )
+        .default("0s")
+    };
+    registry.with_params(
+        "std/tumbling@1",
+        [
+            crate::ParamSpec::new("size", "duration", "Length of each window.").required(),
+            lateness(),
+        ],
+    );
+    registry.with_params(
+        "std/sliding@1",
+        [
+            crate::ParamSpec::new("size", "duration", "Length of each window.").required(),
+            crate::ParamSpec::new("slide", "duration", "A window starts every `slide`.").required(),
+            lateness(),
+        ],
     );
 }
 

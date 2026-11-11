@@ -31,6 +31,8 @@ pub use ops::{
     Aggregator, DynAggregator, DynKey, DynMap, OpError, PartitionReader, SinkConnector, SinkError,
     SourceConnector, SourceError, SourceRecord, WindowAssigner,
 };
-pub use registry::{Catalog, OpContext, OpDescriptor, OpFactory, OpKind, Registry, TypeTag};
+pub use registry::{
+    Catalog, OpContext, OpDescriptor, OpFactory, OpKind, ParamSpec, Registry, TypeTag,
+};
 pub use spec::{GraphSpec, NodeSpec, SpecError, Topology};
 pub use time::{Timestamp, Window, format_duration, parse_duration};

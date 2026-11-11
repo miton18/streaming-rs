@@ -890,6 +890,7 @@ mod tests {
             input: TypeTag::Any,
             output: TypeTag::Any,
             description: format!("{op} description"),
+            params: Vec::new(),
         }
     }
 

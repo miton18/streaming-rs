@@ -80,4 +80,12 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
         );
         streaming_pulsar::register(registry);
     }
+    registry.with_params(
+        "std/count-to-gts@1",
+        [
+            streaming_core::ParamSpec::new("class", "text", "Class of the series.").required(),
+            streaming_core::ParamSpec::new("label", "text", "Label that carries the key.")
+                .default("key"),
+        ],
+    );
 }

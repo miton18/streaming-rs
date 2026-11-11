@@ -121,6 +121,57 @@ pub struct OpDescriptor {
     /// One-line human description.
     #[serde(default)]
     pub description: String,
+    /// The parameters of its configuration, for tools that build graphs.
+    /// Empty when the operator takes none, or does not say.
+    #[serde(default)]
+    pub params: Vec<ParamSpec>,
+}
+
+/// One parameter of an operator's configuration, as a tool presents it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParamSpec {
+    /// Key in the configuration object.
+    pub name: String,
+    /// `duration` (`"5m"`), `integer`, `number`, `text`, `boolean`, or
+    /// `secret` (a text or a `{"secret": "<name>"}` reference).
+    pub kind: String,
+    /// Whether the operator refuses a configuration without it.
+    #[serde(default)]
+    pub required: bool,
+    /// Value used when absent.
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    /// What it does.
+    #[serde(default)]
+    pub description: String,
+}
+
+impl ParamSpec {
+    /// An optional parameter.
+    #[must_use]
+    pub fn new(name: &str, kind: &str, description: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            required: false,
+            default: None,
+            description: description.to_owned(),
+        }
+    }
+
+    /// Make it mandatory.
+    #[must_use]
+    pub fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
+
+    /// Give the value used when absent.
+    #[must_use]
+    pub fn default(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.default = Some(value.into());
+        self
+    }
 }
 
 /// The set of operators a cluster can run, without their code.
@@ -227,6 +278,25 @@ pub struct Registry<P: Providers> {
     ops: BTreeMap<OpRef, (OpDescriptor, OpFactory<P>)>,
 }
 
+impl<P: Providers> Registry<P> {
+    /// Say what the configuration of a registered operator is made of, so
+    /// that tools can offer a form for it. Unknown references are ignored.
+    pub fn with_params(
+        &mut self,
+        op: &str,
+        params: impl IntoIterator<Item = ParamSpec>,
+    ) -> &mut Self {
+        if let Some((descriptor, _)) = op
+            .parse::<OpRef>()
+            .ok()
+            .and_then(|op| self.ops.get_mut(&op))
+        {
+            descriptor.params = params.into_iter().collect();
+        }
+        self
+    }
+}
+
 impl<P: Providers> Clone for Registry<P> {
     fn clone(&self) -> Self {
         Self {
@@ -318,6 +388,7 @@ impl<P: Providers> Registry<P> {
             input,
             output,
             description: about.to_owned(),
+            params: Vec::new(),
         }
     }
 

@@ -6,6 +6,7 @@ import { OverviewView } from './views/overview.js';
 import { ClusterView } from './views/cluster.js';
 import { CatalogView } from './views/catalog.js';
 import { GraphView } from './views/graph.js';
+import { DesignView } from './views/design.js';
 
 const POLL_MS = 1000;
 const CATALOG_TTL = 15000;
@@ -28,6 +29,7 @@ function parseRoute() {
   const parts = raw.split('/').filter(Boolean).map((p) => { try { return decodeURIComponent(p); } catch { return p; } });
   if (parts[0] === 'cluster') return { name: 'cluster' };
   if (parts[0] === 'catalog') return { name: 'catalog' };
+  if (parts[0] === 'design') return { name: 'design' };
   if (parts[0] === 't' && parts[2] === 'g' && parts[3]) {
     return { name: 'graph', tenant: parts[1], graph: parts[3], node: parts[4] === 'n' ? parts[5] || null : null };
   }
@@ -81,6 +83,7 @@ const sidebar = h('aside', { class: 'sidebar' },
     sidebarRefs.overview = h('a', { class: 'nav-item', href: '#/' }, icon('overview'), h('span', { class: 'grow' }, "Vue d'ensemble")),
     sidebarRefs.cluster = h('a', { class: 'nav-item', href: '#/cluster' }, icon('cluster'), h('span', { class: 'grow' }, 'Cluster'), sidebarRefs.clusterCount = h('span', { class: 'count' })),
     sidebarRefs.catalog = h('a', { class: 'nav-item', href: '#/catalog' }, icon('catalog'), h('span', { class: 'grow' }, 'Catalogue'), sidebarRefs.catalogCount = h('span', { class: 'count' })),
+    sidebarRefs.design = h('a', { class: 'nav-item', href: '#/design' }, icon('catalog'), h('span', { class: 'grow' }, 'Concevoir')),
     h('div', { class: 'nav-label' }, 'Tenants'),
     sidebarRefs.tree = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }),
     sidebarRefs.treeEmpty = h('div', { class: 'muted', style: { fontSize: '12.5px', padding: '0 8.4px' } }, 'Chargement…')),
@@ -102,6 +105,7 @@ function updateSidebar(route) {
   cur(sidebarRefs.overview, route.name === 'overview');
   cur(sidebarRefs.cluster, route.name === 'cluster');
   cur(sidebarRefs.catalog, route.name === 'catalog');
+  cur(sidebarRefs.design, route.name === 'design');
   const c = store.cluster;
   if (c) text(sidebarRefs.clusterCount, `${c.workers.filter((w) => w.alive).length}/${c.workers.length}`);
   if (store.catalog) text(sidebarRefs.catalogCount, store.catalog.length);
@@ -166,6 +170,7 @@ function mountView() {
     if (route.name === 'graph') view = new GraphView(ctx, route);
     else if (route.name === 'cluster') view = new ClusterView(ctx);
     else if (route.name === 'catalog') view = new CatalogView(ctx);
+    else if (route.name === 'design') view = new DesignView(ctx);
     else view = new OverviewView(ctx);
     content.replaceChildren(view.el);
     mainEl.scrollTop = 0;

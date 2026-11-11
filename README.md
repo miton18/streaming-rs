@@ -30,7 +30,10 @@ Things to try in the UI:
   than the ten-second window): the emitting half of `count` waits for it at
   once, and half a minute later, three closed windows being held up, the
   source stops reading too;
-- raise `rate_per_sec` on `events`;
+- raise `rate_per_sec` on `events`, or change its `partitions`: slices join
+  and leave the running pipeline;
+- open *Concevoir*: build a pipeline step by step, each operator chosen from
+  the catalogue with a form for its parameters, and deploy it;
 - pause a node, pause or drain the graph;
 - watch the per-key counts arrive in the *Résultats* tab every ten seconds.
 

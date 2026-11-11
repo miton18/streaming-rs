@@ -118,4 +118,13 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, kv: DynKv) {
             }) as Arc<dyn SinkConnector>)
         },
     );
+    registry.with_params(
+        "std/kv-sink@1",
+        [streaming_core::ParamSpec::new(
+            "retain",
+            "integer",
+            "How many of the most recent rows are kept.",
+        )
+        .default(500)],
+    );
 }

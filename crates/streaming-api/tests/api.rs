@@ -34,6 +34,7 @@ fn descriptor(op: &str, kind: OpKind) -> OpDescriptor {
         input: TypeTag::Any,
         output: TypeTag::Any,
         description: format!("fake {op}"),
+        params: Vec::new(),
     }
 }
 
