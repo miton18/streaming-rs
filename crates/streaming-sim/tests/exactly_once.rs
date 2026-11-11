@@ -30,8 +30,8 @@ fn run(
     let mut builder = SimulationBuilder::new()
         .before_iteration({
             let slot = slot.clone();
-            let partitions = scenario.partitions;
-            move || *slot.lock() = Some(SimEnv::new(partitions))
+            let scenario = scenario.clone();
+            move || *slot.lock() = Some(SimEnv::new(&scenario))
         })
         .processes(workers, {
             let slot = slot.clone();
@@ -185,5 +185,47 @@ fn exactly_once_on_a_larger_cluster() {
         ..Scenario::default()
     };
     let report = run(scenario, 5, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_a_slow_store() {
+    // Every KV command takes up to 150 ms: commits lag far behind reads.
+    let scenario = Scenario {
+        kv_latency_ms: 150,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_eager_idle_watermarks() {
+    // Sparse traffic and a short idle timeout: watermarks follow the wall
+    // clock between bursts, over and over.
+    let scenario = Scenario {
+        events: 600,
+        produce_for: Duration::from_secs(60),
+        idle_timeout: Duration::from_millis(300),
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_in_a_hostile_mix() {
+    // Everything at once: workers fighting over every slice, an operator
+    // interfering, windows wider than an epoch, three times the faults.
+    let scenario = Scenario {
+        duel: true,
+        operator: true,
+        keys: 60,
+        events: 1_200,
+        produce_for: Duration::from_secs(30),
+        fault_scale: 3.0,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
     assert_clean(&report);
 }

@@ -146,17 +146,23 @@ pub struct SimEnv {
     pub boots: Mutex<u64>,
     /// Set by the driver once every event is produced.
     pub production_done: Mutex<bool>,
+    /// Multiplier applied to the probability of every injected fault.
+    pub fault_scale: f64,
+    /// Upper bound of the latency of an ordinary KV command, in milliseconds.
+    pub kv_latency_ms: u64,
     /// Number of actions the operator took, per kind.
     pub operator_actions: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl SimEnv {
-    /// A fresh world with a topic of `partitions` partitions.
+    /// A fresh world for one run of `scenario`.
     #[must_use]
-    pub fn new(partitions: u32) -> Arc<Self> {
+    pub fn new(scenario: &Scenario) -> Arc<Self> {
         Arc::new(Self {
+            fault_scale: scenario.fault_scale,
+            kv_latency_ms: scenario.kv_latency_ms.max(1),
             kv: MemKv::shared(),
-            log: MemLog::with_retention(partitions, true),
+            log: MemLog::with_retention(scenario.partitions, true),
             counts: Arc::default(),
             raw: Arc::default(),
             both: Arc::default(),
@@ -229,21 +235,26 @@ impl<P: Providers> ChaosKv<P> {
     }
 
     async fn before(&self) -> Result<(), KvError> {
-        let max_ms = if buggify_with_prob!(0.02) { 400 } else { 6 };
+        let scale = self.env.fault_scale;
+        let max_ms = if buggify_with_prob!(0.02 * scale) {
+            400
+        } else {
+            self.env.kv_latency_ms
+        };
         let delay = self.providers.random().random_range(0..max_ms);
         let _ = self
             .providers
             .time()
             .sleep(Duration::from_millis(delay))
             .await;
-        if buggify_with_prob!(0.03) {
+        if buggify_with_prob!(0.03 * scale) {
             return Err(KvError::Unavailable("injected: request lost".into()));
         }
         Ok(())
     }
 
     fn after<T>(&self, value: T) -> Result<T, KvError> {
-        if buggify_with_prob!(0.03) {
+        if buggify_with_prob!(0.03 * self.env.fault_scale) {
             *self.env.kv_replies_lost.lock() += 1;
             return Err(KvError::Unavailable("injected: reply lost".into()));
         }
@@ -352,12 +363,13 @@ impl<P: Providers> PartitionReader for ChaosReader<P> {
         max: usize,
         max_wait: Duration,
     ) -> Result<Vec<SourceRecord>, SourceError> {
-        if buggify_with_prob!(0.02) {
+        let scale = self.env.fault_scale;
+        if buggify_with_prob!(0.02 * scale) {
             return Err(SourceError(
                 "injected: connection to the broker lost".into(),
             ));
         }
-        if buggify_with_prob!(0.05) {
+        if buggify_with_prob!(0.05 * scale) {
             // Redelivery: the broker rewinds to somewhere before what it delivered.
             let back = self.providers.random().random_range(1..64_u64);
             self.next = self.next.saturating_sub(back);
@@ -416,10 +428,11 @@ impl<P: Providers> SinkConnector for ChaosSink<P> {
             .time()
             .sleep(Duration::from_millis(delay))
             .await;
-        if buggify_with_prob!(0.03) {
+        let scale = self.env.fault_scale;
+        if buggify_with_prob!(0.03 * scale) {
             return Err(SinkError("injected: sink unreachable".into()));
         }
-        let applied = if buggify_with_prob!(0.03) {
+        let applied = if buggify_with_prob!(0.03 * scale) {
             // Fails halfway: a prefix of the batch is durably written.
             self.providers
                 .random()
@@ -431,7 +444,7 @@ impl<P: Providers> SinkConnector for ChaosSink<P> {
             self.probe
                 .record(emit.id.as_str(), (self.render)(&emit.value));
         }
-        if applied < batch.len() || buggify_with_prob!(0.03) {
+        if applied < batch.len() || buggify_with_prob!(0.03 * scale) {
             *self.env.sink_ambiguous.lock() += 1;
             return Err(SinkError("injected: write outcome unknown".into()));
         }
@@ -532,6 +545,12 @@ pub struct Scenario {
     pub max_batch: usize,
     /// An operator pauses, drains and re-submits the graph while it runs.
     pub operator: bool,
+    /// Multiplier applied to the probability of every injected fault.
+    pub fault_scale: f64,
+    /// Upper bound of the latency of an ordinary KV command, in milliseconds.
+    pub kv_latency_ms: u64,
+    /// Silence after which a fully-read partition follows the wall clock.
+    pub idle_timeout: Duration,
     /// Every worker runs every slice, whatever the placement says.
     pub duel: bool,
     /// Workers find each other through gossip over the simulated network
@@ -554,6 +573,9 @@ impl Default for Scenario {
             max_event_age: Duration::from_millis(150),
             max_batch: 40,
             operator: false,
+            fault_scale: 1.0,
+            kv_latency_ms: 6,
+            idle_timeout: Duration::from_millis(1_500),
             duel: false,
             gossip: false,
             settle_timeout: Duration::from_secs(900),
@@ -605,7 +627,7 @@ impl Scenario {
             "version": 1,
             "settings": {
                 "max_out_of_orderness": "600ms",
-                "idle_timeout": "1500ms",
+                "idle_timeout": millis(self.idle_timeout),
                 "linger": "40ms",
                 "flush_interval": "250ms",
                 "max_batch": self.max_batch,
