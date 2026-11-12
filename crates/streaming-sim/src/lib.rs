@@ -451,7 +451,10 @@ impl<P: Providers> PartitionReader for ChaosReader<P> {
                 .ok()
                 .flatten()
                 .and_then(|head| head.position);
-            if committed.is_none_or(|at| at < upto) && !*self.env.deleting.lock() {
+            if committed.is_none_or(|at| at < upto)
+                && !*self.env.deleting.lock()
+                && !closed(self.env.kv.as_ref(), &slice).await
+            {
                 self.env.audit.lock().push(format!(
                     "partition {} was acknowledged up to {upto:?} while {committed:?} is committed",
                     self.partition
@@ -1575,6 +1578,18 @@ impl Workload for Operator {
     }
 }
 
+/// Whether the controller closed the log of `slice`: a retired slice, purged
+/// or about to be. Its log may vanish, and commits written into it after the
+/// closing are void, so its history is no longer audited.
+async fn closed(kv: &dyn streaming_core::Kv, slice: &streaming_core::SliceKey) -> bool {
+    let graph = streaming_core::GraphKey::new(slice.tenant.clone(), slice.graph.clone());
+    kv.get_json::<streaming_core::control::GraphPlan>(&keys::graph_plan(&graph))
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|plan| plan.closed.contains(&slice.slice) || plan.closing.contains_key(&slice.slice))
+}
+
 /// Watches the commit logs while the run is in progress and records anything
 /// that goes backwards: an epoch, a position or a watermark of a slice must
 /// never decrease, whoever commits and however often workers are replaced.
@@ -1621,6 +1636,10 @@ impl Workload for Auditor {
                 let Some(slice) = slice_of_log(&key) else {
                     continue;
                 };
+                if closed(kv.as_ref(), &slice).await {
+                    seen.remove(&key);
+                    continue;
+                }
                 let Ok(Some(head)) = slice_head(kv.as_ref(), &slice).await else {
                     continue;
                 };
