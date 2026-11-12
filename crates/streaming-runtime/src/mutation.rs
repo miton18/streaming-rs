@@ -37,11 +37,23 @@ pub enum Mutant {
     /// A graph being deleted is purged without closing its logs first, nor
     /// waiting for the commands in flight to land.
     DeleteWithoutClosing,
+    /// A worker runs the graphs that the store describes otherwise than its
+    /// code declares them, as the binary a deployment is replacing would.
+    RunAnotherDeclaration,
+    /// The controller takes the word of the index entry for a graph being
+    /// deleted, and ignores the mark of the deletion.
+    DeleteByTheIndexEntry,
+    /// A worker says which graphs it steps aside from by their index entry,
+    /// without looking at the description it would refuse to run.
+    AsideByTheIndexEntry,
+    /// A worker takes the word of the index entry for a graph being
+    /// deleted, and runs it again when the entry is written back.
+    RunWhatIsBeingDeleted,
 }
 
 impl Mutant {
     /// Every mutant.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 15] = [
         Self::CommitWithoutFencing,
         Self::CommitBelowTheSeal,
         Self::AckBeforeCommit,
@@ -53,6 +65,10 @@ impl Mutant {
         Self::JoinWithoutWatermark,
         Self::EmitWithoutRetired,
         Self::DeleteWithoutClosing,
+        Self::RunAnotherDeclaration,
+        Self::DeleteByTheIndexEntry,
+        Self::AsideByTheIndexEntry,
+        Self::RunWhatIsBeingDeleted,
     ];
 }
 

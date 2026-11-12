@@ -134,6 +134,7 @@ impl Cluster {
                 updated_ms: 0,
                 deleting: false,
                 orphan: false,
+                fingerprint: None,
             },
         )
         .await

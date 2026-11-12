@@ -44,6 +44,18 @@ pub fn covers(position: Option<Position>, window: &streaming_core::Window) -> bo
     state::emitted(window, position)
 }
 
+/// The plan generation under which the commit record `value`, just written
+/// to the log of `slice` under `field`, was written. `None` for anything
+/// else than a commit, and for a void one: at or below the seal, or under a
+/// plan older than the one the log was closed to. For harnesses that watch
+/// every write.
+pub async fn commit_generation(kv: &dyn Kv, slice: &SliceKey, field: &str, value: &[u8]) -> Option<u64> {
+    let epoch = streaming_core::keys::parse_commit_field(field)?;
+    let record: state::CommitRecord = postcard::from_bytes(value).ok()?;
+    let seal = state::read_seal(kv, slice).await.ok()?;
+    (epoch > seal.floor && record.plan >= seal.plan).then_some(record.plan)
+}
+
 /// What is wrong, if anything, with the commit record `value` just written to
 /// the log of `slice` under `field`. For harnesses that watch every write.
 ///

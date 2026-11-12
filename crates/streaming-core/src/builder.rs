@@ -190,6 +190,7 @@ impl GraphBuilder {
             settings: self.settings,
             nodes,
             edges,
+            fingerprint: None,
         })
     }
 }

@@ -27,6 +27,7 @@ function workerCard() {
       h('div', { style: { minWidth: 0 } }, h('div', { class: 'card-kicker' }, 'worker'), r.name = h('div', { class: 'card-title' })),
       r.tag = h('span')),
     r.facts = h('div', { class: 'facts' }),
+    r.aside = h('div', { class: 'facts', hidden: true, title: 'Le code de ce worker déclare ces graphes autrement que le store, ou ne les déclare pas : il n’en exécute aucune slice. C’est l’état normal d’un ancien binaire pendant un déploiement.' }),
     h('div', { class: 'gauges' }, r.cpu = gauge('CPU'), r.mem = gauge('Mémoire')),
     r.counts = h('div', { class: 'facts' }, h('span', null, r.actors = h('b'), ' acteurs'), h('span', null, r.slices = h('b'), ' slices')),
     h('div', { class: 'hr' }),
@@ -47,6 +48,9 @@ function updateWorker(el, w) {
   const facts = [`v${w.version || '?'}`, w.apiAddr ? `API ${w.apiAddr}` : 'sans API', `battement ${ago(w.heartbeatMs, conn.now())}`];
   text(r.facts, facts.join(' · '));
   attr(r.facts, 'title', `génération ${w.generation} (démarré ${time(w.generation)})`);
+  const aside = w.aside || [];
+  r.aside.hidden = aside.length === 0;
+  text(r.aside, aside.length ? `En retrait de ${aside.length === 1 ? 'un graphe' : `${aside.length} graphes`} : ${aside.join(', ')}` : '');
   const load = w.load || {};
   setGauge(r.cpu, load.cpu || 0, pct(load.cpu || 0));
   setGauge(r.mem, load.memory || 0, `${pct(load.memory || 0)} · ${bytes(load.memoryBytes || 0)}`);

@@ -20,7 +20,11 @@
 //! starts, publishes the tenants and graphs of the code into the store, where
 //! the controller, the other workers and the HTTP API read them. A graph the
 //! store holds but the code no longer does is stopped, its state kept until
-//! it is deleted through the API. The store keeps the
+//! it is deleted through the API. While a deployment is in progress two
+//! binaries run side by side: each graph remembers the declarations it has
+//! had, and a binary the store has moved on from steps aside from that graph,
+//! neither publishing nor running it, as long as a worker of another binary
+//! is alive. The store keeps the
 //! graphs' state, and the configuration fields changed through the API
 //! (`PATCH .../nodes/{node}/config`), which only the fields an operator
 //! describes among its parameters can be.
@@ -42,18 +46,22 @@ use clap::{Parser, Subcommand};
 pub use moonpool_core;
 use moonpool_core::TokioProviders;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::ErrorKind,
     net::SocketAddr,
     process::{Command, Stdio},
     sync::Arc,
+    time::Duration,
 };
 pub use streaming_api as api;
-use streaming_api::{ApiConfig, ApiState, control};
+use streaming_api::{
+    ApiConfig, ApiState,
+    control::{self, Publisher},
+};
 pub use streaming_core as core;
 use streaming_core::{
-    Clock, DynKv, EnvSecrets, GraphBuilder, GraphSpec, Kv, MemKv, OpFactory, Registry, SecretProvider, SystemClock,
-    TenantId, WorkerId,
+    Clock, DynKv, EnvSecrets, GraphBuilder, GraphKey, GraphSpec, Kv, MemKv, OpFactory, Registry, SecretProvider,
+    SystemClock, TenantId, WorkerId,
 };
 use streaming_kv_redis::{RedisConfig, RedisKv};
 #[cfg(feature = "pulsar")]
@@ -73,6 +81,10 @@ fn scratch_kv() -> DynKv {
 pub type AppRegistry = Registry<TokioProviders>;
 
 type Operators = Arc<dyn Fn(&mut AppRegistry) + Send + Sync>;
+
+/// How often a worker checks that the store still holds what its code
+/// declares, to publish again when it does not.
+const REPUBLISH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// A fatal error of an application, said in words.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -195,22 +207,26 @@ impl App {
         }
     }
 
+    /// The graphs of the code with the fingerprint of their declaration:
+    /// what a worker of this binary runs, and nothing else.
+    fn declared(&self) -> BTreeMap<GraphKey, String> {
+        self.graphs
+            .iter()
+            .map(|graph| (graph.key(), graph.declaration_fingerprint()))
+            .collect()
+    }
+
     /// Make the store describe the tenants and graphs of the code, and say
-    /// on stderr what changed.
-    async fn publish(&self, kv: &dyn Kv, clock: &dyn Clock) -> Result<(), Error> {
+    /// on stderr what changed (`again`: only what changed since the previous
+    /// publication of this process).
+    async fn publish(&self, kv: &dyn Kv, clock: &dyn Clock, publisher: &Publisher, again: bool) -> Result<(), Error> {
         let catalog = self.registry(&scratch_kv()).catalog();
-        let publication = control::publish(kv, clock, &catalog, &self.tenants, &self.graphs).await?;
+        let publication = control::publish(kv, clock, &catalog, &self.tenants, &self.graphs, publisher).await?;
         for tenant in &publication.created_tenants {
             eprintln!("  tenant {tenant} created");
         }
-        for tenant in &publication.renamed_tenants {
-            eprintln!("  tenant {tenant} is stored with another display name, which is kept");
-        }
         for (graph, version) in &publication.updated {
             eprintln!("  graph {graph} published (version {version})");
-        }
-        for graph in &publication.unchanged {
-            eprintln!("  graph {graph} unchanged");
         }
         for (graph, version) in &publication.restored {
             eprintln!("  graph {graph} is back in the code: running again on its state (version {version})");
@@ -220,13 +236,28 @@ impl App {
                 "  graph {graph} is no longer in the code: stopped, its state is kept until it is deleted through the API"
             );
         }
+        if again {
+            return Ok(());
+        }
+        for tenant in &publication.renamed_tenants {
+            eprintln!("  tenant {tenant} is stored with another display name, which is kept");
+        }
+        for graph in &publication.unchanged {
+            eprintln!("  graph {graph} unchanged");
+        }
         for graph in &publication.orphans {
             eprintln!(
                 "  graph {graph} is not in the code: stopped, its state is kept until it is deleted through the API"
             );
         }
         for graph in &publication.still_deleting {
-            eprintln!("  graph {graph} is still being deleted: restart once it is gone to run it again");
+            eprintln!("  graph {graph} is still being deleted: it is published once it is gone");
+        }
+        for graph in &publication.aside {
+            eprintln!(
+                "  graph {graph}: workers of another binary run it otherwise than this code declares it. \
+                 Stepping aside from it until every worker runs this binary"
+            );
         }
         for (graph, node, field) in &publication.ignored_overrides {
             eprintln!(
@@ -234,6 +265,34 @@ impl App {
             );
         }
         Ok(())
+    }
+
+    /// Publish again whenever the store no longer holds what the code
+    /// declares: this binary stepped aside from a graph while another one
+    /// was running, a graph was being deleted, or a concurrent write got in
+    /// the way. Looks every [`REPUBLISH_INTERVAL`], until `shutdown`.
+    async fn keep_published(
+        self: Arc<Self>,
+        kv: DynKv,
+        clock: Arc<dyn Clock>,
+        publisher: Publisher,
+        shutdown: CancellationToken,
+    ) {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(REPUBLISH_INTERVAL) => {}
+            }
+            match control::out_of_date(kv.as_ref(), &self.graphs).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    if let Err(error) = self.publish(kv.as_ref(), clock.as_ref(), &publisher, true).await {
+                        tracing::warn!(%error, "cannot publish the graphs of the code");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "cannot read the graph index"),
+            }
+        }
     }
 
     /// Parse the command line, run what it asks for, and turn a failure into
@@ -444,13 +503,25 @@ async fn standalone(
     let shutdown = CancellationToken::new();
     let listener = listen_on(listen).await?;
     let address = listener.local_addr()?;
-    app.publish(kv.as_ref(), clock.as_ref()).await?;
+    let ids = (1..=workers.max(1))
+        .map(|index| WorkerId::new(format!("worker-{index}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let publisher = Publisher {
+        workers: ids.clone(),
+        ..Publisher::default()
+    };
+    app.publish(kv.as_ref(), clock.as_ref(), &publisher, false).await?;
 
-    let mut tasks = Vec::new();
-    for index in 1..=workers.max(1) {
-        let id = WorkerId::new(format!("worker-{index}"))?;
+    let mut tasks = vec![tokio::spawn(app.clone().keep_published(
+        kv.clone(),
+        clock.clone(),
+        publisher,
+        shutdown.clone(),
+    ))];
+    for (index, id) in (1..).zip(ids) {
         let mut config = WorkerConfig::new(id.clone());
         config.api_addr = Some(address.to_string());
+        config.declared = Some(app.declared());
         let mut worker = Worker::new(environment(kv.clone(), app.registry(&kv), Arc::new(EnvSecrets)), config);
         if gossip_port != 0 {
             // The in-process workers gossip over loopback, like separate
@@ -520,9 +591,18 @@ async fn worker(
     redis.ping().await?;
     let kv: DynKv = Arc::new(redis);
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    app.publish(kv.as_ref(), clock.as_ref()).await?;
     let shutdown = CancellationToken::new();
     let mut worker_config = WorkerConfig::new(WorkerId::new(id)?);
+    worker_config.declared = Some(app.declared());
+    let publisher = Publisher {
+        workers: vec![worker_config.worker.clone()],
+        member_timeout: worker_config.member_timeout,
+    };
+    app.publish(kv.as_ref(), clock.as_ref(), &publisher, false).await?;
+    let republishing = tokio::spawn(
+        app.clone()
+            .keep_published(kv.clone(), clock.clone(), publisher, shutdown.clone()),
+    );
 
     let mut api = None;
     if let Some(listen) = listen {
@@ -557,6 +637,7 @@ async fn worker(
     let running = tokio::spawn(worker.run(shutdown.clone()));
     wait_for_signal(shutdown).await;
     let _ = running.await;
+    let _ = republishing.await;
     if let Some(api) = api {
         let _ = api.await;
     }

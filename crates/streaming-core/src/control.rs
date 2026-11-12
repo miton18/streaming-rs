@@ -61,6 +61,12 @@ pub struct MemberInfo {
     /// Framework version of the worker binary.
     #[serde(default)]
     pub version: String,
+    /// Graphs (`tenant/graph`) this worker steps aside from: its code
+    /// declares them otherwise than the store does, or not at all, as an
+    /// older binary does while a deployment is in progress. It runs none of
+    /// their slices.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub aside: BTreeSet<String>,
 }
 
 impl MemberInfo {
@@ -106,6 +112,29 @@ pub struct GraphIndexEntry {
     /// declares it again.
     #[serde(default)]
     pub orphan: bool,
+    /// Fingerprint of the declaration in force: the one of the stored
+    /// description, none once the code stopped declaring the graph. A worker
+    /// whose code says otherwise steps aside from the graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+/// One declaration of a graph by the code of the workers. Field `<n>` of the
+/// graph's declarations hash, written once with `HSETNX`, numbered from 1:
+/// the highest is the one in force. Publishing a declaration the hash already
+/// holds is going back to it, which only a cluster running a single binary
+/// does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Declaration {
+    /// Fingerprint of the declared description
+    /// ([`GraphSpec::declaration_fingerprint`](crate::GraphSpec::declaration_fingerprint)),
+    /// none when the code stopped declaring the graph.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    /// When it was published.
+    #[serde(default)]
+    pub since_ms: Timestamp,
 }
 
 /// Run state requested for a graph.
@@ -468,6 +497,7 @@ mod tests {
             slices: 0,
             api_addr: None,
             version: String::new(),
+            aside: Default::default(),
         };
         assert!(member.is_alive(10_000, 3_000));
         assert!(member.is_alive(13_000, 3_000));

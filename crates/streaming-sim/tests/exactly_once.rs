@@ -7,7 +7,7 @@
 use moonpool_sim::{Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport};
 use parking_lot::Mutex;
 use std::{sync::Arc, time::Duration};
-use streaming_sim::{Auditor, Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
+use streaming_sim::{Auditor, Deployer, Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
 
 fn iterations(default: usize) -> usize {
     std::env::var("SIM_ITERATIONS")
@@ -31,6 +31,7 @@ fn run(scenario: Scenario, workers: usize, attrition: bool, default_iterations: 
         })
         .workload(Driver::new(slot.clone(), scenario.clone()))
         .workload(Operator::new(slot.clone(), scenario.clone()))
+        .workload(Deployer::new(slot.clone(), scenario.clone()))
         .workload(Auditor::new(slot.clone()))
         .run_time_budget(Duration::from_secs(3_600));
     if attrition {
@@ -371,5 +372,36 @@ fn exactly_once_with_rare_keys() {
         ..Scenario::default()
     };
     let report = run(scenario, 3, true, 30);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_across_deployments() {
+    // The application is redeployed while events flow, to a new release or
+    // back to an earlier one: two binaries run side by side, each declaring
+    // the graph its own way, and a worker that crashes before its turn comes
+    // back with the old one. Only the binary the store follows runs the
+    // graph, and the graph ends by leaving the code.
+    let scenario = Scenario {
+        deploy: true,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 20);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_across_deployments_without_placement() {
+    // The same, every worker running every slice whatever the placement
+    // says, an operator at work: only its declaration keeps a worker of the
+    // other binary away from a slice.
+    let scenario = Scenario {
+        deploy: true,
+        duel: true,
+        operator: true,
+        events: 800,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 15);
     assert_clean(&report);
 }

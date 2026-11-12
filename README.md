@@ -196,10 +196,16 @@ Use `rediss://` for TLS (Materia KV). Each worker publishes the tenants and
 graphs of the code when it starts and prints what changed; every worker
 started with `--listen` serves the HTTP API and the web UI. Changing a graph
 means deploying a new version of the binary. While a deployment replaces the
-workers, old and new binaries run side by side: an old worker that restarts
-then would publish the old graphs again, and stop the graphs only the new
-code has, until a new worker starts (a topology fingerprint that makes it
-step aside is the next step). No state is deleted by a deployment.
+workers, old and new binaries run side by side. Each graph remembers the
+declarations it has had, by fingerprint (its settings, nodes, operators,
+configuration and edges): the first worker of the new binary publishes the
+new declaration, and from then on the workers of the old one step aside from
+that graph. They run none of its slices, and if one restarts it publishes
+nothing for it. The cluster view shows which graphs a worker steps aside
+from. Going back to an earlier version works the same way, with one
+difference: a declaration the graph has already had only takes over once no
+worker runs what replaced it, a few seconds after the last of them stops. No
+state is deleted by a deployment.
 
 Secrets referenced as `{"secret": "name"}` are read from the environment
 variable `STREAMING_SECRET__<TENANT>__<NAME>`.

@@ -84,6 +84,7 @@ async fn submit(kv: &DynKv, spec: &GraphSpec) {
             updated_ms: 0,
             deleting: false,
             orphan: false,
+            fingerprint: None,
         },
     )
     .await

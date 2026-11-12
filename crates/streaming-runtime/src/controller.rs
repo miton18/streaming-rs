@@ -27,12 +27,18 @@ use streaming_core::{
 pub(crate) struct Candidate {
     pub worker: WorkerId,
     pub load: Load,
+    /// Graphs (`tenant/graph`) the worker steps aside from: it runs none of
+    /// their slices.
+    pub aside: BTreeSet<String>,
 }
 
 /// Place `slices` on `workers`.
 ///
 /// The policy keeps a graph together and only spreads it on evidence:
 ///
+/// 0. a slice only goes to, and only stays on, a worker that runs its graph:
+///    one whose code declares the graph as the store does. While none does,
+///    the slice is placed as if all did, and waits there;
 /// 1. an assignment to a worker that is still alive is kept;
 /// 2. an unassigned slice joins the worker already running most of its graph,
 ///    unless that worker is saturated; otherwise it goes to the worker with
@@ -53,10 +59,15 @@ pub(crate) fn assign(
     if workers.is_empty() {
         return (assignments, false);
     }
-    let alive: BTreeSet<&WorkerId> = workers.iter().map(|candidate| &candidate.worker).collect();
+    // Whether `candidate` may hold a slice of `graph`.
+    let runs = |candidate: &Candidate, graph: &GraphKey| {
+        let graph = graph.to_string();
+        !candidate.aside.contains(&graph) || workers.iter().all(|other| other.aside.contains(&graph))
+    };
     let wanted: BTreeSet<&SliceKey> = slices.iter().collect();
     for (slice, worker) in current {
-        if wanted.contains(slice) && alive.contains(worker) {
+        let holder = workers.iter().find(|candidate| &candidate.worker == worker);
+        if wanted.contains(slice) && holder.is_some_and(|holder| runs(holder, &slice.graph_key())) {
             assignments.insert(slice.clone(), worker.clone());
         }
     }
@@ -86,6 +97,16 @@ pub(crate) fn assign(
             continue;
         }
         let graph = slice.graph_key();
+        let everyone: Vec<&Candidate> = everyone
+            .iter()
+            .copied()
+            .filter(|candidate| runs(candidate, &graph))
+            .collect();
+        let with_headroom: Vec<&Candidate> = with_headroom
+            .iter()
+            .copied()
+            .filter(|candidate| runs(candidate, &graph))
+            .collect();
         let home = with_headroom
             .iter()
             .map(|candidate| {
@@ -136,7 +157,13 @@ pub(crate) fn assign(
                         .or(slices.last())
                 })
                 .map(|slice| (*slice).clone());
-            if let Some(slice) = victim {
+            let welcome = |slice: &SliceKey| {
+                workers
+                    .iter()
+                    .find(|candidate| candidate.worker == to)
+                    .is_some_and(|candidate| runs(candidate, &slice.graph_key()))
+            };
+            if let Some(slice) = victim.filter(welcome) {
                 assignments.insert(slice, to);
                 moved = true;
             }
@@ -339,6 +366,8 @@ async fn purge_graph(kv: &dyn Kv, graph: &GraphKey, catalog: &streaming_core::Ca
         keys::graph_spec(graph),
         keys::graph_code(graph),
         keys::graph_overrides(graph),
+        keys::graph_declarations(graph),
+        keys::graph_version(graph),
         keys::graph_desired(graph),
         keys::graph_plan(graph),
     ]);
@@ -364,15 +393,43 @@ pub(crate) async fn run_once<P: Providers>(
     let mut changed = false;
     let mut slices: Vec<SliceKey> = Vec::new();
 
+    // Read before the index: a graph marked after this read is seen as
+    // deleted by the next round, never taken for a mark left behind.
+    let marked: BTreeSet<String> = if planted(Mutant::DeleteByTheIndexEntry) {
+        BTreeSet::new()
+    } else {
+        kv.hgetall(keys::CLUSTER_DELETING)
+            .await?
+            .into_iter()
+            .map(|(graph, _)| graph)
+            .collect()
+    };
     let index: Vec<(String, GraphIndexEntry)> = kv.hgetall_json(keys::CLUSTER_GRAPHS).await?;
     let known: BTreeSet<GraphKey> = index
         .iter()
         .map(|(_, entry)| GraphKey::new(entry.tenant.clone(), entry.graph.clone()))
         .collect();
     state.deleting_since.retain(|graph, _| known.contains(graph));
+    // The mark of a graph that is gone: its purge ended without removing it.
+    let left: Vec<String> = marked
+        .iter()
+        .filter(|graph| !known.iter().any(|known| known.to_string() == **graph))
+        .cloned()
+        .collect();
+    if !left.is_empty() {
+        kv.hdel(keys::CLUSTER_DELETING, left).await?;
+    }
 
-    for (_, entry) in index {
+    for (field, mut entry) in index {
         let graph = GraphKey::new(entry.tenant.clone(), entry.graph.clone());
+        if !entry.deleting && marked.contains(&graph.to_string()) {
+            // The mark decides. The entry was written back by someone who
+            // had read it before the deletion: say it again, for the workers
+            // and the API, which read the entry.
+            entry.deleting = true;
+            kv.hset_json(keys::CLUSTER_GRAPHS, &field, &entry).await?;
+            changed = true;
+        }
         if entry.deleting {
             // Close every log first, so that an instance still running
             // commits nothing more; then leave workers the time to notice,
@@ -389,6 +446,7 @@ pub(crate) async fn run_once<P: Providers>(
             if now.saturating_sub(since) >= grace.max(linger) {
                 if purge_graph(kv, &graph, &env.registry.catalog()).await? {
                     state.deleting_since.remove(&graph);
+                    kv.hdel(keys::CLUSTER_DELETING, vec![graph.to_string()]).await?;
                 } else {
                     state.deleting_since.insert(graph.clone(), (now, linger));
                 }
@@ -538,6 +596,7 @@ pub(crate) async fn run_once<P: Providers>(
         .map(|member| Candidate {
             worker: member.worker.clone(),
             load: member.load,
+            aside: member.aside.clone(),
         })
         .collect();
     let placement: Placement = read_doc(kv, keys::CLUSTER_PLACEMENT).await?.unwrap_or_default();
@@ -573,6 +632,7 @@ mod tests {
         Candidate {
             worker: WorkerId::new(id).unwrap(),
             load: Load { cpu, ..Load::default() },
+            aside: BTreeSet::new(),
         }
     }
 
@@ -603,6 +663,60 @@ mod tests {
         assert_eq!(hosts(&assignments, "a").len(), 1, "graph a is colocated");
         assert_eq!(hosts(&assignments, "b").len(), 1, "graph b is colocated");
         assert_ne!(hosts(&assignments, "a"), hosts(&assignments, "b"));
+    }
+
+    #[test]
+    fn a_slice_goes_to_and_stays_on_a_worker_that_runs_its_graph() {
+        let aside = |id: &str, graphs: &[&str]| Candidate {
+            aside: graphs.iter().map(|graph| format!("acme/{graph}")).collect(),
+            ..worker(id, 0.1)
+        };
+        let mut all = slices("a", 2);
+        all.extend(slices("b", 2));
+        // Two workers of the binary being replaced, one of the new binary,
+        // which declares `a` otherwise.
+        let workers = [aside("w1", &["a"]), aside("w2", &["a"]), aside("w3", &[])];
+        let (first, _) = assign(&all, &workers, &BTreeMap::new(), true);
+        assert_eq!(hosts(&first, "a"), BTreeSet::from(["w3".to_owned()]));
+        assert_eq!(first.len(), all.len());
+
+        // What a worker held before it stepped aside leaves it.
+        let before: BTreeMap<SliceKey, WorkerId> = all
+            .iter()
+            .map(|slice| (slice.clone(), WorkerId::new("w1").unwrap()))
+            .collect();
+        let (moved, _) = assign(&all, &workers, &before, false);
+        assert_eq!(hosts(&moved, "a"), BTreeSet::from(["w3".to_owned()]));
+        assert_eq!(hosts(&moved, "b"), BTreeSet::from(["w1".to_owned()]));
+
+        // While nobody runs a graph its slices stay where they are, and new
+        // ones are placed as if everybody did.
+        let nobody = [aside("w1", &["a"]), aside("w2", &["a"])];
+        let (kept, _) = assign(&all, &nobody, &before, false);
+        assert_eq!(kept, before);
+        let (placed, _) = assign(&all, &nobody, &BTreeMap::new(), false);
+        assert_eq!(placed.len(), all.len());
+
+        // A saturated worker does not shed a slice onto one that steps aside
+        // from its graph.
+        let busy = [aside("w1", &[]), aside("w2", &["a"])];
+        let busy = [
+            Candidate {
+                load: Load {
+                    cpu: 0.95,
+                    ..Load::default()
+                },
+                ..busy[0].clone()
+            },
+            busy[1].clone(),
+        ];
+        let only_a: BTreeMap<SliceKey, WorkerId> = slices("a", 2)
+            .into_iter()
+            .map(|slice| (slice, WorkerId::new("w1").unwrap()))
+            .collect();
+        let (after, moved) = assign(&slices("a", 2), &busy, &only_a, true);
+        assert!(!moved);
+        assert_eq!(after, only_a);
     }
 
     #[test]
@@ -726,6 +840,7 @@ mod tests {
                     updated_ms: 0,
                     deleting: false,
                     orphan: false,
+                    fingerprint: None,
                 },
             )
             .await
@@ -743,6 +858,7 @@ mod tests {
                 slices: 0,
                 api_addr: None,
                 version: String::new(),
+                aside: Default::default(),
             }
         }
 

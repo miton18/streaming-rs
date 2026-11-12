@@ -280,6 +280,14 @@ await step('dead worker shown on cluster page', async () => {
   await mock('worker', { worker: 'worker-3', alive: true });
 });
 
+await step('a worker of an older binary says which graphs it steps aside from', async () => {
+  await mock('aside', { worker: 'worker-2', graphs: ['acme/count-per-key', 'globex/clicks'] });
+  await page.waitForFunction(() => [...document.querySelectorAll('.wcard .facts')].some((el) => !el.hidden && el.textContent.includes('En retrait de 2 graphes : acme/count-per-key, globex/clicks')), null, { timeout: 4000 });
+  await shot('e2e-cluster-worker-aside');
+  await mock('aside', { worker: 'worker-2', graphs: [] });
+  await page.waitForFunction(() => ![...document.querySelectorAll('.wcard .facts')].some((el) => !el.hidden && el.textContent.includes('En retrait')), null, { timeout: 4000 });
+});
+
 await step('graphs come from the code: no deletion, only exposed fields', async () => {
   await page.click('.nav-graph[href="#/t/globex/g/legacy-export"]');
   await page.waitForSelector('.node');

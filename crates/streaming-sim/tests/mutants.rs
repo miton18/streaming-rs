@@ -8,7 +8,7 @@ use moonpool_sim::{Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilde
 use parking_lot::Mutex;
 use std::{sync::Arc, time::Duration};
 use streaming_runtime::mutation::{Mutant, plant};
-use streaming_sim::{Auditor, Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
+use streaming_sim::{Auditor, Deployer, Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
 
 fn run(scenario: &Scenario, iterations: usize) -> SimulationReport {
     let slot: EnvSlot = Arc::new(Mutex::new(None));
@@ -25,6 +25,7 @@ fn run(scenario: &Scenario, iterations: usize) -> SimulationReport {
         })
         .workload(Driver::new(slot.clone(), scenario.clone()))
         .workload(Operator::new(slot.clone(), scenario.clone()))
+        .workload(Deployer::new(slot.clone(), scenario.clone()))
         .workload(Auditor::new(slot.clone()))
         .run_time_budget(Duration::from_secs(3_600))
         .enable_chaos([Chaos::Attrition {
@@ -53,8 +54,10 @@ fn every_planted_bug_is_noticed() {
     // Hostile settings, each the natural enemy of some precaution: workers
     // fighting over every slice; the same with three times the faults and an
     // operator; long stalls, after which a worker resumes far behind; a store
-    // applying commands long after their sender gave up; and a source whose
-    // partitions come and go, with and without a fight.
+    // applying commands long after their sender gave up; a source whose
+    // partitions come and go, with and without a fight; and an application
+    // redeployed while it runs, two binaries side by side, with and without
+    // a placement to keep them apart.
     let scenarios = [
         Scenario {
             duel: true,
@@ -88,6 +91,15 @@ fn every_planted_bug_is_noticed() {
             repartition: true,
             duel: true,
             slide: Duration::from_millis(500),
+            ..Scenario::default()
+        },
+        Scenario {
+            deploy: true,
+            ..Scenario::default()
+        },
+        Scenario {
+            deploy: true,
+            duel: true,
             ..Scenario::default()
         },
     ];

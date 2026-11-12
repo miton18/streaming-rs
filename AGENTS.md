@@ -59,9 +59,11 @@ nodes and the configuration fields operators *expose* (their `ParamSpec`s),
 which the API and the UI may change, a change restarting the node. Creating
 and editing graphs through the API or the UI is gone (the designer too);
 deleting only applies to a graph the code no longer declares. The API and the UI are served by every worker started with `--listen`.
-Agreed next steps: a **topology fingerprint** carried by instances and
-commits, so that an old binary still running during a deployment steps aside
-instead of writing (it is a protocol precaution: it comes with its mutant);
+Two binaries run side by side while a deployment is in progress: each graph
+keeps the list of its declarations by **fingerprint**, and a binary the store
+has moved on from steps aside from that graph (protocol, points 12 and 13).
+The owner confirmed that a graph leaving the code is stopped and keeps its
+state, deletion being explicit. Agreed for
 later, telling apart exposed parameters that break the state (a window's
 size) from those a restart absorbs. The comparison with Flink, Beam, Kafka
 Streams, Temporal and others that led there is a Claude Doc of the project,
@@ -149,11 +151,44 @@ exactly-once.
     only, resumably. A pass that still finds something starts the
     countdown again; spec, plan and index entry go last, after a clean
     pass.
+    The mark of a deletion is a field of `cluster:deleting`, written first
+    and removed last: the index entry is rewritten whole by whoever changes
+    a part of it, possibly from a read older than the deletion, so the
+    controller follows the mark and says `deleting` again in the entry.
+    Workers follow the mark too: slices started again on the word of an
+    entry written back would commit into logs whose seal the purge has
+    removed, and the purge, which goes by the seals, would leave them.
 11. **Control plane.** Not knowing who is alive is never being alone
     (`Membership::alive` returns `None` on a failed read). Read errors are
     never taken for absent documents.
+12. **Declarations.** A graph's declarations are numbered fields of
+    `t:..:g:..:declarations`, each written once with `HSETNX` and holding
+    the fingerprint of what a binary declares
+    (`GraphSpec::declaration_fingerprint`: settings, nodes, operators,
+    configuration, edges; none when the code no longer has the graph). The
+    highest is in force. A fingerprint the graph never had is a new binary:
+    published at once. One it has had and left, or a graph the code does not
+    have, is an older binary restarting or a deliberate return: published
+    only when every other live worker *steps aside* from the graph
+    (`MemberInfo.aside`), a worker that advertises nothing yet counting as
+    running it. Otherwise the binary writes nothing for that graph
+    (`Publication::aside`) and tries again later (`control::out_of_date`,
+    every ten seconds in `App`).
+13. **A worker only runs what its code declares.** The stored description
+    carries the fingerprint it comes from; a worker whose code declares the
+    graph otherwise, or not at all, runs none of its slices
+    (`WorkerConfig::declared`) and says so in its heartbeat, going by the
+    description for every graph, placed on it or not, and never by the index
+    entry, which may be written back from an older read. The placement
+    keeps slices off such workers while another one runs the graph, and the
+    controller is the first of the workers stepping aside from the fewest
+    graphs. Descriptions get their version from a counter (`INCR
+    t:..:g:..:version`), never from "the stored version plus one": a plan is
+    computed for a version, and two descriptions under one version would
+    share it. Every new version is a new plan generation, which is what
+    fences an instance still running the previous description.
 
-`streaming_runtime::mutation` holds eleven **planted bugs**, one per precaution
+`streaming_runtime::mutation` holds fifteen **planted bugs**, one per precaution
 above (`SIM_MUTANT=<name>` plants a single one). When you add a precaution, add its mutant and make the simulation
 notice it.
 
@@ -169,6 +204,7 @@ SIM_ITERATIONS=8 cargo test --release -p streaming-sim --features mutants --test
 SIM_SEEDS=<seed> cargo test -p streaming-sim --test exactly_once <test> -- --nocapture   # replay
 SIM_CONFIG_SEED=<n> cargo test -p streaming-sim --test exactly_once exactly_once_in_random_configurations
 SIM_REPORT=1 ...                                         # print coverage of the assert_sometimes
+SIM_DUMP_ACTORS=1 ...                                    # every actor in the dump of a failing run
 ```
 
 Other suites: `GOSSIP_SIM_ITERATIONS`, `KVREDIS_SIM_SEEDS`, `WARP10_SIM_SEEDS`.
@@ -208,18 +244,35 @@ The harness (`streaming-sim/src/lib.rs`):
   stateless, diamond, second-level aggregation); committed history never goes
   backwards (`Auditor`, every 100 ms); nothing acknowledged before being
   committed; no commit into an emitted window (checked the instant a commit
-  lands); no window state or orphan log left after settling; logs stay small.
-- **Scenarios**: nineteen hand-written ones plus random configurations
+  lands); no window state or orphan log left after settling; logs stay small;
+  a commit under the plan in force comes from a binary that declares the
+  description this plan was computed from (also checked as it lands).
+- **Scenarios**: twenty-two hand-written ones plus random configurations
   (`Scenario::random`). A failing run prints `[VIOLATION] seed=...` and a
-  dump of the cluster state.
+  dump of the cluster state. With `Scenario::deploy` the workers are
+  instances of an application: they publish the graph of their release when
+  they start, a `Deployer` replaces the release on one worker after the other
+  while events flow (a new one or an earlier one again; a worker that crashes
+  before its turn comes back with the old one), then a deployment fails (an
+  instance of a release never seen publishes and dies, an index entry of the
+  release in place landing after it; the release in place must take the
+  graph back), and the graph leaves the code before it is deleted. Every run ends with an index entry written back by
+  someone who had read it before the deletion, at once or just as the purge
+  has removed the first seal.
 - Moonpool specifics: the run stops when *any* workload returns, so auxiliary
   workloads wait on `ctx.shutdown()`; without pinned seeds each run explores
   new ones; a "did not settle" may be a configuration too slow for the
   900 s timeout rather than a deadlock — look at whether progress is made.
 
-Last validated state: 3,800 runs on the hand-written scenarios, 35 of 36
-random configurations (the failure was an infeasible draw, the generator was
-fixed), ten of ten mutants noticed.
+Last validated state (declarations): 3,000 runs of the two deployment
+scenarios, the hand-written suite, 680 random configurations, and the four
+planted bugs of the declarations noticed one at a time (`RunAnotherDeclaration`
+and `AsideByTheIndexEntry` in nearly every deployment run,
+`DeleteByTheIndexEntry` in every run, `RunWhatIsBeingDeleted` in one run in
+six). One alarm was met once and not since: `the deleted graph left 5 keys`,
+seals only, on seed 2359436515542362806 of a random configuration whose seed
+was not kept. A controller taking over while another one ends the purge would
+close the logs again, and leave such seals: not established.
 
 ## Defects the simulation found (do not bring them back)
 
@@ -233,7 +286,22 @@ unplannable graph retiring all its slices; purging a retired slice racing
 with its live instances; a half-done purge leaving an unreadable log; a deleted graph recreated by
 writes landing after its purge (logs, seals and plan came back); a retired
 slice never purged under faults (the purge asked every node, not only the
-aggregates, and needed some twenty flawless store calls in a row).
+aggregates, and needed some twenty flawless store calls in a row); two
+descriptions stored under one version by two publications, sharing a plan
+computed for one of them; a deletion undone by an index entry written back
+from a read older than it (the graph stayed, stopped, for ever); workers
+saying they ran a graph they refused, because a late index entry named their
+declaration over a description that did not (the binary waiting for them to
+step aside waited for ever, and the graph ran nowhere); workers running a
+graph being deleted again because its index entry was written back, and
+committing into logs already purged; a source slice started just before the
+instance it replaced committed and acknowledged the last records of a
+partition, waiting for ever for records that would never come to it, its
+watermark holding every window back (it now looks at its log when records
+lie beyond what it read and none comes; held by
+`a_slice_behind_what_another_instance_acknowledged_starts_again` in
+`streaming-runtime/tests/engine.rs`, the simulation meeting it about once in
+three thousand runs, too seldom for a planted bug).
 
 ## The HTTP API and its OpenAPI document
 
@@ -300,6 +368,13 @@ application (the UI is embedded) and check it in a real browser.
 - A partition removed then re-added under the same index resumes the old
   state.
 - `replan_interval` is a `WorkerConfig` field without a CLI flag.
+- A worker notices a deletion when the cluster epoch changes, or when it
+  reads the documents again on its own (every thirty ticks). The purge
+  starts two `gc_grace` after the logs are closed, whatever the tick: with a
+  `gc_grace` under fifteen ticks, a worker that missed the epoch change may
+  still run a slice when its seal goes, and commit into a log the purge has
+  passed. The defaults (one second, thirty seconds) leave a margin of two;
+  nothing checks the configuration.
 - The `warp10` crate (crates.io, 3.0.0) was evaluated to replace
   `streaming-warp10` and not adopted. Its client is `reqwest` (tokio sockets,
   not the Moonpool providers), so it cannot run in simulation, and `reqwest`
@@ -324,14 +399,26 @@ application (the UI is embedded) and check it in a real browser.
   version only when it differs. A field the operator no longer exposes is
   not applied (the worker says so). A graph in the store but not in the code
   becomes an *orphan* (`GraphIndexEntry.orphan`): stopped, state kept, every
-  write refused but `DELETE`, which is refused for the others. This was
-  chosen over deleting it at once, and stated to the owner, not explicitly
-  confirmed: deleting a state cannot be undone, and a worker running an
-  older binary must not be able to do it by starting. An orphan the code
-  declares again runs again on its state; a graph being deleted when the
-  code brings it back waits for the next start. Until the fingerprint
-  exists, an old binary restarting during a deployment publishes its old
-  graphs again and stops the graphs only the new code has.
+  write refused but `DELETE`, which is refused for the others. The owner
+  confirmed this over deleting it at once (2026-11-12): deleting a state
+  cannot be undone. An orphan the code declares again runs again on its
+  state; a graph being deleted when the code brings it back is published
+  once the deletion is over, and starts empty.
+- **Declarations, what is left open.** The fingerprint covers what the code
+  *declares*, not what its operators *do*: two binaries that differ only by
+  the body of a closure have the same fingerprint, and both run the graph
+  during the deployment. Going back to an earlier declaration waits for the
+  workers of the replaced binary to be gone (their heartbeat to time out):
+  a rollback takes over a few seconds after the last of them stops, not at
+  once. A change through the API racing with a publication may store a
+  description laid over the previous code; the workers notice within ten
+  seconds and publish again, at the price of one more version. Several
+  workers of a new binary starting at the same instant may each store the
+  description (as many versions, the same content). The list of
+  declarations is never trimmed (one small field per deployment that changes
+  the graph). A worker of an older binary that comes back alone, every newer
+  one being dead, declares again a graph the newer code had dropped: it is
+  its right, and it recreates, empty, one that was being deleted.
 - Never run against a real Materia KV or a real Warp 10. No quotas, fair
   scheduling or API authentication.
 - The owner asked how to design interfaces with comments on components: a

@@ -75,6 +75,7 @@ The OpenAPI document of this API.
       "heartbeatMs": 1790000000000,
       "load": {"cpu": 0.31, "memory": 0.12, "memoryBytes": 52428800},
       "actors": 14, "slices": 3, "apiAddr": "127.0.0.1:8080", "version": "0.1.0",
+      "aside": [],
       "tenants": {"acme": {"actors": 7, "inPerSec": 1200.0, "busy": 0.4}}
     }
   ],
@@ -87,7 +88,10 @@ The OpenAPI document of this API.
 ```
 `workers` comes from `cluster:members` (a worker is `alive` when its heartbeat is
 younger than the member timeout, 5 s by default) joined with each worker's
-`cluster:metrics:<worker>` snapshot (`tenants`). `kv` is present only when the
+`cluster:metrics:<worker>` snapshot (`tenants`). `aside` lists the graphs
+(`tenant/graph`) a worker steps aside from: its code declares them otherwise
+than the store does, or not at all, which is what the binary being replaced
+does while a deployment is in progress; it runs none of their slices. `kv` is present only when the
 embedding process provides KV statistics (standalone mode), otherwise `null`.
 
 ### `GET /api/v1/catalog`
@@ -231,9 +235,9 @@ one. `400` for a display name that is too long (`DISPLAY_NAME_TOO_LONG`) or
 holds a control character (`DISPLAY_NAME_INVALID_CHARACTER`).
 
 ### `DELETE /api/v1/tenants/{tenant}/graphs/{graph}`
-Deletes an orphan graph and its state: sets the desired state to `stopped`
-and marks the index entry `deleting`; the controller removes the graph's
-state, then the entry. Answers `{"deleting": true}`. `409`
+Deletes an orphan graph and its state: marks the graph in `cluster:deleting`,
+sets the desired state to `stopped` and the index entry to `deleting`; the
+controller removes the graph's state, then the entry, then the mark. Answers `{"deleting": true}`. `409`
 (`GRAPH_DECLARED_BY_CODE`) for a graph the code declares: it would come back,
 empty, with the next worker that starts.
 

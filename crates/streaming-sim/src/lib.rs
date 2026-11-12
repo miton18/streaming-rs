@@ -13,6 +13,13 @@
 //! A [`Driver`] workload produces a known set of events, waits for the
 //! pipeline to settle, then checks that every event was accounted for exactly
 //! once.
+//!
+//! With [`Scenario::deploy`] the cluster is an application of the SDK being
+//! redeployed: each worker publishes the graph of its binary when it starts,
+//! a [`Deployer`] replaces the binary of the workers one after the other
+//! while events flow, goes back to an earlier one, and the graph ends by
+//! leaving the code. Every commit is then checked, the instant it lands, to
+//! come from a binary that declares the description it was written under.
 
 use async_trait::async_trait;
 use moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider};
@@ -27,21 +34,29 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use streaming_api::control::{self, Publisher};
 use streaming_core::{
     Clock, Datum, DynKv, Emit, GraphSpec, Kv, KvError, MemKv, NoSecrets, NodeId, PartitionReader, Position, Registry,
-    SinkConnector, SinkError, SourceConnector, SourceError, SourceRecord, Timestamp, TypeTag, Window, Windowed,
-    WorkerId,
-    control::{DesiredState, GraphIndexEntry, RunState, WorkerSnapshot},
+    SinkConnector, SinkError, SliceKey, SourceConnector, SourceError, SourceRecord, TenantId, Timestamp, TypeTag,
+    Window, Windowed, WorkerId,
+    control::{DesiredState, GraphIndexEntry, GraphPlan, RunState, WorkerSnapshot},
     datum, keys,
 };
 use streaming_runtime::{
     GossipConfig, GossipMembership, NoLoad, RuntimeEnv, Worker, WorkerConfig,
-    inspect::{SliceHead, covers, late_commit, slice_head},
+    inspect::{SliceHead, commit_generation, covers, late_commit, slice_head},
     memlog::MemLog,
 };
 
 /// Wall-clock origin of every simulation, in milliseconds since the epoch.
 pub const EPOCH_MS: Timestamp = 1_790_000_000_000;
+
+/// The release of the application whose code no longer has the graph.
+pub const NO_GRAPH: u8 = u8::MAX;
+
+/// A release that is deployed once and fails: an instance of it publishes
+/// its graph and dies, and no worker ever runs it.
+pub const ABORTED: u8 = 100;
 
 /// One event of the simulated topic.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +186,22 @@ pub struct SimEnv {
     pub audit: Mutex<Vec<String>>,
     /// Number of times the auditor looked at the commit logs.
     pub audits: Mutex<u64>,
+    /// The release of the application being deployed: every worker ends up
+    /// running it.
+    pub release: Mutex<u8>,
+    /// The release each worker process runs, by address. A process that
+    /// crashes before it was redeployed comes back with the one it had.
+    pub running: Mutex<BTreeMap<String, u8>>,
+    /// Number of deployments started.
+    pub deployments: Mutex<u64>,
+    /// Number of publications in which a binary stepped aside from the
+    /// graph, another one being still there.
+    pub stepped_aside: Mutex<u64>,
+    /// Number of commits checked against the declaration of their writer.
+    pub commits_checked: Mutex<u64>,
+    /// Number of deployments that failed, the release in place having taken
+    /// the graph back.
+    pub aborted: Mutex<u64>,
 }
 
 impl SimEnv {
@@ -202,6 +233,12 @@ impl SimEnv {
             operator_actions: Mutex::default(),
             audit: Mutex::default(),
             audits: Mutex::new(0),
+            release: Mutex::new(0),
+            running: Mutex::default(),
+            deployments: Mutex::new(0),
+            aborted: Mutex::new(0),
+            stepped_aside: Mutex::new(0),
+            commits_checked: Mutex::new(0),
         })
     }
 }
@@ -244,16 +281,67 @@ impl<T: TimeProvider> Clock for SimClock<T> {
     }
 }
 
+/// What is wrong, if anything, with the commit `value` that a binary
+/// declaring the graph under `declared` (none: not at all) just wrote to the
+/// log of `slice` under `field`.
+///
+/// While two binaries run side by side, each only runs the descriptions it
+/// declares: a commit written under the plan in force comes from a binary
+/// that declares the description this plan was computed from. A commit under
+/// another plan says nothing: its writer has not heard of the new one yet,
+/// and the log arbitrates.
+async fn foreign_commit(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    field: &str,
+    value: &[u8],
+    declared: Option<&str>,
+) -> Option<String> {
+    let under = commit_generation(kv, slice, field, value).await?;
+    let graph = slice.graph_key();
+    let plan: GraphPlan = kv.get_json(&keys::graph_plan(&graph)).await.ok()??;
+    let spec: GraphSpec = kv.get_json(&keys::graph_spec(&graph)).await.ok()??;
+    // A graph that cannot be planned keeps the generation of its last plan:
+    // that document is not one a slice runs under.
+    if plan.error.is_some() || plan.generation != under || plan.spec_version != spec.version {
+        return None;
+    }
+    (spec.fingerprint.as_deref() != declared).then(|| {
+        format!(
+            "slice {slice} committed under plan {under}, computed from the declaration {}, by a binary that declares {}",
+            spec.fingerprint.as_deref().unwrap_or("none"),
+            declared.unwrap_or("none"),
+        )
+    })
+}
+
 /// A [`Kv`] that misbehaves the way a remote store does.
 pub struct ChaosKv<P: Providers> {
     env: Arc<SimEnv>,
     providers: P,
+    /// What the binary behind this handle declares for the simulated graph:
+    /// its fingerprint, or `None` when its code does not have the graph.
+    /// Outer `None`: a binary that declares nothing and runs what the store
+    /// holds.
+    declared: Option<Option<String>>,
 }
 
 impl<P: Providers> ChaosKv<P> {
     /// A hostile view of the world's store.
     pub fn new(env: Arc<SimEnv>, providers: P) -> Self {
-        Self { env, providers }
+        Self {
+            env,
+            providers,
+            declared: None,
+        }
+    }
+
+    /// The handle of a binary that declares the simulated graph under
+    /// `fingerprint` (none: not at all): its commits are checked against it.
+    #[must_use]
+    pub fn declaring(mut self, fingerprint: Option<String>) -> Self {
+        self.declared = Some(fingerprint);
+        self
     }
 
     async fn pause(&self, upto_ms: u64) {
@@ -334,14 +422,22 @@ impl<P: Providers> Kv for ChaosKv<P> {
     async fn hsetnx(&self, key: &str, field: &str, value: Vec<u8>) -> Result<bool, KvError> {
         let (key, field) = (key.to_owned(), field.to_owned());
         let env = self.env.clone();
+        let declared = self.declared.clone();
         self.carry(move |kv| async move {
             let written = kv.hsetnx(&key, &field, value.clone()).await?;
             // Every commit is looked at the instant it takes effect.
-            if written
-                && let Some(slice) = slice_of_log(&key)
-                && let Some(finding) = late_commit(kv.as_ref(), &slice, &field, &value).await
-            {
-                env.audit.lock().push(finding);
+            if written && let Some(slice) = slice_of_log(&key) {
+                if let Some(finding) = late_commit(kv.as_ref(), &slice, &field, &value).await {
+                    env.audit.lock().push(finding);
+                }
+                if let Some(declared) = &declared {
+                    *env.commits_checked.lock() += 1;
+                    if let Some(finding) =
+                        foreign_commit(kv.as_ref(), &slice, &field, &value, declared.as_deref()).await
+                    {
+                        env.audit.lock().push(finding);
+                    }
+                }
             }
             Ok(written)
         })
@@ -633,6 +729,11 @@ pub struct Scenario {
     pub gossip: bool,
     /// How long the driver waits for the pipeline to settle.
     pub settle_timeout: Duration,
+    /// The cluster is an application being redeployed: workers publish the
+    /// graph of their binary when they start, the binary is replaced on one
+    /// worker after the other while events flow, and the graph leaves the
+    /// code before it is deleted.
+    pub deploy: bool,
 }
 
 impl Default for Scenario {
@@ -663,6 +764,7 @@ impl Default for Scenario {
             duel: false,
             gossip: false,
             settle_timeout: Duration::from_secs(900),
+            deploy: false,
         }
     }
 }
@@ -710,6 +812,7 @@ impl Scenario {
             duel: pick(&[0, 0, 1]) == 1,
             gossip: pick(&[0, 0, 0, 1]) == 1,
             settle_timeout: Duration::from_secs(900),
+            deploy: pick(&[0, 0, 0, 1]) == 1,
         };
         // The run must have time to finish. Emitting a window takes one epoch,
         // hence one commit, per `max_batch` of its keys: too many of them
@@ -804,6 +907,26 @@ impl Scenario {
         }))
         .unwrap_or_else(|error| panic!("invalid simulated graph: {error}"))
     }
+
+    /// The graphs of the code of `release`: the simulated graph, declared
+    /// differently by each release in a way that changes nothing to what it
+    /// computes, or nothing at all for [`NO_GRAPH`].
+    #[must_use]
+    pub fn code(&self, release: u8) -> Vec<GraphSpec> {
+        if release == NO_GRAPH {
+            return Vec::new();
+        }
+        let mut spec = self.spec();
+        spec.version = 0;
+        if release > 0 {
+            for node in &mut spec.nodes {
+                if node.id.as_str() == "raw" {
+                    node.config = serde_json::json!({"release": release});
+                }
+            }
+        }
+        vec![spec]
+    }
 }
 
 /// A worker of the simulated cluster. Rebooted at will by the simulator.
@@ -829,21 +952,69 @@ impl Process for WorkerProcess {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let env = env_of(&self.slot)?;
         *env.boots.lock() += 1;
+        if !self.scenario.deploy {
+            // A binary that declares nothing: it runs what the store holds.
+            let kv: DynKv = Arc::new(ChaosKv::new(env.clone(), ctx.providers().clone()));
+            self.worker(ctx, &env, kv, None).await.run(ctx.shutdown().clone()).await;
+            return Ok(());
+        }
+        // An instance of the application: it runs the release it was
+        // deployed with, publishes its graphs, then works. When the
+        // deployment reaches it, it is replaced, the way a crash would.
+        let address = ctx.my_ip().to_owned();
+        loop {
+            let target = *env.release.lock();
+            let release = *env.running.lock().entry(address.clone()).or_insert(target);
+            let graphs = self.scenario.code(release);
+            let fingerprint = graphs.first().map(GraphSpec::declaration_fingerprint);
+            let kv: DynKv = Arc::new(ChaosKv::new(env.clone(), ctx.providers().clone()).declaring(fingerprint));
+            let declared = graphs
+                .iter()
+                .map(|graph| (graph.key(), graph.declaration_fingerprint()))
+                .collect();
+            let worker = self.worker(ctx, &env, kv.clone(), Some(declared)).await;
+            let instance = self.instance(ctx, &env, kv, graphs, worker);
+            let redeployed = async {
+                while *env.release.lock() == release {
+                    let _ = ctx.time().sleep(Duration::from_millis(100)).await;
+                }
+                // One instance after the other, not all at once.
+                let wait = ctx.random().random_range(0..2_500_u64);
+                let _ = ctx.time().sleep(Duration::from_millis(wait)).await;
+            };
+            moonpool_sim::select! {
+                () = instance => return Ok(()),
+                () = redeployed => {}
+            }
+            let target = *env.release.lock();
+            env.running.lock().insert(address.clone(), target);
+        }
+    }
+}
+
+impl WorkerProcess {
+    /// The worker of this process, on `kv`, running the graphs `declared`
+    /// (none: whatever the store holds).
+    async fn worker(
+        &self,
+        ctx: &SimContext,
+        env: &Arc<SimEnv>,
+        kv: DynKv,
+        declared: Option<BTreeMap<streaming_core::GraphKey, String>>,
+    ) -> Worker<SimProviders> {
         let providers: SimProviders = ctx.providers().clone();
-        let worker = WorkerId::new(format!("worker-{}", ctx.my_ip().replace(':', "-")))
-            .map_err(|error| SimulationError::InvalidState(error.to_string()))?;
-        let kv: DynKv = Arc::new(ChaosKv::new(env.clone(), providers.clone()));
-        let mut config = WorkerConfig::new(worker);
+        let mut config = WorkerConfig::new(self.id(ctx));
         config.tick = Duration::from_millis(200);
-        config.member_timeout = Duration::from_millis(1_500);
+        config.member_timeout = MEMBER_TIMEOUT;
         config.replan_interval = Duration::from_millis(800);
         config.restart_backoff = Duration::from_millis(150);
         config.controller_grace = Duration::from_millis(600);
         config.catch_panics = false;
         config.ignore_placement = self.scenario.duel;
+        config.declared = declared;
         let runtime = RuntimeEnv {
             clock: Arc::new(SimClock::drifting(providers.time().clone())),
-            registry: Arc::new(registry::<SimProviders>(&env)),
+            registry: Arc::new(registry::<SimProviders>(env)),
             secrets: Arc::new(NoSecrets),
             kv,
             providers,
@@ -881,7 +1052,121 @@ impl Process for WorkerProcess {
             };
             worker = worker.with_membership(Arc::new(membership));
         }
-        worker.run(ctx.shutdown().clone()).await;
+        worker
+    }
+
+    fn id(&self, ctx: &SimContext) -> WorkerId {
+        WorkerId::new(format!("worker-{}", ctx.my_ip().replace(':', "-")))
+            .unwrap_or_else(|error| panic!("invalid worker id: {error}"))
+    }
+
+    /// What an application of the SDK does: publish the graphs of its code,
+    /// run its worker, and publish again whenever the store no longer holds
+    /// what the code declares. Returns when the process is asked to stop.
+    async fn instance(
+        &self,
+        ctx: &SimContext,
+        env: &Arc<SimEnv>,
+        kv: DynKv,
+        graphs: Vec<GraphSpec>,
+        worker: Worker<SimProviders>,
+    ) {
+        let clock = SimClock::drifting(ctx.time().clone());
+        let catalog = registry::<SimProviders>(env).catalog();
+        let tenants: Vec<(TenantId, Option<String>)> = self
+            .scenario
+            .code(0)
+            .into_iter()
+            .map(|graph| (graph.tenant, None))
+            .collect();
+        let publisher = Publisher {
+            workers: vec![self.id(ctx)],
+            member_timeout: MEMBER_TIMEOUT,
+        };
+        let publish = || async {
+            match control::publish(kv.as_ref(), &clock, &catalog, &tenants, &graphs, &publisher).await {
+                Ok(publication) => {
+                    if !publication.aside.is_empty() {
+                        *env.stepped_aside.lock() += 1;
+                    }
+                    true
+                }
+                // The store is hostile: try again.
+                Err(control::ControlError::Kv(_)) => false,
+                Err(error) => panic!("the simulated application cannot be published: {error}"),
+            }
+        };
+        let work = async {
+            while !publish().await {
+                let _ = ctx.time().sleep(Duration::from_millis(200)).await;
+            }
+            let republish = async {
+                loop {
+                    let _ = ctx.time().sleep(Duration::from_millis(500)).await;
+                    if control::out_of_date(kv.as_ref(), &graphs).await.unwrap_or(true) {
+                        publish().await;
+                    }
+                }
+            };
+            moonpool_sim::select! {
+                () = worker.run(ctx.shutdown().clone()) => {}
+                () = republish => {}
+            }
+        };
+        moonpool_sim::select! {
+            () = ctx.shutdown().cancelled() => {}
+            () = work => {}
+        }
+    }
+}
+
+/// Silence after which a simulated worker is taken for gone.
+const MEMBER_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+/// Redeploys the application while events flow: a new release, or an earlier
+/// one again, replaces the binary of the workers one after the other. Two
+/// binaries then run side by side, each declaring the graph its own way, and
+/// a worker that crashes before its turn comes back with the old one.
+pub struct Deployer {
+    slot: EnvSlot,
+    scenario: Scenario,
+}
+
+impl Deployer {
+    /// A deployer for the given scenario. Idle unless it has
+    /// [`Scenario::deploy`].
+    #[must_use]
+    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self {
+        Self { slot, scenario }
+    }
+}
+
+#[async_trait]
+impl Workload for Deployer {
+    fn name(&self) -> &str {
+        "deployer"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        if self.scenario.deploy {
+            let env = env_of(&self.slot)?;
+            // Let the first release start, then deploy until production ends.
+            let _ = ctx.time().sleep(Duration::from_millis(1_500)).await;
+            while !*env.production_done.lock() {
+                {
+                    // A release the application never had, or one it has
+                    // had: going back is not the same thing.
+                    let mut release = env.release.lock();
+                    *release = (*release + 1 + ctx.random().random_range(0..2_u8)) % 3;
+                }
+                *env.deployments.lock() += 1;
+                let wait = ctx.random().random_range(2_000..7_000_u64);
+                let _ = ctx.time().sleep(Duration::from_millis(wait)).await;
+            }
+        }
+        // The simulation ends as soon as one workload returns: this one must
+        // outlive the driver, which decides when the run is over.
+        ctx.shutdown().cancelled().await;
         Ok(())
     }
 }
@@ -959,6 +1244,83 @@ impl Driver {
         true
     }
 
+    /// A deployment that fails. Once the deployment under way is over, an
+    /// instance of a release the application never had publishes its graph
+    /// and dies at once; an index entry written by the release in place,
+    /// from what it had read before, lands after that. Nobody runs the graph
+    /// any more: the release in place must take it back.
+    async fn aborted_deployment(&self, ctx: &SimContext, env: &Arc<SimEnv>) -> SimulationResult<()> {
+        let scenario = &self.scenario;
+        let kv: DynKv = env.kv.clone();
+        let graph = scenario.spec().key();
+        let failed = |error: KvError| violation(error.to_string());
+        let started = ctx.time().now();
+        let overdue =
+            |what: &str| (ctx.time().now().saturating_sub(started) > scenario.settle_timeout).then(|| what.to_owned());
+        let release = loop {
+            let release = *env.release.lock();
+            let deployed = {
+                let running = env.running.lock();
+                !running.is_empty() && running.values().all(|running| *running == release)
+            };
+            if deployed {
+                break release;
+            }
+            if let Some(what) = overdue("the deployment did not reach every worker") {
+                dump(env).await;
+                return Err(violation(what));
+            }
+            let _ = ctx.time().sleep(Duration::from_millis(200)).await;
+        };
+        let in_place = scenario.code(release).first().map(GraphSpec::declaration_fingerprint);
+        let before = kv
+            .hget_json::<GraphIndexEntry>(keys::CLUSTER_GRAPHS, &graph.to_string())
+            .await
+            .map_err(failed)?;
+        let clock = SimClock::exact(ctx.time().clone());
+        let catalog = registry::<SimProviders>(env).catalog();
+        let tenants: Vec<(TenantId, Option<String>)> =
+            scenario.code(0).into_iter().map(|graph| (graph.tenant, None)).collect();
+        let publication = control::publish(
+            kv.as_ref(),
+            &clock,
+            &catalog,
+            &tenants,
+            &scenario.code(ABORTED),
+            &Publisher::default(),
+        )
+        .await
+        .map_err(|error| violation(format!("the release that fails could not be published: {error}")))?;
+        if publication.updated.is_empty() {
+            // The graph is not one a new release may take: nothing to abort.
+            return Ok(());
+        }
+        if let Some(before) = before {
+            kv.hset_json(keys::CLUSTER_GRAPHS, &graph.to_string(), &before)
+                .await
+                .map_err(failed)?;
+        }
+        loop {
+            let stored = kv
+                .get_json::<GraphSpec>(&keys::graph_spec(&graph))
+                .await
+                .map_err(failed)?
+                .and_then(|spec| spec.fingerprint);
+            if stored == in_place {
+                break;
+            }
+            if let Some(what) =
+                overdue("the release in place did not take the graph back from a deployment that failed")
+            {
+                dump(env).await;
+                return Err(violation(what));
+            }
+            let _ = ctx.time().sleep(Duration::from_millis(200)).await;
+        }
+        *env.aborted.lock() += 1;
+        Ok(())
+    }
+
     fn settled(&self, env: &SimEnv) -> bool {
         let produced = env.produced.lock();
         let expected_totals: u64 = self.expected_totals(&produced.counts).values().sum();
@@ -1003,6 +1365,24 @@ async fn dump(env: &SimEnv) {
                             slice.last_error
                         );
                     }
+                    if std::env::var_os("SIM_DUMP_ACTORS").is_some() {
+                        for actor in &snapshot.actors {
+                            eprintln!(
+                                "--- {key} actor {}/{} {:?} state={:?} in={} out={} busy={:.2} idle={:.2} backpressured={:.2} waiting={:.2} queue={}",
+                                actor.slice,
+                                actor.node,
+                                actor.kind,
+                                actor.state,
+                                actor.records_in,
+                                actor.records_out,
+                                actor.busy,
+                                actor.idle,
+                                actor.backpressured,
+                                actor.waiting,
+                                actor.queue_len
+                            );
+                        }
+                    }
                     for actor in snapshot.actors.iter().filter(|actor| actor.errors > 0) {
                         eprintln!(
                             "--- {key} actor {}/{} {:?} errors={} last={:?}",
@@ -1020,6 +1400,31 @@ async fn dump(env: &SimEnv) {
             eprintln!("--- member {worker} = {}", String::from_utf8_lossy(&info));
         }
     }
+    // What the control plane says of each graph: without it, workers that run
+    // nothing cannot be told from workers that were told to run nothing.
+    for key in env.kv.keys() {
+        let document = key.ends_with(":spec") || key.ends_with(":code");
+        let text = key.ends_with(":desired") || key.ends_with(":version");
+        let hash = key.ends_with(":declarations") || key == keys::CLUSTER_GRAPHS || key == keys::CLUSTER_DELETING;
+        if document
+            && let Ok(Some(bytes)) = kv.get(&key).await
+            && let Ok(spec) = serde_json::from_slice::<GraphSpec>(&bytes)
+        {
+            eprintln!("--- {key}: version {} fingerprint {:?}", spec.version, spec.fingerprint);
+        }
+        if text && let Ok(Some(bytes)) = kv.get(&key).await {
+            eprintln!("--- {key} = {}", String::from_utf8_lossy(&bytes));
+        }
+        if hash && let Ok(fields) = kv.hgetall(&key).await {
+            for (field, value) in fields {
+                eprintln!("--- {key} {field} = {}", String::from_utf8_lossy(&value));
+            }
+        }
+    }
+    for (address, release) in env.running.lock().iter() {
+        eprintln!("--- process {address} runs release {release}");
+    }
+    eprintln!("--- release to deploy: {}", *env.release.lock());
     for key in env.kv.keys() {
         let state = key.ends_with(":log") || key.ends_with(":seal") || key.contains(":idx:") || key.contains(":w:");
         if !state {
@@ -1054,6 +1459,10 @@ impl Workload for Driver {
 
     async fn setup(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
         let env = env_of(&self.slot)?;
+        if self.scenario.deploy {
+            // The workers publish the graph of their code themselves.
+            return Ok(());
+        }
         let spec = self.scenario.spec();
         let graph = spec.key();
         let kv: DynKv = env.kv.clone();
@@ -1069,6 +1478,7 @@ impl Workload for Driver {
                 updated_ms: EPOCH_MS,
                 deleting: false,
                 orphan: false,
+                fingerprint: None,
             },
         )
         .await
@@ -1156,6 +1566,9 @@ impl Workload for Driver {
         }
 
         *env.production_done.lock() = true;
+        if scenario.deploy {
+            self.aborted_deployment(ctx, &env).await?;
+        }
 
         let started = ctx.time().now();
         while !(self.settled(&env) || self.emitted_everything(&env).await) {
@@ -1228,6 +1641,35 @@ impl Workload for Driver {
         // Deleting the graph removes everything it left in the store.
         let graph = self.scenario.spec().key();
         let failed = |error: KvError| violation(error.to_string());
+        if scenario.deploy {
+            // Only a graph the code no longer declares can be deleted: a
+            // last release without it is deployed, which stops the graph
+            // once no worker runs an earlier one.
+            *env.release.lock() = NO_GRAPH;
+            let started = ctx.time().now();
+            loop {
+                let entry = store
+                    .hget_json::<GraphIndexEntry>(keys::CLUSTER_GRAPHS, &graph.to_string())
+                    .await
+                    .map_err(failed)?;
+                // Deleted once the deployment is over: a worker of an
+                // earlier release coming back alone would declare the graph
+                // again, which is its right, and an orphan is deleted by
+                // someone who sees it stopped.
+                let deployed = env.running.lock().values().all(|release| *release == NO_GRAPH);
+                if deployed && entry.is_some_and(|entry| entry.orphan) {
+                    break;
+                }
+                if ctx.time().now().saturating_sub(started) > Duration::from_secs(300) {
+                    dump(&env).await;
+                    return Err(violation(format!(
+                        "graph {graph} left the code of every worker and was not stopped"
+                    )));
+                }
+                let _ = ctx.time().sleep(Duration::from_millis(500)).await;
+            }
+            assert_sometimes!(true, "a graph that left the code was stopped");
+        }
         let Some(mut entry) = store
             .hget_json::<GraphIndexEntry>(keys::CLUSTER_GRAPHS, &graph.to_string())
             .await
@@ -1235,14 +1677,52 @@ impl Workload for Driver {
         else {
             return Err(violation(format!("graph {graph} left the index")));
         };
+        let before = entry.clone();
         entry.deleting = true;
         *env.deleting.lock() = true;
+        store
+            .hset(keys::CLUSTER_DELETING, vec![(graph.to_string(), b"1".to_vec())])
+            .await
+            .map_err(failed)?;
         store
             .hset_json(keys::CLUSTER_GRAPHS, &graph.to_string(), &entry)
             .await
             .map_err(failed)?;
         store.incr(keys::CLUSTER_EPOCH).await.map_err(failed)?;
+        // Someone who read the index entry before the deletion writes it
+        // back, as a publication or a change through the API in progress
+        // would: the graph is being deleted all the same. Either at once, or
+        // when it hurts most: as soon as the purge has removed the seal of a
+        // slice, whose log is no longer closed. Workers that ran the graph
+        // again on the word of that entry would commit into it, and the
+        // purge, which goes by the seals, would leave it behind.
         let prefix = keys::graph_prefix(&graph);
+        if ctx.random().random_bool(0.5) {
+            let wait = ctx.random().random_range(0..600);
+            let _ = ctx.time().sleep(Duration::from_millis(wait)).await;
+        } else {
+            let started = ctx.time().now();
+            let mut seals: BTreeSet<String> = BTreeSet::new();
+            loop {
+                let now: BTreeSet<String> = env
+                    .kv
+                    .keys()
+                    .into_iter()
+                    .filter(|key| key.starts_with(&prefix) && key.ends_with(":seal"))
+                    .collect();
+                let purged = seals.iter().any(|seal| !now.contains(seal));
+                seals.extend(now);
+                if purged || ctx.time().now().saturating_sub(started) > Duration::from_secs(120) {
+                    break;
+                }
+                let _ = ctx.time().sleep(Duration::from_millis(20)).await;
+            }
+        }
+        store
+            .hset_json(keys::CLUSTER_GRAPHS, &graph.to_string(), &before)
+            .await
+            .map_err(failed)?;
+        store.incr(keys::CLUSTER_EPOCH).await.map_err(failed)?;
         let started = ctx.time().now();
         loop {
             let left: Vec<String> = env
@@ -1256,7 +1736,12 @@ impl Workload for Driver {
                 .await
                 .map_err(failed)?
                 .is_some();
-            if left.is_empty() && !indexed {
+            let marked = store
+                .hget(keys::CLUSTER_DELETING, &graph.to_string())
+                .await
+                .map_err(failed)?
+                .is_some();
+            if left.is_empty() && !indexed && !marked {
                 break;
             }
             if ctx.time().now().saturating_sub(started) > Duration::from_secs(300) {
@@ -1293,6 +1778,21 @@ impl Workload for Driver {
             return Err(violation(finding.clone()));
         }
         assert_sometimes!(*env.audits.lock() > 10, "the auditor watched the commit logs");
+        if self.scenario.deploy {
+            assert_sometimes!(*env.deployments.lock() > 1, "the application was redeployed");
+            assert_sometimes!(
+                *env.stepped_aside.lock() > 0,
+                "a binary stepped aside from a graph declared otherwise"
+            );
+            assert_sometimes!(
+                *env.commits_checked.lock() > 0,
+                "commits were checked against the declaration of their writer"
+            );
+            assert_sometimes!(
+                *env.aborted.lock() > 0,
+                "the release in place took the graph back from a deployment that failed"
+            );
+        }
 
         for probe in [&env.counts, &env.raw, &env.both, &env.totals] {
             let conflicts = probe.conflicts();
@@ -1550,6 +2050,17 @@ impl Workload for Operator {
                 _ => {
                     // The same description under a new version: workers stop
                     // the graph's slices and start them again from their logs.
+                    if self.scenario.deploy {
+                        // The description is the one the workers published:
+                        // read it, like a change made through the API. Not
+                        // atomic, so it may undo a publication, which the
+                        // workers then repair.
+                        let stored = kv.get_json::<GraphSpec>(&keys::graph_spec(&graph)).await;
+                        let Some(stored) = stored.map_err(failed)? else {
+                            continue;
+                        };
+                        spec = stored;
+                    }
                     spec.version += 1;
                     kv.set_json(&keys::graph_spec(&graph), &spec).await.map_err(failed)?;
                     kv.hset_json(
@@ -1562,6 +2073,7 @@ impl Workload for Operator {
                             updated_ms: EPOCH_MS,
                             deleting: false,
                             orphan: false,
+                            fingerprint: spec.fingerprint.clone(),
                         },
                     )
                     .await

@@ -6,13 +6,14 @@ use crate::{
     controller::{self, ControllerState},
     load::{LoadProbe, ProcessLoad},
     metrics::{ActorSample, SliceLifetime, SliceSample, snapshot_actor, snapshot_slice},
+    mutation::{Mutant, planted},
     scope::TaskScope,
     slice::{Control, SliceExit, SliceParams, SliceShared, run_slice},
 };
 use async_trait::async_trait;
 use moonpool_core::{Providers, RandomProvider, TimeProvider};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -114,6 +115,14 @@ pub struct WorkerConfig {
     /// Run every slice of every graph regardless of the placement. Only for
     /// tests of the commit protocol: several workers then fight over each slice.
     pub ignore_placement: bool,
+    /// The graphs the code of this binary declares, with the fingerprint of
+    /// each declaration
+    /// ([`GraphSpec::declaration_fingerprint`](streaming_core::GraphSpec::declaration_fingerprint)).
+    /// The worker steps aside from every graph the store describes
+    /// otherwise: two binaries run side by side while a deployment is in
+    /// progress, and each only runs the descriptions it declares. `None`
+    /// for a worker that runs whatever the store holds.
+    pub declared: Option<BTreeMap<GraphKey, String>>,
 }
 
 impl WorkerConfig {
@@ -132,6 +141,7 @@ impl WorkerConfig {
             controller_grace: Duration::from_secs(3),
             catch_panics: true,
             ignore_placement: false,
+            declared: None,
         }
     }
 }
@@ -148,6 +158,8 @@ struct Synced {
     age: u32,
     graphs: BTreeMap<GraphKey, GraphDocs>,
     placement: Placement,
+    /// Graphs this worker steps aside from.
+    aside: BTreeSet<String>,
 }
 
 struct Running {
@@ -236,30 +248,71 @@ impl<P: Providers> Worker<P> {
             current.age += 1;
             return Ok(());
         }
+        // The mark of a deletion decides, here as in the controller: the
+        // index entry of a graph being deleted may be written back by someone
+        // who had read it before, and slices started again on its word would
+        // write into logs that the purge has already removed.
+        let deleting: BTreeSet<String> = if planted(Mutant::RunWhatIsBeingDeleted) {
+            BTreeSet::new()
+        } else {
+            kv.hgetall(keys::CLUSTER_DELETING)
+                .await?
+                .into_iter()
+                .map(|(graph, _)| graph)
+                .collect()
+        };
         let index: Vec<(String, GraphIndexEntry)> = kv.hgetall_json(keys::CLUSTER_GRAPHS).await?;
         let placement: Placement = kv.get_json(keys::CLUSTER_PLACEMENT).await?.unwrap_or_default();
         let catalog = self.env.registry.catalog();
         let mut graphs = BTreeMap::new();
+        let mut aside = BTreeSet::new();
         for (_, entry) in index {
-            if entry.deleting {
+            let graph = GraphKey::new(entry.tenant, entry.graph);
+            if entry.deleting || deleting.contains(&graph.to_string()) {
                 continue;
             }
-            let graph = GraphKey::new(entry.tenant, entry.graph);
+            let declared = self.config.declared.as_ref().map(|declared| declared.get(&graph));
             let mine = self.config.ignore_placement
                 || placement
                     .assignments
                     .iter()
                     .any(|(slice, worker)| worker == me && slice.graph_key() == graph);
+            if !mine && declared.is_none() {
+                continue;
+            }
+            // The description itself says which declaration it comes from.
+            // Its index entry is written after it, and may be written back
+            // from an older read: a worker going by the entry would say it
+            // runs a graph that it refuses, and the binary waiting for it to
+            // step aside would wait for ever. So the description is read on
+            // the graphs this worker has no slice of too.
+            let spec = kv.get_json::<GraphSpec>(&keys::graph_spec(&graph)).await?;
+            let stored = spec
+                .as_ref()
+                .map_or(entry.fingerprint.as_ref(), |spec| spec.fingerprint.as_ref());
+            let otherwise = declared.is_some_and(|declared| declared != stored);
+            let said = if planted(Mutant::AsideByTheIndexEntry) {
+                declared.is_some_and(|declared| declared != entry.fingerprint.as_ref())
+            } else {
+                otherwise
+            };
+            if said {
+                aside.insert(graph.to_string());
+            }
             if !mine {
                 continue;
             }
-            let Some(spec) = kv.get_json::<GraphSpec>(&keys::graph_spec(&graph)).await? else {
+            let Some(spec) = spec else {
                 continue;
             };
             let Some(plan) = kv.get_json::<GraphPlan>(&keys::graph_plan(&graph)).await? else {
                 continue;
             };
             if plan.error.is_some() || plan.spec_version != spec.version {
+                continue;
+            }
+            if otherwise && !planted(Mutant::RunAnotherDeclaration) {
+                tracing::info!(%graph, "the code of this worker declares the graph otherwise: stepping aside");
                 continue;
             }
             let desired: DesiredState = kv.get_json(&keys::graph_desired(&graph)).await?.unwrap_or_default();
@@ -285,6 +338,7 @@ impl<P: Providers> Worker<P> {
             age: 0,
             graphs,
             placement,
+            aside,
         });
         Ok(())
     }
@@ -555,6 +609,7 @@ impl<P: Providers> Worker<P> {
                 slices: running.len() as u32,
                 api_addr: self.config.api_addr.clone(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
+                aside: synced.as_ref().map(|synced| synced.aside.clone()).unwrap_or_default(),
             };
             self.membership.announce(&info).await;
             if let Err(error) = kv.set_json(&keys::worker_metrics(&me), &snapshot).await {
@@ -572,7 +627,10 @@ impl<P: Providers> Worker<P> {
             if let Some(mut alive) = alive {
                 alive.retain(|member| member.worker != me);
                 alive.push(info);
-                alive.sort_by(|a, b| a.worker.cmp(&b.worker));
+                // The controller is the first of the workers stepping aside
+                // from the fewest graphs: while two binaries run side by
+                // side, the one the store follows plans and places.
+                alive.sort_by(|a, b| a.aside.len().cmp(&b.aside.len()).then(a.worker.cmp(&b.worker)));
                 if alive.first().is_some_and(|leader| leader.worker == me)
                     && let Err(error) = controller::run_once(
                         &self.env,
@@ -744,6 +802,7 @@ mod tests {
                 updated_ms: 0,
                 deleting: false,
                 orphan: false,
+                fingerprint: None,
             },
         )
         .await
@@ -950,6 +1009,133 @@ mod tests {
         assert_eq!(synced.unwrap().graphs.len(), 2);
     }
 
+    /// Mark the stored description and the index entry of `graph` as coming
+    /// from the declaration `fingerprint`.
+    async fn declare(kv: &dyn Kv, graph: &str, fingerprint: &str) {
+        let key = graph_key(graph);
+        let mut spec: GraphSpec = kv.get_json(&keys::graph_spec(&key)).await.unwrap().unwrap();
+        spec.fingerprint = Some(fingerprint.to_owned());
+        kv.set_json(&keys::graph_spec(&key), &spec).await.unwrap();
+        let mut entry: GraphIndexEntry = kv
+            .hget_json(keys::CLUSTER_GRAPHS, &key.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        entry.fingerprint = Some(fingerprint.to_owned());
+        kv.hset_json(keys::CLUSTER_GRAPHS, &key.to_string(), &entry)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_worker_steps_aside_from_the_graphs_its_code_declares_otherwise() {
+        let kv: DynKv = MemKv::shared();
+        for graph in ["same", "changed", "unknown", "elsewhere", "undeclared"] {
+            let host = if graph == "elsewhere" { "worker-b" } else { "worker-a" };
+            store(kv.as_ref(), graph, 1, 1, host).await;
+        }
+        declare(kv.as_ref(), "same", "aaaa").await;
+        declare(kv.as_ref(), "changed", "bbbb").await;
+        declare(kv.as_ref(), "unknown", "cccc").await;
+        declare(kv.as_ref(), "elsewhere", "dddd").await;
+        let mut config = config();
+        config.declared = Some(BTreeMap::from([
+            (graph_key("same"), "aaaa".to_owned()),
+            (graph_key("changed"), "old".to_owned()),
+            (graph_key("elsewhere"), "old".to_owned()),
+            // Declared by the code, stored by something that declares nothing.
+            (graph_key("undeclared"), "eeee".to_owned()),
+        ]));
+        let w = worker(kv.clone(), config);
+        let mut synced = None;
+        w.sync(&mut synced).await.unwrap();
+        let synced = synced.unwrap();
+        let graphs: Vec<&str> = synced.graphs.keys().map(|graph| graph.graph.as_str()).collect();
+        assert_eq!(graphs, ["same"]);
+        // Said for every graph, placed here or not: the placement follows it.
+        assert_eq!(
+            synced.aside.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["acme/changed", "acme/elsewhere", "acme/undeclared", "acme/unknown"]
+        );
+
+        // A worker that declares nothing runs what the store holds.
+        let w = worker(kv.clone(), self::config());
+        let mut synced = None;
+        w.sync(&mut synced).await.unwrap();
+        let synced = synced.unwrap();
+        assert_eq!(synced.graphs.len(), 4);
+        assert!(synced.aside.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_description_decides_when_the_index_is_behind_it() {
+        // The description is written before its index entry, and the entry
+        // may be written back from an older read: a worker must not run a
+        // description it does not declare, nor say that it runs one, whether
+        // it has slices of the graph or not.
+        let kv: DynKv = MemKv::shared();
+        store(kv.as_ref(), "ahead", 1, 1, "worker-a").await;
+        store(kv.as_ref(), "behind", 1, 1, "worker-a").await;
+        store(kv.as_ref(), "elsewhere", 1, 1, "worker-b").await;
+        store(kv.as_ref(), "back", 1, 1, "worker-a").await;
+        declare(kv.as_ref(), "ahead", "old").await;
+        declare(kv.as_ref(), "behind", "mine").await;
+        declare(kv.as_ref(), "elsewhere", "mine").await;
+        declare(kv.as_ref(), "back", "old").await;
+        for (graph, fingerprint) in [
+            ("ahead", "new"),
+            ("behind", "old"),
+            ("elsewhere", "old"),
+            ("back", "mine"),
+        ] {
+            let key = graph_key(graph);
+            let mut spec: GraphSpec = kv.get_json(&keys::graph_spec(&key)).await.unwrap().unwrap();
+            spec.fingerprint = Some(fingerprint.to_owned());
+            kv.set_json(&keys::graph_spec(&key), &spec).await.unwrap();
+        }
+        let mut config = config();
+        config.declared = Some(BTreeMap::from([
+            (graph_key("ahead"), "old".to_owned()),
+            (graph_key("behind"), "mine".to_owned()),
+            (graph_key("elsewhere"), "mine".to_owned()),
+            (graph_key("back"), "mine".to_owned()),
+        ]));
+        let w = worker(kv.clone(), config);
+        let mut synced = None;
+        w.sync(&mut synced).await.unwrap();
+        let synced = synced.unwrap();
+        // An entry that names another declaration does not hold back a
+        // description this worker declares.
+        let graphs: Vec<&str> = synced.graphs.keys().map(|graph| graph.graph.as_str()).collect();
+        assert_eq!(graphs, ["back"]);
+        assert_eq!(
+            synced.aside.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["acme/ahead", "acme/behind", "acme/elsewhere"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_graph_marked_for_deletion_is_not_run_whatever_its_index_entry_says() {
+        let kv: DynKv = MemKv::shared();
+        store(kv.as_ref(), "going", 1, 1, "worker-a").await;
+        store(kv.as_ref(), "staying", 1, 1, "worker-a").await;
+        // The entry of `going` was written back from a read older than its
+        // deletion: it does not say `deleting`, the mark does.
+        kv.hset(
+            keys::CLUSTER_DELETING,
+            vec![(graph_key("going").to_string(), b"1".to_vec())],
+        )
+        .await
+        .unwrap();
+        let w = worker(kv.clone(), config());
+        let mut synced = None;
+        w.sync(&mut synced).await.unwrap();
+        let synced = synced.unwrap();
+        let graphs: Vec<&str> = synced.graphs.keys().map(|graph| graph.graph.as_str()).collect();
+        assert_eq!(graphs, ["staying"]);
+        assert!(synced.aside.is_empty());
+    }
+
     #[tokio::test]
     async fn a_broken_slice_fails_restarts_and_shows_why_then_the_worker_leaves() {
         let kv: DynKv = MemKv::shared();
@@ -967,6 +1153,7 @@ mod tests {
                 updated_ms: 0,
                 deleting: false,
                 orphan: false,
+                fingerprint: None,
             },
         )
         .await

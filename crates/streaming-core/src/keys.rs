@@ -7,11 +7,14 @@
 //! cluster:catalog                                hash  op ref        -> OpDescriptor (JSON)
 //! cluster:tenants                                hash  tenant        -> TenantRecord (JSON)
 //! cluster:graphs                                 hash  tenant/graph  -> GraphIndexEntry (JSON)
+//! cluster:deleting                               hash  tenant/graph  -> "1": the graph is being deleted, whatever its entry says
 //! cluster:placement                              string Placement (JSON)
 //! cluster:metrics:<worker>                       string WorkerSnapshot (JSON)
 //! t:<tenant>:g:<graph>:spec                      string GraphSpec (JSON): what workers run
+//! t:<tenant>:g:<graph>:version                   INCR for every description stored: its version
 //! t:<tenant>:g:<graph>:code                      string GraphSpec (JSON): as the code built it
 //! t:<tenant>:g:<graph>:overrides                 hash  node         -> config fields set through the API (JSON)
+//! t:<tenant>:g:<graph>:declarations              hash  <n>          -> Declaration (JSON), written once: the highest is in force
 //! t:<tenant>:g:<graph>:desired                   string DesiredState (JSON)
 //! t:<tenant>:g:<graph>:plan                      string GraphPlan (JSON)
 //! t:<tenant>:g:<graph>:out:<node>                hash  emit id       -> OutputRow (JSON)
@@ -38,6 +41,11 @@ pub const CLUSTER_CATALOG: &str = "cluster:catalog";
 pub const CLUSTER_TENANTS: &str = "cluster:tenants";
 /// Hash of deployed graphs.
 pub const CLUSTER_GRAPHS: &str = "cluster:graphs";
+/// Hash of the graphs being deleted. An index entry is rewritten whole by
+/// whoever changes a part of it, and such a write may be issued by someone
+/// who read the entry before the deletion: the mark of a deletion is kept
+/// here, where only deleting writes and only the end of the purge removes.
+pub const CLUSTER_DELETING: &str = "cluster:deleting";
 /// Which worker runs which slice.
 pub const CLUSTER_PLACEMENT: &str = "cluster:placement";
 
@@ -65,6 +73,13 @@ pub fn graph_spec(graph: &GraphKey) -> String {
     format!("{}:spec", graph_prefix(graph))
 }
 
+/// Counter the versions of a graph's descriptions are drawn from: two
+/// writers never store two descriptions under one version.
+#[must_use]
+pub fn graph_version(graph: &GraphKey) -> String {
+    format!("{}:version", graph_prefix(graph))
+}
+
 /// Description of a graph as the code of the workers built it, before the
 /// configuration changes made through the API are applied.
 #[must_use]
@@ -77,6 +92,12 @@ pub fn graph_code(graph: &GraphKey) -> String {
 #[must_use]
 pub fn graph_overrides(graph: &GraphKey) -> String {
     format!("{}:overrides", graph_prefix(graph))
+}
+
+/// The successive declarations of a graph by the code of the workers.
+#[must_use]
+pub fn graph_declarations(graph: &GraphKey) -> String {
+    format!("{}:declarations", graph_prefix(graph))
 }
 
 /// Desired run state of a graph.

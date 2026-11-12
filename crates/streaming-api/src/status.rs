@@ -44,6 +44,10 @@ pub struct WorkerView {
     pub api_addr: Option<String>,
     /// Worker version.
     pub version: String,
+    /// Graphs (`tenant/graph`) the worker steps aside from: its code declares
+    /// them otherwise than the store does, or not at all, as the binary a
+    /// deployment is replacing does. It runs none of their slices.
+    pub aside: BTreeSet<String>,
     /// Consumption per tenant, from the worker's snapshot (empty without one).
     pub tenants: BTreeMap<TenantId, TenantUsage>,
 }
@@ -87,6 +91,7 @@ pub fn cluster_view(
             slices: member.slices,
             api_addr: member.api_addr.clone(),
             version: member.version.clone(),
+            aside: member.aside.clone(),
             tenants: snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.tenants.clone())
@@ -940,6 +945,7 @@ mod tests {
                 .windows(2)
                 .map(|pair| (node(pair[0].0), node(pair[1].0)))
                 .collect(),
+            fingerprint: None,
         }
     }
 
@@ -1012,6 +1018,7 @@ mod tests {
             slices: 0,
             api_addr: None,
             version: "0.1.0".to_owned(),
+            aside: Default::default(),
         }
     }
 
@@ -1632,6 +1639,7 @@ mod tests {
             updated_ms: 0,
             deleting: false,
             orphan: false,
+            fingerprint: None,
         };
         let index = [entry("acme", "a"), entry("acme", "b"), entry("globex", "c")];
         let usage = |actors, rate| TenantUsage {

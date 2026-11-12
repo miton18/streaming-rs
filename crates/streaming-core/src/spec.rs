@@ -147,6 +147,31 @@ pub struct GraphSpec {
     pub nodes: Vec<NodeSpec>,
     /// Directed edges `[from, to]`.
     pub edges: Vec<(NodeId, NodeId)>,
+    /// Fingerprint of the declaration this description comes from (see
+    /// [`GraphSpec::declaration_fingerprint`]), set when the code of a worker
+    /// publishes it. A worker whose code declares the graph otherwise does
+    /// not run it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+/// Rebuild `value` with the fields of every object sorted, so that two equal
+/// documents are written the same way whatever built them.
+fn canonical(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(fields) => {
+            let mut sorted: Vec<(&String, &serde_json::Value)> = fields.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(b.0));
+            serde_json::Value::Object(
+                sorted
+                    .into_iter()
+                    .map(|(name, value)| (name.clone(), canonical(value)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
 }
 
 impl GraphSpec {
@@ -154,6 +179,31 @@ impl GraphSpec {
     #[must_use]
     pub fn key(&self) -> GraphKey {
         GraphKey::new(self.tenant.clone(), self.graph.clone())
+    }
+
+    /// Fingerprint of what the code declares for this graph: its settings,
+    /// its nodes with their operator and configuration, and its edges. Two
+    /// binaries declaring the same graph get the same fingerprint, whatever
+    /// the order in which they list nodes and edges; the version and the
+    /// stored fingerprint do not count.
+    ///
+    /// Sixteen hexadecimal digits of a 64-bit FNV-1a hash: enough to tell two
+    /// declarations of one graph apart, and stable across builds, platforms
+    /// and releases of the compiler (which `std::hash` does not promise).
+    #[must_use]
+    pub fn declaration_fingerprint(&self) -> String {
+        let mut declared = self.clone();
+        declared.version = 0;
+        declared.fingerprint = None;
+        declared.nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        declared.edges.sort();
+        let document = serde_json::to_value(&declared).map_or_else(|_| serde_json::Value::Null, |v| canonical(&v));
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in document.to_string().bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
     }
 
     /// Look a node up.
@@ -551,6 +601,66 @@ impl Topology {
 mod tests {
     use super::*;
     use moonpool_core::TokioProviders;
+
+    #[test]
+    fn a_fingerprint_tells_declarations_apart_and_nothing_else() {
+        let declared = |body: serde_json::Value| serde_json::from_value::<GraphSpec>(body).unwrap();
+        let body = serde_json::json!({
+            "tenant": "acme", "graph": "g",
+            "nodes": [
+                {"id": "a", "op": "t/src@1", "config": {"topic": "t", "rate": 1}},
+                {"id": "b", "op": "t/sink@1"}
+            ],
+            "edges": [["a", "b"]]
+        });
+        let print = declared(body.clone()).declaration_fingerprint();
+        // Stable across builds: a worker compares it with what another
+        // binary stored.
+        assert_eq!(print, "63e69ce606c2831f");
+        assert_eq!(print.len(), 16);
+
+        // What the store adds, and the order things are listed in, do not
+        // count.
+        let mut stored = declared(body.clone());
+        stored.version = 7;
+        stored.fingerprint = Some("something".to_owned());
+        stored.nodes.reverse();
+        assert_eq!(stored.declaration_fingerprint(), print);
+        let mut reordered = body.clone();
+        reordered["nodes"][0]["config"] = serde_json::json!({"rate": 1, "topic": "t"});
+        assert_eq!(declared(reordered).declaration_fingerprint(), print);
+
+        // Everything the code declares does.
+        let changes: [(&str, serde_json::Value); 5] = [
+            ("/nodes/0/config/rate", serde_json::json!(2)),
+            ("/nodes/0/op", serde_json::json!("t/src@2")),
+            ("/nodes/1/id", serde_json::json!("c")),
+            ("/graph", serde_json::json!("h")),
+            ("/settings", serde_json::json!({"maxBatch": 7})),
+        ];
+        for (pointer, value) in changes {
+            let mut changed = body.clone();
+            if pointer == "/settings" {
+                changed["settings"] = value;
+            } else {
+                *changed.pointer_mut(pointer).unwrap() = value;
+            }
+            if pointer == "/nodes/1/id" {
+                changed["edges"] = serde_json::json!([["a", "c"]]);
+            }
+            assert_ne!(declared(changed).declaration_fingerprint(), print, "{pointer}");
+        }
+        let mut more = body.clone();
+        more["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id": "c", "op": "t/sink@1"}));
+        more["edges"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(["a", "c"]));
+        assert_ne!(declared(more).declaration_fingerprint(), print);
+    }
 
     #[test]
     fn rejects_unknown_keys_such_as_snake_case_ones() {

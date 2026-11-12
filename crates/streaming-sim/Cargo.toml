@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+streaming-api.workspace = true
 streaming-core.workspace = true
 streaming-runtime.workspace = true
 async-trait.workspace = true

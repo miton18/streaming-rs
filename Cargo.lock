@@ -2384,6 +2384,7 @@ dependencies = [
  "moonpool-sim",
  "parking_lot 0.12.5",
  "serde_json",
+ "streaming-api",
  "streaming-core",
  "streaming-runtime",
  "tokio-util",

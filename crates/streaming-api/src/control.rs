@@ -11,11 +11,13 @@
 //! last writer wins.
 
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 use streaming_core::{
     Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, NodeSpec, OpDescriptor, SpecError, TenantId, Topology,
+    WorkerId,
     control::{
-        DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState, TenantRecord, WorkerSnapshot,
+        Declaration, DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState, TenantRecord,
+        WorkerSnapshot,
     },
     keys,
 };
@@ -282,6 +284,13 @@ async fn bump_epoch(kv: &dyn Kv) -> Result<(), ControlError> {
     Ok(())
 }
 
+/// Whether `graph` is marked as being deleted. The mark decides, not the
+/// index entry, which a writer that read it before the deletion may have
+/// written back without it.
+async fn being_deleted(kv: &dyn Kv, graph: &GraphKey) -> Result<bool, ControlError> {
+    Ok(kv.hget(keys::CLUSTER_DELETING, &graph.to_string()).await?.is_some())
+}
+
 fn not_found_graph(graph: &GraphKey) -> ControlError {
     ControlError::GraphNotFound(graph.clone())
 }
@@ -318,7 +327,7 @@ async fn save_desired(
     Ok(())
 }
 
-/// Validate `spec` against `catalog`, then store it as `previous version + 1`.
+/// Validate `spec` against `catalog`, then store it under the next version.
 async fn store_spec(
     kv: &dyn Kv,
     clock: &dyn Clock,
@@ -328,7 +337,7 @@ async fn store_spec(
     Topology::build(&spec, catalog)?;
     let key = spec.key();
     let entry = load_index_entry(kv, &key).await?;
-    if entry.as_ref().is_some_and(|entry| entry.deleting) {
+    if entry.as_ref().is_some_and(|entry| entry.deleting) || being_deleted(kv, &key).await? {
         return Err(ControlError::GraphBeingDeleted(key));
     }
     let stored_version = match load_spec(kv, &key).await {
@@ -337,7 +346,17 @@ async fn store_spec(
         Err(ControlError::Kv(KvError::Malformed { .. })) => 0,
         Err(e) => return Err(e),
     };
-    let version = entry.map_or(0, |entry| entry.version).max(stored_version) + 1;
+    // Drawn from a counter: the store has no transaction, and two writers
+    // computing "the stored version plus one" would store two descriptions
+    // under one version. The plan of a graph is computed for a version, and
+    // workers pair a plan with the description of that version.
+    let floor = entry.map_or(0, |entry| entry.version).max(stored_version);
+    let counter = keys::graph_version(&key);
+    let mut version = kv.incr(&counter).await?.max(0) as u64;
+    while version <= floor {
+        // A description stored before there was a counter.
+        version = kv.incr(&counter).await?.max(0) as u64;
+    }
     spec.version = version;
     let now = clock.now_ms();
 
@@ -357,6 +376,7 @@ async fn store_spec(
         updated_ms: now,
         deleting: false,
         orphan: false,
+        fingerprint: spec.fingerprint.clone(),
     };
     kv.hset_json(keys::CLUSTER_GRAPHS, &key.to_string(), &entry).await?;
     bump_epoch(kv).await?;
@@ -465,11 +485,122 @@ pub struct Publication {
     /// state.
     pub orphans: Vec<GraphKey>,
     /// Graphs of the code whose previous instance is still being deleted:
-    /// they are published by the next start once the deletion is over.
+    /// they are published once the deletion is over.
     pub still_deleting: Vec<GraphKey>,
+    /// Graphs this code steps aside from: the store holds a declaration that
+    /// replaced the code's (or the code has none), and a worker running
+    /// another binary is still there. They are left as they are; the worker
+    /// runs none of their slices, and publishes again once every worker runs
+    /// its binary.
+    pub aside: Vec<GraphKey>,
     /// Configuration fields set through the API that the code no longer
     /// exposes, as `(graph, node, field)`: they are not applied.
     pub ignored_overrides: Vec<(GraphKey, NodeId, String)>,
+}
+
+/// Who publishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Publisher {
+    /// The workers of the publishing process. What the previous run of one
+    /// of them advertised does not count as another binary being there.
+    pub workers: Vec<WorkerId>,
+    /// Silence after which a worker is taken for gone.
+    pub member_timeout: Duration,
+}
+
+impl Default for Publisher {
+    fn default() -> Self {
+        Self {
+            workers: Vec::new(),
+            member_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+/// The declarations of `graph`, by number.
+pub async fn load_declarations(kv: &dyn Kv, graph: &GraphKey) -> Result<BTreeMap<u64, Declaration>, ControlError> {
+    let key = keys::graph_declarations(graph);
+    let mut declarations = BTreeMap::new();
+    for (field, declaration) in kv.hgetall_json::<Declaration>(&key).await? {
+        let number = field.parse::<u64>().map_err(|_| KvError::Malformed {
+            key: key.clone(),
+            reason: "a declaration is not numbered".to_owned(),
+        })?;
+        declarations.insert(number, declaration);
+    }
+    Ok(declarations)
+}
+
+/// Tells whether the publishing binary is the only one running, as far as a
+/// graph is concerned. The members are read once, when first needed.
+struct Cluster<'a> {
+    kv: &'a dyn Kv,
+    clock: &'a dyn Clock,
+    publisher: &'a Publisher,
+    others: Option<Vec<MemberInfo>>,
+}
+
+impl Cluster<'_> {
+    /// Whether every other live worker steps aside from `graph`: none of
+    /// them runs what the store holds for it, so that the store can go back
+    /// to a declaration it has had, or lose the graph. A worker that has
+    /// just started advertises nothing yet and counts as running it.
+    async fn steps_aside(&mut self, graph: &GraphKey) -> Result<bool, ControlError> {
+        if self.others.is_none() {
+            let now = self.clock.now_ms();
+            let timeout = self.publisher.member_timeout.as_millis() as i64;
+            self.others = Some(
+                self.kv
+                    .hgetall_json::<MemberInfo>(keys::CLUSTER_MEMBERS)
+                    .await?
+                    .into_iter()
+                    .map(|(_, member)| member)
+                    .filter(|member| member.is_alive(now, timeout) && !self.publisher.workers.contains(&member.worker))
+                    .collect(),
+            );
+        }
+        let graph = graph.to_string();
+        Ok(self.others.iter().flatten().all(|member| member.aside.contains(&graph)))
+    }
+
+    /// Put `fingerprint` in force for `graph` (none: the code stopped
+    /// declaring it). `false` when the code must step aside instead: the
+    /// store has moved on from that declaration and another binary is still
+    /// running.
+    ///
+    /// A declaration the graph never had is the code of a new binary, and is
+    /// published at once. One it has had and left is either an older binary
+    /// restarting while a deployment is in progress, or a deliberate return
+    /// to an earlier code: only the second leaves no worker running what
+    /// replaced it. The same goes for a graph the code does not have, which
+    /// an older binary never knew and a newer one removed.
+    async fn declare(&mut self, graph: &GraphKey, fingerprint: Option<&str>) -> Result<bool, ControlError> {
+        let key = keys::graph_declarations(graph);
+        loop {
+            let declarations = load_declarations(self.kv, graph).await?;
+            let latest = declarations.last_key_value();
+            if latest.is_some_and(|(_, latest)| latest.fingerprint.as_deref() == fingerprint) {
+                return Ok(true);
+            }
+            let new = fingerprint.is_some()
+                && !declarations
+                    .values()
+                    .any(|declaration| declaration.fingerprint.as_deref() == fingerprint);
+            if !new && !self.steps_aside(graph).await? {
+                return Ok(false);
+            }
+            let number = latest.map_or(1, |(number, _)| number + 1);
+            let declaration = Declaration {
+                fingerprint: fingerprint.map(str::to_owned),
+                since_ms: self.clock.now_ms(),
+            };
+            let value = streaming_core::kv::encode_json(&key, &declaration)?;
+            if self.kv.hsetnx(&key, &number.to_string(), value).await? {
+                return Ok(true);
+            }
+            // Another worker declared first: see what it declared.
+        }
+    }
 }
 
 /// Make the store describe what the code describes: the cluster's code is
@@ -481,23 +612,35 @@ pub struct Publication {
 /// document, the configuration fields set through the API laid over it, and
 /// the result stored as a new version when it differs from the stored one.
 /// A graph the store holds but `graphs` does not becomes an *orphan*: it is
-/// stopped and its state is kept, since deleting a state cannot be undone
-/// and a worker running an older code must not be able to do it by
-/// starting. An orphan is deleted through the API ([`delete_graph`]), or
-/// runs again on its state when the code declares it again.
+/// stopped and its state is kept, since deleting a state cannot be undone.
+/// An orphan is deleted through the API ([`delete_graph`]), or runs again on
+/// its state when the code declares it again.
 ///
-/// Every worker publishes when it starts. All workers run the same code, so
-/// concurrent publications write the same documents.
+/// Every worker publishes when it starts, and two binaries run side by side
+/// while a deployment is in progress. Each graph therefore keeps the list of
+/// its declarations, by fingerprint
+/// ([`GraphSpec::declaration_fingerprint`]): a binary whose declaration the
+/// store has left, or which does not declare a graph the store runs, does
+/// not touch that graph while a worker of another binary is alive (see
+/// [`Publication::aside`]). Concurrent publications of one binary write the
+/// same documents.
 pub async fn publish(
     kv: &dyn Kv,
     clock: &dyn Clock,
     catalog: &Catalog,
     tenants: &[(TenantId, Option<String>)],
     graphs: &[GraphSpec],
+    publisher: &Publisher,
 ) -> Result<Publication, ControlError> {
     for spec in graphs {
         Topology::build(spec, catalog)?;
     }
+    let mut cluster = Cluster {
+        kv,
+        clock,
+        publisher,
+        others: None,
+    };
     let mut publication = Publication::default();
     for (tenant, display_name) in tenants {
         match create_tenant(kv, clock, tenant.clone(), display_name.clone()).await {
@@ -512,8 +655,19 @@ pub async fn publish(
         if load_tenant(kv, &key.tenant).await?.is_none() {
             return Err(ControlError::TenantNotCreated(key.tenant));
         }
+        let entry = load_index_entry(kv, &key).await?;
+        if entry.as_ref().is_some_and(|entry| entry.deleting) || being_deleted(kv, &key).await? {
+            publication.still_deleting.push(key);
+            continue;
+        }
         let mut code = code.clone();
         code.version = 0;
+        let fingerprint = code.declaration_fingerprint();
+        if !cluster.declare(&key, Some(&fingerprint)).await? {
+            publication.aside.push(key);
+            continue;
+        }
+        code.fingerprint = Some(fingerprint);
         let stored_code = match kv.get_json::<GraphSpec>(&keys::graph_code(&key)).await {
             Ok(stored) => stored,
             Err(KvError::Malformed { .. }) => None,
@@ -526,11 +680,6 @@ pub async fn publish(
         publication
             .ignored_overrides
             .extend(ignored.into_iter().map(|(node, field)| (key.clone(), node, field)));
-        let entry = load_index_entry(kv, &key).await?;
-        if entry.as_ref().is_some_and(|entry| entry.deleting) {
-            publication.still_deleting.push(key);
-            continue;
-        }
         let stored = match load_spec(kv, &key).await {
             Ok(stored) => stored,
             Err(ControlError::Kv(KvError::Malformed { .. })) => None,
@@ -546,7 +695,11 @@ pub async fn publish(
             publication.restored.push((key, version));
             continue;
         }
-        if entry.is_some() && stored.as_ref().is_some_and(|stored| same_description(stored, &spec)) {
+        if entry.is_some_and(|entry| {
+            entry.fingerprint == spec.fingerprint
+                && stored.as_ref().is_some_and(|stored| stored.version == entry.version)
+        }) && stored.as_ref().is_some_and(|stored| same_description(stored, &spec))
+        {
             publication.unchanged.push(key);
             continue;
         }
@@ -562,10 +715,18 @@ pub async fn publish(
             publication.orphans.push(key);
             continue;
         }
+        if being_deleted(kv, &key).await? {
+            continue;
+        }
+        if !cluster.declare(&key, None).await? {
+            publication.aside.push(key);
+            continue;
+        }
         let mut desired = desired_or_default(kv, &key, clock).await?;
         desired.state = RunState::Stopped;
         save_desired(kv, &key, clock, desired).await?;
         entry.orphan = true;
+        entry.fingerprint = None;
         entry.updated_ms = clock.now_ms();
         kv.hset_json(keys::CLUSTER_GRAPHS, &key.to_string(), &entry).await?;
         bump_epoch(kv).await?;
@@ -574,8 +735,45 @@ pub async fn publish(
     Ok(publication)
 }
 
-/// Delete a graph the code no longer declares, and its state: desired state
-/// `stopped`, index entry `deleting`. The controller removes the rest. A
+/// Whether the store no longer holds what the code declares: a graph of
+/// `graphs` is missing, stopped as an orphan, or stored under another
+/// declaration, or the store runs a graph `graphs` does not have. The worker
+/// then steps aside from that graph, and should [`publish`] again: it takes
+/// over once every worker runs its binary. One read of the graph index and
+/// one of each description: a description written late, by a command its
+/// sender had given up on, may have replaced a newer one behind the index.
+pub async fn out_of_date(kv: &dyn Kv, graphs: &[GraphSpec]) -> Result<bool, ControlError> {
+    let index = load_index(kv).await?;
+    for code in graphs {
+        let fingerprint = Some(code.declaration_fingerprint());
+        let entry = index
+            .iter()
+            .find(|entry| entry.tenant == code.tenant && entry.graph == code.graph);
+        if !entry.is_some_and(|entry| !entry.orphan && !entry.deleting && entry.fingerprint == fingerprint) {
+            return Ok(true);
+        }
+        let stored = match load_spec(kv, &code.key()).await {
+            Ok(stored) => stored,
+            Err(ControlError::Kv(KvError::Malformed { .. })) => None,
+            Err(error) => return Err(error),
+        };
+        let version = entry.map(|entry| entry.version);
+        if !stored.is_some_and(|stored| stored.fingerprint == fingerprint && Some(stored.version) == version) {
+            return Ok(true);
+        }
+    }
+    Ok(index.iter().any(|entry| {
+        !entry.orphan
+            && !entry.deleting
+            && !graphs
+                .iter()
+                .any(|code| code.tenant == entry.tenant && code.graph == entry.graph)
+    }))
+}
+
+/// Delete a graph the code no longer declares, and its state: a mark in
+/// `cluster:deleting`, desired state `stopped`, index entry `deleting`. The
+/// controller removes the rest, the mark last. A
 /// graph the code declares is not deleted: it would come back, empty, with
 /// the next worker that starts.
 pub async fn delete_graph(kv: &dyn Kv, clock: &dyn Clock, graph: &GraphKey) -> Result<(), ControlError> {
@@ -585,6 +783,10 @@ pub async fn delete_graph(kv: &dyn Kv, clock: &dyn Clock, graph: &GraphKey) -> R
     if !entry.orphan {
         return Err(ControlError::GraphDeclaredByCode(graph.clone()));
     }
+    // The mark first: from here on the graph is being deleted, even if a
+    // writer that read its index entry earlier writes it back.
+    kv.hset(keys::CLUSTER_DELETING, vec![(graph.to_string(), b"1".to_vec())])
+        .await?;
     let mut desired = desired_or_default(kv, graph, clock).await?;
     desired.state = RunState::Stopped;
     save_desired(kv, graph, clock, desired).await?;

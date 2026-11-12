@@ -221,7 +221,15 @@ impl Env {
         let clock = self.clock.clone();
         let clock = move || clock.load(Ordering::SeqCst);
         *self.code.lock().unwrap() = graphs.clone();
-        control::publish(self.kv.as_ref(), &clock as &dyn Clock, &catalog, &[], &graphs).await
+        control::publish(
+            self.kv.as_ref(),
+            &clock as &dyn Clock,
+            &catalog,
+            &[],
+            &graphs,
+            &control::Publisher::default(),
+        )
+        .await
     }
 
     /// Add a graph to the code and publish it; returns its version.
@@ -316,6 +324,7 @@ async fn publish_worker(env: &Env, worker: &str, heartbeat_ms: i64, snapshot: Op
         slices: 3,
         api_addr: Some("127.0.0.1:8080".into()),
         version: "0.1.0".into(),
+        aside: Default::default(),
     };
     env.kv.hset_json(keys::CLUSTER_MEMBERS, worker, &member).await.unwrap();
     if let Some(snapshot) = snapshot {
@@ -601,9 +610,16 @@ async fn publishing_creates_the_declared_tenants() {
     body["tenant"] = json!("initech");
     let graph = spec(body);
     // A graph of a tenant the code does not declare.
-    let error = control::publish(env.kv.as_ref(), &clock, &catalog, &[], std::slice::from_ref(&graph))
-        .await
-        .unwrap_err();
+    let error = control::publish(
+        env.kv.as_ref(),
+        &clock,
+        &catalog,
+        &[],
+        std::slice::from_ref(&graph),
+        &control::Publisher::default(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error, ControlError::TenantNotCreated("initech".parse().unwrap()));
     assert!(env.kv.hget(keys::CLUSTER_GRAPHS, "initech/g").await.unwrap().is_none());
 
@@ -614,6 +630,7 @@ async fn publishing_creates_the_declared_tenants() {
         &catalog,
         &tenants,
         std::slice::from_ref(&graph),
+        &control::Publisher::default(),
     )
     .await
     .unwrap();
@@ -622,9 +639,16 @@ async fn publishing_creates_the_declared_tenants() {
     assert_eq!(body["displayName"], "Initech");
     // Another display name in the code keeps the stored one.
     let renamed = [("initech".parse().unwrap(), Some("Initech Ltd".to_owned()))];
-    let publication = control::publish(env.kv.as_ref(), &clock, &catalog, &renamed, &[graph])
-        .await
-        .unwrap();
+    let publication = control::publish(
+        env.kv.as_ref(),
+        &clock,
+        &catalog,
+        &renamed,
+        &[graph],
+        &control::Publisher::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(publication.renamed_tenants, ["initech".parse().unwrap()]);
     let (_, body) = env.get("/api/v1/tenants/initech").await;
     assert_eq!(body["displayName"], "Initech");
@@ -1407,4 +1431,240 @@ async fn kv_failures_are_503() {
     let (status, body) = env.get("/api/v1/cluster").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body["message"].is_string());
+}
+
+/// What the binary of a worker publishes when it starts.
+async fn publish_code(env: &Env, graphs: &[GraphSpec]) -> Publication {
+    let catalog = control::load_catalog(env.kv.as_ref()).await.unwrap();
+    let clock = env.clock.clone();
+    let clock = move || clock.load(Ordering::SeqCst);
+    let publisher = control::Publisher::default();
+    control::publish(env.kv.as_ref(), &clock as &dyn Clock, &catalog, &[], graphs, &publisher)
+        .await
+        .unwrap()
+}
+
+/// A worker heard of at `heartbeat_ms`, stepping aside from `aside`.
+async fn member_aside(env: &Env, worker: &str, heartbeat_ms: i64, aside: &[&str]) {
+    let member = MemberInfo {
+        worker: worker.parse().unwrap(),
+        generation: 1,
+        heartbeat_ms,
+        load: Load::default(),
+        actors: 0,
+        slices: 0,
+        api_addr: None,
+        version: String::new(),
+        aside: aside.iter().map(|graph| (*graph).to_owned()).collect(),
+    };
+    env.kv.hset_json(keys::CLUSTER_MEMBERS, worker, &member).await.unwrap();
+}
+
+async fn fingerprints(env: &Env, graph: &str) -> Vec<Option<String>> {
+    control::load_declarations(env.kv.as_ref(), &gk(graph))
+        .await
+        .unwrap()
+        .into_values()
+        .map(|declaration| declaration.fingerprint)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_binary_the_store_has_moved_on_from_steps_aside_while_another_one_runs() {
+    let env = Env::new().await;
+    let old = spec(graph_body("g"));
+    let mut body = graph_body("g");
+    body["nodes"][0]["config"]["rate"] = json!(20);
+    let new = spec(body);
+    let (old_print, new_print) = (old.declaration_fingerprint(), new.declaration_fingerprint());
+    assert_ne!(old_print, new_print);
+
+    // The first binary, then the one that replaces it: a declaration the
+    // graph never had is published at once, whoever else is there.
+    assert_eq!(
+        publish_code(&env, std::slice::from_ref(&old)).await.updated,
+        [(gk("g"), 1)]
+    );
+    member_aside(&env, "w-old", NOW, &[]).await;
+    assert_eq!(
+        publish_code(&env, std::slice::from_ref(&new)).await.updated,
+        [(gk("g"), 2)]
+    );
+    assert_eq!(
+        fingerprints(&env, "g").await,
+        [Some(old_print.clone()), Some(new_print.clone())]
+    );
+    let stored: GraphSpec = env.kv.get_json(&keys::graph_spec(&gk("g"))).await.unwrap().unwrap();
+    assert_eq!(stored.fingerprint.as_ref(), Some(&new_print));
+    let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
+    assert_eq!(entry.fingerprint.as_ref(), Some(&new_print));
+    assert!(
+        !control::out_of_date(env.kv.as_ref(), std::slice::from_ref(&new))
+            .await
+            .unwrap()
+    );
+    assert!(
+        control::out_of_date(env.kv.as_ref(), std::slice::from_ref(&old))
+            .await
+            .unwrap()
+    );
+
+    // The old binary restarts while a worker of the new one runs the graph:
+    // it writes nothing.
+    member_aside(&env, "w-new", NOW, &[]).await;
+    member_aside(&env, "w-old", NOW, &["acme/g"]).await;
+    let (epoch, before) = (env.epoch().await, env.mem.stats().writes);
+    let publication = publish_code(&env, std::slice::from_ref(&old)).await;
+    assert_eq!(publication.aside, [gk("g")]);
+    assert!(publication.updated.is_empty() && publication.unchanged.is_empty());
+    assert_eq!((env.epoch().await, env.mem.stats().writes), (epoch, before));
+
+    // The new binary publishing again changes nothing either.
+    assert_eq!(
+        publish_code(&env, std::slice::from_ref(&new)).await.unchanged,
+        [gk("g")]
+    );
+
+    // Once no worker runs the new declaration any more (here: the deployment
+    // was given up, its worker is silent), the old one is the code again.
+    env.clock.store(NOW + 60_000, Ordering::SeqCst);
+    member_aside(&env, "w-old", NOW + 60_000, &["acme/g"]).await;
+    let publication = publish_code(&env, std::slice::from_ref(&old)).await;
+    assert_eq!(publication.updated, [(gk("g"), 3)]);
+    assert_eq!(
+        fingerprints(&env, "g").await,
+        [Some(old_print.clone()), Some(new_print), Some(old_print.clone())]
+    );
+    let stored: GraphSpec = env.kv.get_json(&keys::graph_spec(&gk("g"))).await.unwrap().unwrap();
+    assert_eq!(stored.fingerprint, Some(old_print));
+    assert_eq!(stored.nodes[0].config["rate"], 10);
+}
+
+#[tokio::test]
+async fn going_back_to_an_earlier_declaration_waits_for_a_worker_that_says_nothing_yet() {
+    // A worker that has just started advertises no graph it steps aside
+    // from: it counts as running what the store holds.
+    let env = Env::new().await;
+    let old = spec(graph_body("g"));
+    let mut body = graph_body("g");
+    body["nodes"][0]["config"]["rate"] = json!(20);
+    let new = spec(body);
+    publish_code(&env, std::slice::from_ref(&old)).await;
+    publish_code(&env, std::slice::from_ref(&new)).await;
+    member_aside(&env, "w-1", NOW, &["acme/g"]).await;
+    member_aside(&env, "w-2", NOW, &[]).await;
+    assert_eq!(publish_code(&env, std::slice::from_ref(&old)).await.aside, [gk("g")]);
+    member_aside(&env, "w-2", NOW, &["acme/other", "acme/g"]).await;
+    assert_eq!(
+        publish_code(&env, std::slice::from_ref(&old)).await.updated,
+        [(gk("g"), 3)]
+    );
+}
+
+#[tokio::test]
+async fn the_previous_run_of_the_publishing_worker_is_not_another_binary() {
+    let env = Env::new().await;
+    let old = spec(graph_body("g"));
+    let mut body = graph_body("g");
+    body["nodes"][0]["config"]["rate"] = json!(20);
+    let new = spec(body);
+    publish_code(&env, std::slice::from_ref(&old)).await;
+    publish_code(&env, std::slice::from_ref(&new)).await;
+    // The only worker, restarted with the earlier code a second after it
+    // last advertised itself.
+    member_aside(&env, "w-1", NOW, &[]).await;
+    let catalog = control::load_catalog(env.kv.as_ref()).await.unwrap();
+    let clock = move || NOW + 1_000;
+    let publisher = control::Publisher {
+        workers: vec!["w-1".parse().unwrap()],
+        ..control::Publisher::default()
+    };
+    let publication = control::publish(
+        env.kv.as_ref(),
+        &clock as &dyn Clock,
+        &catalog,
+        &[],
+        std::slice::from_ref(&old),
+        &publisher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(publication.updated, [(gk("g"), 3)]);
+}
+
+#[tokio::test]
+async fn a_binary_that_does_not_have_a_graph_leaves_it_alone_while_another_one_runs_it() {
+    let env = Env::new().await;
+    let g = spec(graph_body("g"));
+    let h = spec(graph_body("h"));
+    // The new binary adds `h`; a worker of it is running.
+    publish_code(&env, std::slice::from_ref(&g)).await;
+    publish_code(&env, &[g.clone(), h.clone()]).await;
+    member_aside(&env, "w-new", NOW, &[]).await;
+    // The old binary restarts: it never had `h`, and must not stop it.
+    let epoch = env.epoch().await;
+    let publication = publish_code(&env, std::slice::from_ref(&g)).await;
+    assert_eq!(publication.aside, [gk("h")]);
+    assert_eq!(publication.unchanged, [gk("g")]);
+    assert!(publication.orphaned.is_empty());
+    assert_eq!(env.epoch().await, epoch);
+    assert!(
+        control::out_of_date(env.kv.as_ref(), std::slice::from_ref(&g))
+            .await
+            .unwrap()
+    );
+
+    // A binary that removed `h` stops it once every worker runs that binary.
+    member_aside(&env, "w-new", NOW, &["acme/h"]).await;
+    let publication = publish_code(&env, std::slice::from_ref(&g)).await;
+    assert_eq!(publication.orphaned, [gk("h")]);
+    let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/h").await.unwrap().unwrap();
+    assert!(entry.orphan);
+    assert_eq!(entry.fingerprint, None);
+    assert_eq!(fingerprints(&env, "h").await, [Some(h.declaration_fingerprint()), None]);
+    assert!(
+        !control::out_of_date(env.kv.as_ref(), std::slice::from_ref(&g))
+            .await
+            .unwrap()
+    );
+
+    // Declared again as it was: going back, which waits for the workers of
+    // the binary without it.
+    member_aside(&env, "w-new", NOW, &[]).await;
+    assert_eq!(publish_code(&env, &[g.clone(), h.clone()]).await.aside, [gk("h")]);
+    member_aside(&env, "w-new", NOW, &["acme/h"]).await;
+    assert_eq!(publish_code(&env, &[g, h]).await.restored, [(gk("h"), 2)]);
+}
+
+#[tokio::test]
+async fn a_description_written_late_over_a_newer_one_is_noticed_and_repaired() {
+    let env = Env::new().await;
+    let old = spec(graph_body("g"));
+    let mut body = graph_body("g");
+    body["nodes"][0]["config"]["rate"] = json!(20);
+    let new = spec(body);
+    publish_code(&env, std::slice::from_ref(&old)).await;
+    let late: GraphSpec = env.kv.get_json(&keys::graph_spec(&gk("g"))).await.unwrap().unwrap();
+    publish_code(&env, std::slice::from_ref(&new)).await;
+    assert!(
+        !control::out_of_date(env.kv.as_ref(), std::slice::from_ref(&new))
+            .await
+            .unwrap()
+    );
+    // The write of the first publication lands now, behind the index.
+    env.kv.set_json(&keys::graph_spec(&gk("g")), &late).await.unwrap();
+    assert!(
+        control::out_of_date(env.kv.as_ref(), std::slice::from_ref(&new))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        publish_code(&env, std::slice::from_ref(&new)).await.updated,
+        [(gk("g"), 3)]
+    );
+    assert!(
+        !control::out_of_date(env.kv.as_ref(), std::slice::from_ref(&new))
+            .await
+            .unwrap()
+    );
 }

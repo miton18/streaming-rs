@@ -10,6 +10,7 @@
 //   POST /__mock/worker    {"worker": "worker-3", "alive": false}
 //   POST /__mock/commit    {"on": true}        KV commits of src.events.* become slow
 //   POST /__mock/orphan    {"graph": "globex/legacy-export"}  the code no longer declares the graph
+//   POST /__mock/aside     {"worker": "worker-3", "graphs": ["acme/count-per-key"]}  the worker runs an older binary
 //   POST /__mock/reset                         back to the initial state
 // The same knobs accept GET with query parameters (?on=1, ?worker=..&alive=0) for curl.
 
@@ -637,6 +638,7 @@ function cluster(now, snap) {
       load: { cpu: r3(cpu), memory: r3(memBytes / (1024 * 1048576)), memoryBytes: memBytes },
       actors: w.alive ? mine.length : 0, slices: w.alive ? sl.size : 0,
       apiAddr: i === 0 ? '127.0.0.1:8080' : null, version: '0.1.0',
+      aside: w.aside ?? [],
       tenants: w.alive ? tenants : {},
     };
   });
@@ -721,6 +723,12 @@ async function handle(req, res) {
       w.deadSince = w.alive ? 0 : Date.now();
       if (w.alive) { w.generation = Date.now(); }
       return send(res, 200, { worker: w.worker, alive: w.alive });
+    }
+    if (p === '/__mock/aside') {
+      const w = S.workers.find((x) => x.worker === (body.worker ?? q.worker));
+      if (!w) return err(res, 404, 'ROUTE_NOT_FOUND', { path: p });
+      w.aside = body.graphs ?? [];
+      return send(res, 200, { worker: w.worker, aside: w.aside });
     }
     if (p === '/__mock/orphan') {
       const g = S.graphs.get(body.graph ?? q.graph);

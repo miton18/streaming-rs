@@ -674,6 +674,13 @@
             },
             "type": "array"
           },
+          "fingerprint": {
+            "description": "Fingerprint of the declaration this description comes from (see\n[`GraphSpec::declaration_fingerprint`]), set when the code of a worker\npublishes it. A worker whose code declares the graph otherwise does\nnot run it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "graph": {
             "$ref": "#/components/schemas/GraphId",
             "description": "Graph id, unique inside the tenant."
@@ -1887,6 +1894,14 @@
               "null"
             ]
           },
+          "aside": {
+            "description": "Graphs (`tenant/graph`) the worker steps aside from: its code declares\nthem otherwise than the store does, or not at all, as the binary a\ndeployment is replacing does. It runs none of their slices.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
           "generation": {
             "description": "Process generation.",
             "format": "uint64",
@@ -1937,6 +1952,7 @@
           "slices",
           "apiAddr",
           "version",
+          "aside",
           "tenants"
         ],
         "type": "object"
