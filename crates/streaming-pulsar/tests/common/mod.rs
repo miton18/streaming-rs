@@ -72,6 +72,8 @@ struct State {
     dedup: bool,
     next_connection: u64,
     next_order: u64,
+    /// Connections open now.
+    live: usize,
     /// Commands received, by type name, for the tests to look at.
     seen: Vec<pb::BaseCommand>,
 }
@@ -154,6 +156,11 @@ impl Broker {
             .map_or(0, |subscription| subscription.acked)
     }
 
+    /// Client connections open now.
+    pub fn live_connections(&self) -> usize {
+        self.state.lock().live
+    }
+
     /// Commands of type `kind` received so far.
     pub fn seen(&self, kind: Type) -> Vec<pb::BaseCommand> {
         self.state
@@ -181,6 +188,7 @@ impl Broker {
         let connection = {
             let mut state = self.state.lock();
             state.next_connection += 1;
+            state.live += 1;
             state.next_connection
         };
         let writer = tokio::spawn(async move {
@@ -210,6 +218,7 @@ impl Broker {
         state.consumers.retain(|(conn, _), _| *conn != connection);
         state.producers.retain(|(conn, _), _| *conn != connection);
         hand_over(&mut state);
+        state.live -= 1;
         drop(state);
         writer.abort();
     }
