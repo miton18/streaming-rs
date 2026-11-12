@@ -3,10 +3,9 @@
 //!
 //! `cargo test -p streaming-sim --features mutants --test mutants -- --nocapture`
 
-use std::{sync::Arc, time::Duration};
-
 use moonpool_sim::{Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport};
 use parking_lot::Mutex;
+use std::{sync::Arc, time::Duration};
 use streaming_runtime::mutation::{Mutant, plant};
 use streaming_sim::{Auditor, Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
 

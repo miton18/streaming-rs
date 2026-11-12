@@ -7,14 +7,13 @@
 
 mod common;
 
-use std::{collections::BTreeMap, time::Duration};
-
 use async_trait::async_trait;
 use common::{NodeParams, Registry, builder_with, check_report, convergence_gap, fail, node_id_for, seeds, sleep};
 use moonpool_sim::{
     Attrition, AttritionScope, Chaos, ChaosMode, RandomProvider, SimContext, SimulationResult, TimeProvider, Workload,
     assert_always, assert_sometimes,
 };
+use std::{collections::BTreeMap, time::Duration};
 use streaming_gossip::GossipStats;
 
 /// Allowance for the last heartbeat of a crashed node to finish spreading

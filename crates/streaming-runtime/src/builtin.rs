@@ -4,13 +4,12 @@
 //! |---|---|---|---|
 //! | `std/kv-sink@1` | sink | `serde_json::Value` | `{"retain": 500}` |
 
-use std::{collections::BTreeSet, sync::Arc};
-
 use async_trait::async_trait;
 use moonpool_core::Providers;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::Value;
+use std::{collections::BTreeSet, sync::Arc};
 use streaming_core::{
     DynKv, Emit, GraphKey, OpError, Registry, SinkConnector, SinkError, Timestamp, TypeTag, control::OutputRow, keys,
     ops::downcast,

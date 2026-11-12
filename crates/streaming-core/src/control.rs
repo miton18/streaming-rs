@@ -7,15 +7,13 @@
 //! a stale or conflicting document can at worst make two workers run the same
 //! slice, which the commit log arbitrates.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use serde::{Deserialize, Serialize};
-
 use crate::{
     data::Position,
     ids::{GraphId, NodeId, OpRef, SliceId, SliceKey, TenantId, WorkerId},
     time::Timestamp,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Resource usage of a worker process. Ratios are in `0.0..=1.0`.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]

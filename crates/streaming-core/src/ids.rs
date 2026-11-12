@@ -3,9 +3,8 @@
 //! Identifiers end up inside KV keys (`t:<tenant>:g:<graph>:...`) and inside
 //! slice names (`src.<node>.<partition>`), so their alphabet is restricted.
 
-use std::{fmt, str::FromStr};
-
 use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr};
 
 /// Error returned when an identifier does not respect its alphabet.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

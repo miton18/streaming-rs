@@ -1,12 +1,6 @@
 //! The operator registry: the bridge between the references stored in a graph
 //! description (`acme/decode-event@1`) and the Rust code compiled into a worker.
 
-use std::{any::Any, collections::BTreeMap, fmt, sync::Arc};
-
-use moonpool_core::Providers;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
-
 use crate::{
     clock::{Clock, SecretProvider},
     data::{Datum, Key, datum},
@@ -16,6 +10,10 @@ use crate::{
         WindowAssigner, downcast,
     },
 };
+use moonpool_core::Providers;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use std::{any::Any, collections::BTreeMap, fmt, sync::Arc};
 
 /// What a node does in a graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema)]
@@ -623,9 +621,8 @@ impl<P: Providers> Registry<P> {
 
 #[cfg(test)]
 mod tests {
-    use moonpool_core::TokioProviders;
-
     use super::*;
+    use moonpool_core::TokioProviders;
 
     #[test]
     fn operators_build_without_configuration() {

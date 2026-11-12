@@ -6,9 +6,8 @@
 //! One request per connection (`Connection: close`), no keep-alive, no
 //! redirects, no compression.
 
-use std::io;
-
 use futures::io::{AsyncRead, AsyncReadExt};
+use std::io;
 
 /// What can go wrong when building or parsing an HTTP message.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

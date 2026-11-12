@@ -7,18 +7,16 @@
 //! | `std/count@1` | aggregate | none; emits `Windowed<u64>` |
 //! | `std/identity@1` | map | none |
 
-use std::{sync::Arc, time::Duration};
-
-use moonpool_core::Providers;
-use serde::Deserialize;
-use serde_json::Value;
-
 use crate::{
     data::{Datum, Key, Windowed, datum},
     ops::{DynAcc, DynAggregator, DynMap, OpError, WindowAssigner},
     registry::{OpDescriptor, OpFactory, OpKind, Registry, TypeTag},
     time::{Timestamp, Window, duration_str},
 };
+use moonpool_core::Providers;
+use serde::Deserialize;
+use serde_json::Value;
+use std::{sync::Arc, time::Duration};
 
 fn zero() -> Duration {
     Duration::ZERO

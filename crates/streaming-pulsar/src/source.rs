@@ -1,7 +1,10 @@
 //! `std/pulsar-source@1`.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
-
+use crate::{
+    client::{ClientCell, Conn},
+    config::{EventTimeMode, InitialPosition, SourceConfig},
+    position::{end_position_of, partition_topic, position_of},
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use magnetar::{
@@ -13,13 +16,8 @@ use magnetar::{
     runtime_moonpool::Consumer,
 };
 use moonpool_core::Providers;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use streaming_core::{PartitionReader, Position, SourceConnector, SourceError, SourceRecord, Timestamp, datum};
-
-use crate::{
-    client::{ClientCell, Conn},
-    config::{EventTimeMode, InitialPosition, SourceConfig},
-    position::{end_position_of, partition_topic, position_of},
-};
 
 /// One message read from a Pulsar topic partition: the output type of
 /// `std/pulsar-source@1`.

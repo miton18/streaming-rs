@@ -42,15 +42,14 @@
 //! with is remembered for another `forget_after`, so that stale copies still
 //! circulating cannot resurrect them, while a real heartbeat increase can.
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::Duration,
-};
-
 use crate::{
     config::{GossipConfig, Limits},
     error::GossipError,
     wire::{self, Delta, Digest, DigestEntry, KeyUpdate, NodeDelta, key_update_size, node_header_size, varint_len},
+};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
 };
 
 /// A cluster member as seen by the local node.

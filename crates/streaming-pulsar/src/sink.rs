@@ -1,7 +1,11 @@
 //! `std/pulsar-sink@1`.
 
-use std::{sync::Arc, time::Duration};
-
+use crate::{
+    client::{ClientCell, Conn},
+    config::SinkConfig,
+    position::partition_topic,
+    sequence::{SequenceLayout, SequenceState},
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::lock::Mutex;
@@ -11,14 +15,8 @@ use magnetar::{
     runtime_moonpool::{Producer, SendFut},
 };
 use moonpool_core::Providers;
+use std::{sync::Arc, time::Duration};
 use streaming_core::{Emit, EmitId, SinkConnector, SinkError, data::hash_str, ops::downcast};
-
-use crate::{
-    client::{ClientCell, Conn},
-    config::SinkConfig,
-    position::partition_topic,
-    sequence::{SequenceLayout, SequenceState},
-};
 
 /// Message property holding the framework's emit id of the element.
 pub const EMIT_ID_PROPERTY: &str = "streaming-emit-id";
@@ -376,9 +374,8 @@ impl<P: Providers> SinkConnector for PulsarSink<P> {
 
 #[cfg(test)]
 mod tests {
-    use streaming_core::{NodeId, Origin, Position, SliceId};
-
     use super::*;
+    use streaming_core::{NodeId, Origin, Position, SliceId};
 
     fn emit_id(partition: u32, position: Position) -> EmitId {
         let slice = SliceId::Source {

@@ -1,11 +1,10 @@
 //! End-to-end run of the engine on tokio with an in-memory KV: one worker,
 //! one graph (source -> key_by -> window -> count -> two sinks), real time.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
-
 use async_trait::async_trait;
 use moonpool_core::TokioProviders;
 use parking_lot::Mutex;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use streaming_core::{
     Clock, DynKv, Emit, GraphSpec, MemKv, NoSecrets, Registry, SinkConnector, SinkError, SystemClock, TypeTag, Window,
     Windowed, WorkerId,

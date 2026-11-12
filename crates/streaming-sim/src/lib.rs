@@ -14,13 +14,6 @@
 //! pipeline to settle, then checks that every event was accounted for exactly
 //! once.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    future::Future,
-    sync::Arc,
-    time::Duration,
-};
-
 use async_trait::async_trait;
 use moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider};
 use moonpool_sim::{
@@ -28,6 +21,12 @@ use moonpool_sim::{
     buggify_with_prob, providers::SimProviders,
 };
 use parking_lot::Mutex;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
 use streaming_core::{
     Clock, Datum, DynKv, Emit, GraphSpec, Kv, KvError, MemKv, NoSecrets, NodeId, PartitionReader, Position, Registry,
     SinkConnector, SinkError, SourceConnector, SourceError, SourceRecord, Timestamp, TypeTag, Window, Windowed,

@@ -9,6 +9,8 @@
 mod demo;
 mod stock;
 
+use clap::{Parser, Subcommand};
+use moonpool_core::TokioProviders;
 use std::{
     io::ErrorKind,
     net::SocketAddr,
@@ -16,9 +18,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-
-use clap::{Parser, Subcommand};
-use moonpool_core::TokioProviders;
 use streaming_api::{ApiConfig, ApiState, control};
 use streaming_core::{Clock, DynKv, EnvSecrets, MemKv, Registry, SecretProvider, SystemClock, WorkerId};
 use streaming_kv_redis::{RedisConfig, RedisKv};

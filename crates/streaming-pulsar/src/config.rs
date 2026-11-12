@@ -1,10 +1,9 @@
 //! Node configurations and their validation.
 
+use crate::sequence::SequenceLayout;
 use serde::Deserialize;
 use serde_json::Value;
 use streaming_core::{OpContext, OpError};
-
-use crate::sequence::SequenceLayout;
 
 /// How a `pulsar://` / `pulsar+ssl://` service URL was understood.
 #[derive(Debug, Clone, PartialEq, Eq)]

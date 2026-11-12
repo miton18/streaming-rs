@@ -46,8 +46,6 @@
 //! parameters as they deserialize; a type whose two forms differ is listed
 //! twice, the second time as `<Name>Input`.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use axum::{Router, routing::MethodRouter};
 use schemars::{
     JsonSchema, Schema, SchemaGenerator,
@@ -55,6 +53,7 @@ use schemars::{
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 pub use streaming_openapi_macros::route;
 
 /// Version of the OpenAPI Specification the documents follow.

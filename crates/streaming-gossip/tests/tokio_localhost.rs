@@ -2,9 +2,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::{collections::BTreeMap, time::Duration};
-
 use moonpool_core::TokioProviders;
+use std::{collections::BTreeMap, time::Duration};
 use streaming_gossip::{Gossip, GossipConfig};
 use tokio_util::sync::CancellationToken;
 

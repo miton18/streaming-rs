@@ -1,7 +1,6 @@
 //! One Magnetar client (moonpool engine) per connector, created lazily.
 
-use std::sync::Arc;
-
+use crate::config::ConnectionSettings;
 use bytes::Bytes;
 use futures::lock::Mutex;
 use magnetar::{
@@ -9,8 +8,7 @@ use magnetar::{
     runtime_moonpool::{Client, MoonpoolEngine},
 };
 use moonpool_core::{Providers, TaskProvider};
-
-use crate::config::ConnectionSettings;
+use std::sync::Arc;
 
 /// An open Magnetar client. Closing it on drop stops its driver task, which
 /// would otherwise outlive the connector.

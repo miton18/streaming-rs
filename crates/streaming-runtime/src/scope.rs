@@ -7,9 +7,8 @@
 //! production (shutdown) and under simulation, where killing a process only
 //! aborts its main task.
 
-use std::future::Future;
-
 use moonpool_core::{Providers, TaskProvider};
+use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
 /// A set of tasks sharing a kill token.

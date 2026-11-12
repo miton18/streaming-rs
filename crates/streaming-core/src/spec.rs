@@ -5,18 +5,16 @@
 //! [`OpRef`]; the operator itself is Rust code compiled into the workers and
 //! registered under the same reference.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
-
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
 use crate::{
     ids::{GraphId, GraphKey, NodeId, OpRef, SliceId, TenantId},
     registry::{Catalog, OpDescriptor, OpKind, TypeTag},
     time::duration_str,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
 };
 
 /// One node of a graph.
@@ -551,9 +549,8 @@ impl Topology {
 
 #[cfg(test)]
 mod tests {
-    use moonpool_core::TokioProviders;
-
     use super::*;
+    use moonpool_core::TokioProviders;
 
     #[test]
     fn rejects_unknown_keys_such_as_snake_case_ones() {

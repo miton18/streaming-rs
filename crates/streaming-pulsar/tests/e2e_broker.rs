@@ -15,14 +15,6 @@
 //! `broker_dedup_through_an_aliased_url` expects `PULSAR_E2E_URL` to be
 //! `pulsar://localhost:<port>` (it reaches the same broker as `127.0.0.1`).
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io::{Read, Write},
-    net::TcpStream,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
-
 use magnetar::{
     ConnectionConfig, OutgoingMessage,
     proto::{
@@ -33,6 +25,13 @@ use magnetar::{
 };
 use moonpool_core::TokioProviders;
 use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{Read, Write},
+    net::TcpStream,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 use streaming_core::{
     Emit, EmitId, GraphId, NodeId, OpContext, OpFactory, OpRef, Origin, PartitionReader, Position, Registry,
     SinkConnector, SliceId, SourceConnector, SourceRecord, StaticSecrets, SystemClock, TenantId, datum,

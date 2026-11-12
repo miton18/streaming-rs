@@ -6,9 +6,8 @@
 //! byte stream and yields complete [`Value`]s as they become available.
 //! Bulk strings are binary safe.
 
-use std::fmt;
-
 use bytes::{Buf, Bytes, BytesMut};
+use std::fmt;
 
 /// Default cap on a single bulk string (the protocol allows 512 MiB).
 pub const DEFAULT_MAX_BULK: usize = 64 * 1024 * 1024;

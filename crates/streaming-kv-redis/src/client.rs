@@ -1,7 +1,13 @@
 //! The pooled RESP client and its [`Kv`] implementation.
 
-use std::collections::BTreeMap;
-
+#[cfg(feature = "tls")]
+use crate::config::config_error;
+#[cfg(not(feature = "tls"))]
+use crate::config::tls_unavailable;
+use crate::{
+    config::{MAX_KEY_BYTES, RedisConfig},
+    resp::{Decoder, Value, encode_command},
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{
@@ -12,17 +18,9 @@ use futures::{
 use futures_rustls::{TlsConnector, rustls::pki_types::ServerName};
 use moonpool_core::{NetworkProvider, Providers, TimeProvider};
 use parking_lot::Mutex;
+use std::collections::BTreeMap;
 use streaming_core::{Kv, KvError};
 use tokio::sync::Semaphore;
-
-#[cfg(feature = "tls")]
-use crate::config::config_error;
-#[cfg(not(feature = "tls"))]
-use crate::config::tls_unavailable;
-use crate::{
-    config::{MAX_KEY_BYTES, RedisConfig},
-    resp::{Decoder, Value, encode_command},
-};
 
 /// Object-safe alias for the byte streams a connection runs over.
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}

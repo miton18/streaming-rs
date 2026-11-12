@@ -11,15 +11,13 @@
 //! Sources and sinks are connectors: they talk to the outside world and are
 //! implemented directly against [`SourceConnector`] and [`SinkConnector`].
 
-use std::{any::Any, time::Duration};
-
-use async_trait::async_trait;
-use serde::{Serialize, de::DeserializeOwned};
-
 use crate::{
     data::{Datum, Emit, Key, Position},
     time::{Timestamp, Window},
 };
+use async_trait::async_trait;
+use serde::{Serialize, de::DeserializeOwned};
+use std::{any::Any, time::Duration};
 
 /// Failure while building or running an operator.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

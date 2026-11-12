@@ -7,7 +7,6 @@
 //! removes them at the end.
 
 use std::collections::BTreeMap;
-
 use streaming_core::{Kv, KvError};
 
 macro_rules! ensure {

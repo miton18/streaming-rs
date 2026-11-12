@@ -7,6 +7,11 @@
 //! | `demo/by-user@1` | key_by | `Event` | |
 //! | `demo/slow-sink@1` | sink | any | `{"latencyMs": 0}` |
 
+use async_trait::async_trait;
+use moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     sync::{
@@ -15,12 +20,6 @@ use std::{
     },
     time::Duration,
 };
-
-use async_trait::async_trait;
-use moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider};
-use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use streaming_core::{
     Clock, Emit, GraphSpec, OpError, Registry, SinkConnector, SinkError, SourceConnector, SystemClock, TenantId,
     TypeTag, datum,
@@ -300,10 +299,9 @@ pub fn graphs() -> Vec<GraphSpec> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use moonpool_core::TokioProviders;
     use streaming_core::Topology;
-
-    use super::*;
 
     #[test]
     fn demo_graphs_are_valid() {

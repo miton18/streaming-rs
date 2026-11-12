@@ -1,13 +1,12 @@
 //! The embedded web UI (`ui/` folder). In debug builds the files are read
 //! from disk, so the UI can be edited without rebuilding.
 
+use crate::error::{self, ApiError};
 use axum::{
     http::{HeaderValue, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
 use rust_embed::RustEmbed;
-
-use crate::error::{self, ApiError};
 
 #[derive(RustEmbed)]
 #[folder = "ui/"]

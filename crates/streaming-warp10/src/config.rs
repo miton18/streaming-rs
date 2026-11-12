@@ -1,12 +1,10 @@
 //! Configuration of the sink.
 
-use std::{fmt, time::Duration};
-
+use crate::{gts::TimeUnit, http::Endpoint};
 use serde::Deserialize;
 use serde_json::Value;
+use std::{fmt, time::Duration};
 use streaming_core::{OpError, parse_duration};
-
-use crate::{gts::TimeUnit, http::Endpoint};
 
 /// Default request timeout.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -140,9 +138,8 @@ impl Warp10Config {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
+    use serde_json::json;
 
     fn literal(v: &Value) -> Result<String, OpError> {
         v.as_str()

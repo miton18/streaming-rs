@@ -1,8 +1,7 @@
 //! Configuration and limits.
 
-use std::time::Duration;
-
 use crate::{error::GossipError, wire};
+use std::time::Duration;
 
 /// Size limits enforced on the gossiped state.
 ///

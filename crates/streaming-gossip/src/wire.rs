@@ -27,10 +27,9 @@
 //! functions below compute the exact encoded sizes so that deltas can be
 //! filled up to a byte budget without serialising twice.
 
+use crate::error::WireError;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
-
-use crate::error::WireError;
 
 /// Protocol version byte, first byte of every payload.
 pub const PROTOCOL_VERSION: u8 = 1;

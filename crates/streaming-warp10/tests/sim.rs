@@ -16,6 +16,12 @@
 //! exact-equality check is only enforced on seeds without any (counts are
 //! printed by the test).
 
+use async_trait::async_trait;
+use moonpool_sim::{
+    Attrition, AttritionScope, Chaos, ChaosMode, Invariant, Process, RandomProvider, SIM_FAULT_EVENT_NAME, SimContext,
+    SimulationBuilder, SimulationError, SimulationResult, TimeProvider, TraceQuery, Workload, assert_always,
+    assert_sometimes,
+};
 use std::{
     cell::Cell,
     collections::BTreeMap,
@@ -24,13 +30,6 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
-};
-
-use async_trait::async_trait;
-use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, Invariant, Process, RandomProvider, SIM_FAULT_EVENT_NAME, SimContext,
-    SimulationBuilder, SimulationError, SimulationResult, TimeProvider, TraceQuery, Workload, assert_always,
-    assert_sometimes,
 };
 use streaming_core::{Emit, EmitId, NodeId, Origin, Position, SinkConnector, SliceId, datum};
 use streaming_warp10::{

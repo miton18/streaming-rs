@@ -1,7 +1,6 @@
 //! Smoke test: a real listener and a real HTTP client.
 
 use std::sync::Arc;
-
 use streaming_api::{ApiConfig, ApiState, serve};
 use streaming_core::{Clock, MemKv, SystemClock};
 

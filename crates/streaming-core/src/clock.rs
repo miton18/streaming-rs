@@ -1,11 +1,10 @@
 //! Wall clock and secrets: the two ambient services operators may need.
 
+use crate::{ids::TenantId, time::Timestamp};
 use std::{
     collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
 };
-
-use crate::{ids::TenantId, time::Timestamp};
 
 /// Source of wall-clock time, in milliseconds since the Unix epoch.
 ///

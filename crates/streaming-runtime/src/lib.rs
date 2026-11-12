@@ -14,9 +14,8 @@
 //! Everything is generic over [`moonpool_core::Providers`]: the same code runs
 //! on tokio in production and under deterministic simulation.
 
-use std::sync::Arc;
-
 use moonpool_core::Providers;
+use std::sync::Arc;
 use streaming_core::{Clock, DynKv, Registry, SecretProvider};
 
 pub mod builtin;

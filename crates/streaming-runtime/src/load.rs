@@ -1,8 +1,7 @@
 //! Resource usage of the worker process.
 
-use std::time::Instant;
-
 use parking_lot::Mutex;
+use std::time::Instant;
 use streaming_core::control::Load;
 
 /// Measures the load of the process a worker runs in.

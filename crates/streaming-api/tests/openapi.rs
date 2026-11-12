@@ -1,8 +1,7 @@
 //! The OpenAPI document: complete, consistent, and committed.
 
-use std::collections::BTreeSet;
-
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 fn document() -> Value {
     serde_json::to_value(streaming_api::openapi()).unwrap()

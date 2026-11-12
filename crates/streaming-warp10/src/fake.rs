@@ -18,21 +18,19 @@
 //! Faults are queued with [`FakeWarp10::push_fault`] and consumed one per
 //! well-formed, authenticated request, in order.
 
+use crate::{
+    gts::{GtsValue, parse_line},
+    http::{HttpError, Limits, ReadError, build_response, header, read_request},
+};
+use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use moonpool_core::{NetworkProvider, Providers, TaskProvider, TcpListenerTrait, TimeProvider};
+use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
     sync::Arc,
 };
-
-use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use moonpool_core::{NetworkProvider, Providers, TaskProvider, TcpListenerTrait, TimeProvider};
-use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
-
-use crate::{
-    gts::{GtsValue, parse_line},
-    http::{HttpError, Limits, ReadError, build_response, header, read_request},
-};
 
 /// Identity of a stored point. The timestamp is the raw one received, in the
 /// platform unit of the sender.

@@ -1,10 +1,9 @@
 //! `Warp10Sink<TokioProviders>` against the fake ingress over real localhost
 //! TCP, plus a few hand-written misbehaving servers.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
-
 use moonpool_core::{NetworkProvider, Providers, TcpListenerTrait, TokioProviders};
 use serde_json::json;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use streaming_core::{
     Emit, EmitId, GraphId, NodeId, OpFactory, OpRef, Origin, Position, Registry, SinkConnector, SliceId, StaticSecrets,
     SystemClock, TenantId, datum,

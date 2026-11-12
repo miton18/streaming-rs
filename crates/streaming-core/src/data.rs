@@ -5,14 +5,12 @@
 //! type-erased values ([`Datum`]); the registry checks type compatibility when
 //! a graph is submitted, and operators downcast on the hot path.
 
-use std::{any::Any, fmt, str::FromStr, sync::Arc};
-
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-
 use crate::{
     ids::SliceId,
     time::{Timestamp, Window},
 };
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::{any::Any, fmt, str::FromStr, sync::Arc};
 
 /// A type-erased, cheaply clonable value.
 pub type Datum = Arc<dyn Any + Send + Sync>;

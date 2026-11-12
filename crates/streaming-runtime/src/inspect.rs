@@ -1,9 +1,8 @@
 //! Read-only views of what a slice has durably committed, for tooling and
 //! tests. Nothing here is needed by a worker.
 
-use streaming_core::{Kv, KvError, Position, SliceKey, Timestamp};
-
 use crate::state::{self, NO_WATERMARK, StateError};
+use streaming_core::{Kv, KvError, Position, SliceKey, Timestamp};
 
 /// The last commit of a slice, as found in its log.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -12,6 +12,7 @@
 //! Nothing internal goes into an answer: no store key, address or driver
 //! message, no configuration value (it may hold a secret). Those are logged.
 
+use crate::control::ControlError;
 use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -21,8 +22,6 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use streaming_core::{IdError, IdProblem, KvError, MAX_ID_LEN, SpecError, WiringRule};
 use streaming_openapi::{OperationContext, OperationOutput};
-
-use crate::control::ControlError;
 
 /// One kind of error: its code, status and message template.
 #[derive(Debug, PartialEq, Eq)]
@@ -504,9 +503,8 @@ impl From<ControlError> for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn codes_are_unique_constants() {

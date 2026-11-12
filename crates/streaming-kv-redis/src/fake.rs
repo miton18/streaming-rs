@@ -14,6 +14,15 @@
 //! server task being crashed and restarted: boot a fresh
 //! `fake.clone().serve(..)` and the old state is still there.
 
+use crate::resp::{Decoder, Value, encode_value};
+use bytes::Bytes;
+use futures::{
+    StreamExt,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    stream::FuturesUnordered,
+};
+use moonpool_core::{NetworkProvider, Providers, TcpListenerTrait, TimeProvider, select};
+use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashMap},
     future::Future,
@@ -25,18 +34,7 @@ use std::{
     },
     time::Duration,
 };
-
-use bytes::Bytes;
-use futures::{
-    StreamExt,
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    stream::FuturesUnordered,
-};
-use moonpool_core::{NetworkProvider, Providers, TcpListenerTrait, TimeProvider, select};
-use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
-
-use crate::resp::{Decoder, Value, encode_value};
 
 /// `DEL` key limit enforced like Materia KV.
 pub const FAKE_MAX_KEYS_PER_DEL: usize = 100;

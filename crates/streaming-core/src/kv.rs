@@ -8,6 +8,9 @@
 //! Every error must be treated as *outcome unknown*: the command may or may
 //! not have been applied. Callers are written to be safe under blind retry.
 
+use async_trait::async_trait;
+use parking_lot::Mutex;
+use serde::{Serialize, de::DeserializeOwned};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -15,10 +18,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-
-use async_trait::async_trait;
-use parking_lot::Mutex;
-use serde::{Serialize, de::DeserializeOwned};
 
 /// A KV failure. The outcome of the failed command is unknown.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -339,9 +338,8 @@ impl Kv for MemKv {
 
 #[cfg(test)]
 mod tests {
-    use futures::executor::block_on;
-
     use super::*;
+    use futures::executor::block_on;
 
     #[test]
     fn hsetnx_is_a_compare_and_set() {

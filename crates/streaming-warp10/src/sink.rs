@@ -1,17 +1,16 @@
 //! [`Warp10Sink`]: the `SinkConnector`.
 
+use crate::{
+    config::Warp10Config,
+    gts::{Gts, encode_line},
+    http::{Limits, Response, build_request, read_response},
+};
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 #[cfg(feature = "tls")]
 use futures_rustls::{TlsConnector, rustls::pki_types::ServerName};
 use moonpool_core::{NetworkProvider, Providers, TimeProvider};
 use streaming_core::{Emit, OpError, SinkConnector, SinkError, ops::downcast};
-
-use crate::{
-    config::Warp10Config,
-    gts::{Gts, encode_line},
-    http::{Limits, Response, build_request, read_response},
-};
 
 /// Longest excerpt of an error body put in a [`SinkError`], in characters.
 const EXCERPT_CHARS: usize = 200;
@@ -212,11 +211,10 @@ impl<P: Providers> SinkConnector for Warp10Sink<P> {
 
 #[cfg(test)]
 mod tests {
-    use moonpool_core::TokioProviders;
-    use streaming_core::{EmitId, Origin, Position, SliceId, datum};
-
     use super::*;
     use crate::gts::TimeUnit;
+    use moonpool_core::TokioProviders;
+    use streaming_core::{EmitId, Origin, Position, SliceId, datum};
 
     pub(crate) fn emit(n: u64, value: streaming_core::Datum) -> Emit {
         let origin = Origin::source(Position(0, n, 0));

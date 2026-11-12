@@ -1,6 +1,16 @@
 //! A worker: the process-level loop that makes the local actors match what
 //! the KV says should run here, and reports back.
 
+use crate::{
+    RuntimeEnv,
+    controller::{self, ControllerState},
+    load::{LoadProbe, ProcessLoad},
+    metrics::{ActorSample, SliceLifetime, SliceSample, snapshot_actor, snapshot_slice},
+    scope::TaskScope,
+    slice::{Control, SliceExit, SliceParams, SliceShared, run_slice},
+};
+use async_trait::async_trait;
+use moonpool_core::{Providers, RandomProvider, TimeProvider};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -9,9 +19,6 @@ use std::{
     },
     time::Duration,
 };
-
-use async_trait::async_trait;
-use moonpool_core::{Providers, RandomProvider, TimeProvider};
 use streaming_core::{
     DynKv, GraphKey, GraphSpec, KvError, NodeId, SliceKey, TenantId, Timestamp, Topology, WorkerId,
     control::{
@@ -22,15 +29,6 @@ use streaming_core::{
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-
-use crate::{
-    RuntimeEnv,
-    controller::{self, ControllerState},
-    load::{LoadProbe, ProcessLoad},
-    metrics::{ActorSample, SliceLifetime, SliceSample, snapshot_actor, snapshot_slice},
-    scope::TaskScope,
-    slice::{Control, SliceExit, SliceParams, SliceShared, run_slice},
-};
 
 /// How workers learn about each other.
 ///

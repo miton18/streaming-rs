@@ -49,6 +49,12 @@ pub mod error;
 pub mod state;
 pub mod wire;
 
+pub use config::{GossipConfig, Limits};
+pub use error::{GossipError, WireError};
+use moonpool_core::{NetworkProvider, Providers, RandomProvider, TaskProvider, TcpListenerTrait, TimeProvider};
+use parking_lot::Mutex;
+use state::{ClusterState, StateConfig, TargetRng};
+pub use state::{Member, NodeView};
 use std::{
     future::Future,
     sync::{
@@ -57,13 +63,6 @@ use std::{
     },
     time::Duration,
 };
-
-pub use config::{GossipConfig, Limits};
-pub use error::{GossipError, WireError};
-use moonpool_core::{NetworkProvider, Providers, RandomProvider, TaskProvider, TcpListenerTrait, TimeProvider};
-use parking_lot::Mutex;
-use state::{ClusterState, StateConfig, TargetRng};
-pub use state::{Member, NodeView};
 use tokio::sync::watch;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use wire::{Delta, Message};

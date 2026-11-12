@@ -2,8 +2,12 @@
 //! attribute; [`api`] collects them, and the OpenAPI document is derived from
 //! their signatures.
 
-use std::sync::Arc;
-
+use crate::{
+    ApiState,
+    control::{self, ControlError},
+    error::{self, ApiError},
+    status::{self, GraphDetail, MemberReport},
+};
 use axum::{
     Extension, Router,
     body::Bytes,
@@ -14,19 +18,13 @@ use axum::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
+use std::sync::Arc;
 use streaming_core::{
     Catalog, GraphId, GraphKey, GraphSpec, NodeId, TenantId,
     control::{GraphIndexEntry, OutputRow, RunState, TenantRecord},
     keys,
 };
 use streaming_openapi::{ApiRouter, Info, OpenApi, OperationContext, OperationInput, OperationOutput, route};
-
-use crate::{
-    ApiState,
-    control::{self, ControlError},
-    error::{self, ApiError},
-    status::{self, GraphDetail, MemberReport},
-};
 
 type ApiResult<T> = Result<axum::Json<T>, ApiError>;
 

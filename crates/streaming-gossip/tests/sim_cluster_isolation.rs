@@ -5,11 +5,10 @@
 
 mod common;
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use common::{NodeParams, Registry, builder_with, check_report, convergence_gap, fail, seeds, sleep};
 use moonpool_sim::{SimContext, SimulationResult, TimeProvider, Workload, assert_always, assert_sometimes};
+use std::time::Duration;
 
 const N: usize = 4;
 

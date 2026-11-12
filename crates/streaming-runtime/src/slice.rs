@@ -7,6 +7,19 @@
 //! epoch, the *commit* actor writes the epoch to the KV in one field. The root
 //! only acknowledges its input once the epoch is committed.
 
+use crate::{
+    RuntimeEnv,
+    mailbox::{Barrier, Input, Inputs, Msg, Outputs},
+    metrics::{ActorIdent, ActorMetrics, Meter, SliceMetrics, ts_key},
+    mutation::{Mutant, planted},
+    scope::TaskScope,
+    state::{
+        self, CommitOutcome, CommitRecord, NO_WATERMARK, NodeChanges, StateEntry, StateError, WindowChanges, emitted,
+    },
+};
+use futures::FutureExt;
+use moonpool_core::{Providers, TaskProvider, TimeProvider};
+use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     future::Future,
@@ -14,10 +27,6 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
-
-use futures::FutureExt;
-use moonpool_core::{Providers, TaskProvider, TimeProvider};
-use parking_lot::Mutex;
 use streaming_core::{
     DynAggregator, DynKey, DynMap, Emit, EmitId, Key, KvError, NodeId, OpContext, OpError, OpFactory, OpKind, Origin,
     PartitionReader, Position, Record, SinkConnector, SliceId, SliceKey, SourceConnector, Timestamp, Topology, Window,
@@ -29,17 +38,6 @@ use streaming_core::{
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-
-use crate::{
-    RuntimeEnv,
-    mailbox::{Barrier, Input, Inputs, Msg, Outputs},
-    metrics::{ActorIdent, ActorMetrics, Meter, SliceMetrics, ts_key},
-    mutation::{Mutant, planted},
-    scope::TaskScope,
-    state::{
-        self, CommitOutcome, CommitRecord, NO_WATERMARK, NodeChanges, StateEntry, StateError, WindowChanges, emitted,
-    },
-};
 
 const MIN_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_BACKOFF: Duration = Duration::from_secs(2);

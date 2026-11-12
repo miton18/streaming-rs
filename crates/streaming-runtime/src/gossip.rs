@@ -6,14 +6,13 @@
 //! rejoining the cluster resynchronises in a few exchanges whatever the
 //! number of graphs.
 
+use crate::worker::Membership;
 use async_trait::async_trait;
 use moonpool_core::Providers;
 use streaming_core::{DynKv, Timestamp, WorkerId, control::MemberInfo, keys};
 use streaming_gossip::Gossip;
 pub use streaming_gossip::{GossipConfig, GossipError};
 use tokio_util::sync::{CancellationToken, DropGuard};
-
-use crate::worker::Membership;
 
 /// The gossip key under which a worker publishes its [`MemberInfo`].
 const MEMBER_KEY: &str = "member";

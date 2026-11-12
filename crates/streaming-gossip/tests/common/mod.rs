@@ -4,14 +4,13 @@
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
-
 use async_trait::async_trait;
 use moonpool_sim::{
     Process, SimContext, SimProviders, SimTimeProvider, SimulationBuilder, SimulationError, SimulationReport,
     SimulationResult, TimeProvider,
 };
 use parking_lot::Mutex;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use streaming_gossip::{Gossip, GossipConfig, GossipStats, Limits};
 
 pub const PORT: u16 = 7000;

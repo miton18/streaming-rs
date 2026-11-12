@@ -21,6 +21,12 @@
 //! the checks that corruption can legitimately fool are only enforced on
 //! seeds without any (reported in the test output).
 
+use async_trait::async_trait;
+use moonpool_sim::{
+    Attrition, AttritionScope, Chaos, ChaosMode, Invariant, Process, RandomProvider, SIM_FAULT_EVENT_NAME, SimContext,
+    SimulationBuilder, SimulationResult, TimeProvider, TraceQuery, Workload, assert_always, assert_sometimes,
+};
+use parking_lot::Mutex;
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -30,13 +36,6 @@ use std::{
     },
     time::Duration,
 };
-
-use async_trait::async_trait;
-use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, Invariant, Process, RandomProvider, SIM_FAULT_EVENT_NAME, SimContext,
-    SimulationBuilder, SimulationResult, TimeProvider, TraceQuery, Workload, assert_always, assert_sometimes,
-};
-use parking_lot::Mutex;
 use streaming_core::{Kv, KvError};
 use streaming_kv_redis::{FakeRedis, RedisConfig, RedisKv};
 

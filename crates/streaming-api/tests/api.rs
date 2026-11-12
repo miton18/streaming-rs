@@ -1,10 +1,5 @@
 //! Integration tests: the real router over a `MemKv`.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicI64, Ordering},
-};
-
 use axum::{
     Router,
     body::Body,
@@ -12,6 +7,10 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
 use streaming_api::{ApiConfig, ApiState, router};
 use streaming_core::{
     DynKv, GraphKey, MemKv, OpDescriptor, OpKind, OpRef, Registry, TypeTag,

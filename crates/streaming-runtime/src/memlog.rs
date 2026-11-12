@@ -4,11 +4,10 @@
 //! simulations: producers append, readers poll by position, acknowledged
 //! records are released.
 
-use std::{collections::VecDeque, sync::Arc, time::Duration};
-
 use async_trait::async_trait;
 use moonpool_core::{Providers, TimeProvider};
 use parking_lot::Mutex;
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 use streaming_core::{Datum, PartitionReader, Position, SourceConnector, SourceError, SourceRecord, Timestamp};
 use tokio::sync::Notify;
 
@@ -215,9 +214,8 @@ impl<P: Providers> PartitionReader for MemLogReader<P> {
 
 #[cfg(test)]
 mod tests {
-    use streaming_core::datum;
-
     use super::*;
+    use streaming_core::datum;
 
     #[test]
     fn read_ack_and_release() {

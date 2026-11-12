@@ -103,8 +103,6 @@ mod client;
 mod sink;
 mod source;
 
-use std::sync::Arc;
-
 pub use config::{
     ConnectionSettings, DedupConfig, EventTimeMode, InitialPosition, ServiceUrl, SinkConfig, SourceConfig,
 };
@@ -113,6 +111,7 @@ pub use position::{end_position_of, partition_topic, position_of};
 pub use sequence::{SequenceLayout, SequenceState};
 pub use sink::{EMIT_ID_PROPERTY, PulsarOutput, PulsarSink, WriteStats, producer_name_for, route};
 pub use source::{PulsarMessage, PulsarSource};
+use std::sync::Arc;
 use streaming_core::{ParamSpec, Registry, SinkConnector, SourceConnector, TypeTag};
 
 /// Reference of the source operator.
@@ -255,13 +254,12 @@ fn sink_params() -> Vec<ParamSpec> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use moonpool_core::TokioProviders;
     use serde_json::{Value, json};
     use streaming_core::{
         GraphId, NodeId, OpContext, OpError, OpFactory, OpKind, OpRef, StaticSecrets, SystemClock, TenantId,
     };
-
-    use super::*;
 
     fn context() -> OpContext<TokioProviders> {
         let tenant = TenantId::new("acme").unwrap();

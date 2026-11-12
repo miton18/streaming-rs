@@ -6,19 +6,17 @@
 //! outcome is two workers running the same slice for a while, which the
 //! commit log arbitrates.
 
+use crate::{RuntimeEnv, state};
+use moonpool_core::{Providers, TimeProvider};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
-
-use moonpool_core::{Providers, TimeProvider};
 use streaming_core::{
     GraphKey, GraphSpec, Kv, KvError, NodeSpec, OpContext, OpFactory, OpKind, SliceId, SliceKey, Topology, WorkerId,
     control::{DesiredState, GraphIndexEntry, GraphPlan, Load, MemberInfo, Placement, RunState},
     keys,
 };
-
-use crate::{RuntimeEnv, state};
 
 /// A worker as the placement policy sees it.
 #[derive(Debug, Clone, PartialEq)]

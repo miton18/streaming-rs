@@ -1,7 +1,6 @@
 //! Client configuration and URL parsing.
 
 use std::{fmt, time::Duration};
-
 use streaming_core::KvError;
 
 /// Largest key Materia KV accepts.

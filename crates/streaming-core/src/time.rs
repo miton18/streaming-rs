@@ -1,8 +1,7 @@
 //! Event time, windows and human-readable durations.
 
-use std::{fmt, str::FromStr, time::Duration};
-
 use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr, time::Duration};
 
 /// Milliseconds since the Unix epoch.
 pub type Timestamp = i64;
@@ -123,9 +122,8 @@ impl schemars::JsonSchema for DurationText {
 
 /// `#[serde(with = "streaming_core::time::duration_str")]` for config structs.
 pub mod duration_str {
-    use std::time::Duration;
-
     use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
 
     /// Serialize as a human-readable string.
     pub fn serialize<S: Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {

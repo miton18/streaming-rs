@@ -7,17 +7,16 @@
 
 mod common;
 
-use std::{
-    collections::BTreeMap,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
-
 use async_trait::async_trait;
 use common::{NodeParams, Registry, builder_with, check_report, convergence_gap, fail, ground_truth, seeds, sleep};
 use moonpool_sim::{
     Attrition, AttritionScope, Chaos, ChaosMode, SimContext, SimulationResult, TimeProvider, Workload, assert_always,
     assert_sometimes,
+};
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 use streaming_gossip::{GossipError, Limits, wire};
 

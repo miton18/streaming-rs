@@ -5,6 +5,9 @@
 //! (*backpressured*). The time spent in each is what the control plane uses to
 //! locate the bottleneck of a graph.
 
+use crate::mailbox::Msg;
+use moonpool_core::{Providers, TimeProvider};
+use parking_lot::Mutex;
 use std::{
     sync::{
         Arc,
@@ -12,16 +15,11 @@ use std::{
     },
     time::Duration,
 };
-
-use moonpool_core::{Providers, TimeProvider};
-use parking_lot::Mutex;
 use streaming_core::{
     GraphId, NodeId, OpRef, Position, SliceId, TenantId, Timestamp,
     control::{ActorKind, ActorSnapshot, ActorState, EmittedWindow, SliceSnapshot},
 };
 use tokio::sync::mpsc;
-
-use crate::mailbox::Msg;
 
 /// What an actor is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

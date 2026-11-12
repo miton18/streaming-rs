@@ -3,10 +3,9 @@
 //!
 //! Serialized shapes follow `docs/http-api.md`.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use streaming_core::{
     Catalog, GraphSpec, NodeId, OpDescriptor, SliceId, SliceKey, TenantId, Timestamp, WorkerId,
     control::{
@@ -869,9 +868,8 @@ pub fn dot(spec: &GraphSpec) -> String {
 
 #[cfg(test)]
 mod tests {
-    use streaming_core::{GraphId, NodeSpec, OpKind, OpRef, TypeTag};
-
     use super::*;
+    use streaming_core::{GraphId, NodeSpec, OpKind, OpRef, TypeTag};
 
     const NOW: i64 = 1_000_000;
     const TIMEOUT: i64 = 5_000;

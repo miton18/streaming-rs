@@ -61,15 +61,13 @@
 //! `gc_grace` above three timeouts plus the clock difference between workers,
 //! every write to a window lands before the last delete.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use serde::{Deserialize, Serialize};
-use streaming_core::{Key, Kv, KvError, NodeId, Position, SliceKey, Timestamp, Window, keys};
-
 use crate::{
     metrics::ts_key,
     mutation::{Mutant, planted},
 };
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use streaming_core::{Key, Kv, KvError, NodeId, Position, SliceKey, Timestamp, Window, keys};
 
 /// Watermark of a slice that has not seen any event time yet.
 pub(crate) const NO_WATERMARK: Timestamp = i64::MIN;
@@ -601,10 +599,9 @@ pub(crate) async fn unindex_windows(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use futures::executor::block_on;
     use streaming_core::MemKv;
-
-    use super::*;
 
     fn slice() -> SliceKey {
         "acme/g/src.events.0".parse().unwrap()

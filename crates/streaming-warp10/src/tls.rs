@@ -1,8 +1,7 @@
 //! rustls client configuration (feature `tls`).
 
-use std::sync::Arc;
-
 use futures_rustls::rustls::{ClientConfig, RootCertStore, crypto::ring, pki_types::CertificateDer};
+use std::sync::Arc;
 
 /// Trust anchors: the Mozilla web PKI roots plus `extra_roots_der`.
 /// Crypto provider: ring.

@@ -2,9 +2,8 @@
 
 mod common;
 
-use std::sync::Arc;
-
 use moonpool_core::TokioProviders;
+use std::sync::Arc;
 use streaming_core::{Kv, KvError, MemKv};
 use streaming_kv_redis::{
     FakeRedis, RedisConfig, RedisKv,

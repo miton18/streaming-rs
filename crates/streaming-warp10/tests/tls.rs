@@ -4,8 +4,6 @@
 //! skipped with a notice when it is missing). The sink trusts it through
 //! `Warp10Config::tls_extra_roots_der`.
 
-use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
-
 use futures_rustls::{
     TlsAcceptor,
     rustls::{
@@ -15,6 +13,7 @@ use futures_rustls::{
     },
 };
 use moonpool_core::TokioProviders;
+use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
 use streaming_core::{Emit, EmitId, NodeId, Origin, Position, SinkConnector, SliceId, datum};
 use streaming_warp10::{
     Gts, GtsValue, Warp10Config, Warp10Sink,

@@ -7,12 +7,11 @@
 //! record sent before it belongs to the epoch, and once every terminal actor
 //! of a slice has seen the barrier, the epoch can be committed atomically.
 
+use crate::metrics::Meter;
 use futures::future::select_all;
 use moonpool_core::Providers;
 use streaming_core::{Record, Timestamp};
 use tokio::sync::mpsc;
-
-use crate::metrics::Meter;
 
 /// End-of-epoch marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,9 +123,8 @@ impl Outputs {
 
 #[cfg(test)]
 mod tests {
-    use futures::FutureExt;
-
     use super::*;
+    use futures::FutureExt;
 
     fn barrier(epoch: u64) -> Msg {
         Msg::Barrier(Barrier { epoch, watermark: 0 })

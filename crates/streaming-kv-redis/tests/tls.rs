@@ -6,8 +6,6 @@
 
 mod common;
 
-use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
-
 use futures_rustls::{
     TlsAcceptor,
     rustls::{
@@ -17,6 +15,7 @@ use futures_rustls::{
     },
 };
 use moonpool_core::TokioProviders;
+use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
 use streaming_core::KvError;
 use streaming_kv_redis::{FakeRedis, RedisConfig, RedisKv, testkit::conformance};
 use tokio::net::TcpListener;

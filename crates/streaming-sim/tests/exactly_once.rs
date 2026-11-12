@@ -4,10 +4,9 @@
 //! Run a specific seed with `SIM_SEEDS=42,43 cargo test -p streaming-sim`,
 //! more iterations with `SIM_ITERATIONS=1000`.
 
-use std::{sync::Arc, time::Duration};
-
 use moonpool_sim::{Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport};
 use parking_lot::Mutex;
+use std::{sync::Arc, time::Duration};
 use streaming_sim::{Auditor, Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
 
 fn iterations(default: usize) -> usize {

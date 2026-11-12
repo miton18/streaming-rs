@@ -3,6 +3,7 @@
 
 mod common;
 
+use moonpool_core::TokioProviders;
 use std::{
     collections::HashSet,
     sync::{
@@ -11,8 +12,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-
-use moonpool_core::TokioProviders;
 use streaming_core::{Kv, KvError};
 use streaming_kv_redis::{FakeRedis, RedisConfig, RedisKv};
 use tokio::{
