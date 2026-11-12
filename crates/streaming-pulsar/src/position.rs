@@ -35,9 +35,7 @@ pub fn end_position_of(id: &MessageId) -> Option<Position> {
 
 /// Name of partition `partition` of a partitioned topic.
 #[must_use]
-pub fn partition_topic(topic: &str, partition: u32) -> String {
-    format!("{topic}-partition-{partition}")
-}
+pub fn partition_topic(topic: &str, partition: u32) -> String { format!("{topic}-partition-{partition}") }
 
 #[cfg(test)]
 mod tests {

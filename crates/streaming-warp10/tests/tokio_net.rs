@@ -75,9 +75,7 @@ struct Server {
 }
 
 impl Drop for Server {
-    fn drop(&mut self) {
-        self.shutdown.cancel();
-    }
+    fn drop(&mut self) { self.shutdown.cancel(); }
 }
 
 async fn start() -> Server {

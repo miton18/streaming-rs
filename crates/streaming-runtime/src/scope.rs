@@ -28,9 +28,7 @@ impl<P: Providers> Clone for TaskScope<P> {
 
 impl<P: Providers> TaskScope<P> {
     /// A scope killed when `kill` is cancelled.
-    pub fn new(providers: P, kill: CancellationToken) -> Self {
-        Self { providers, kill }
-    }
+    pub fn new(providers: P, kill: CancellationToken) -> Self { Self { providers, kill } }
 
     /// A nested scope: killed with its parent, or on its own.
     #[must_use]
@@ -43,15 +41,11 @@ impl<P: Providers> TaskScope<P> {
 
     /// The kill token of this scope.
     #[must_use]
-    pub fn token(&self) -> &CancellationToken {
-        &self.kill
-    }
+    pub fn token(&self) -> &CancellationToken { &self.kill }
 
     /// The providers tasks are spawned with.
     #[must_use]
-    pub fn providers(&self) -> &P {
-        &self.providers
-    }
+    pub fn providers(&self) -> &P { &self.providers }
 
     /// Spawn a task that stops at its next await point once the scope is killed.
     pub fn spawn<F>(&self, name: &str, future: F) -> <P::Task as TaskProvider>::JoinHandle

@@ -50,9 +50,7 @@ impl<T: DeserializeOwned, S: Send + Sync> FromRequest<S> for JsonBody<T> {
 }
 
 impl<T: JsonSchema> OperationInput for JsonBody<T> {
-    fn describe(operation: &mut OperationContext<'_>) {
-        <axum::Json<T> as OperationInput>::describe(operation);
-    }
+    fn describe(operation: &mut OperationContext<'_>) { <axum::Json<T> as OperationInput>::describe(operation); }
 }
 
 /// Query string parameters. Unlike `axum::extract::Query`, it answers a
@@ -102,9 +100,7 @@ impl OperationOutput for Dot {
 pub(crate) struct OpenApiDocument(Arc<Value>);
 
 impl IntoResponse for OpenApiDocument {
-    fn into_response(self) -> Response {
-        axum::Json(self.0).into_response()
-    }
+    fn into_response(self) -> Response { axum::Json(self.0).into_response() }
 }
 
 impl OperationOutput for OpenApiDocument {
@@ -167,15 +163,11 @@ async fn detail(state: &ApiState, context: &Context, key: &GraphKey) -> Result<O
 /// Answers `ok` as long as the process serves HTTP; it reads nothing from the
 /// store.
 #[route(GET, "/healthz", tag = "cluster")]
-async fn healthz() -> &'static str {
-    "ok"
-}
+async fn healthz() -> &'static str { "ok" }
 
 /// The OpenAPI document of this API.
 #[route(GET, "/api/v1/openapi.json", tag = "cluster")]
-async fn openapi_document(Extension(document): Extension<OpenApiDocument>) -> OpenApiDocument {
-    document
-}
+async fn openapi_document(Extension(document): Extension<OpenApiDocument>) -> OpenApiDocument { document }
 
 /// The workers, the placement and the store.
 ///
@@ -367,9 +359,7 @@ const MAX_LIMIT: usize = 2000;
 struct Limit(Result<usize, String>);
 
 impl Default for Limit {
-    fn default() -> Self {
-        Self(Ok(DEFAULT_LIMIT))
-    }
+    fn default() -> Self { Self(Ok(DEFAULT_LIMIT)) }
 }
 
 impl Limit {
@@ -390,9 +380,7 @@ impl<'de> Deserialize<'de> for Limit {
 }
 
 impl JsonSchema for Limit {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Limit".into()
-    }
+    fn schema_name() -> std::borrow::Cow<'static, str> { "Limit".into() }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
@@ -589,9 +577,7 @@ fn info() -> Info {
 
 /// The OpenAPI document of the API.
 #[must_use]
-pub fn openapi() -> OpenApi {
-    api().openapi(info())
-}
+pub fn openapi() -> OpenApi { api().openapi(info()) }
 
 /// The `/healthz` and `/api/v1` routes.
 pub fn routes() -> Router<ApiState> {

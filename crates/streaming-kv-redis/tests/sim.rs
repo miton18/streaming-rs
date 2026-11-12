@@ -91,9 +91,7 @@ impl World {
         self.saw_crash.store(false, Ordering::SeqCst);
     }
 
-    fn fake(&self) -> FakeRedis {
-        self.fake.lock().clone()
-    }
+    fn fake(&self) -> FakeRedis { self.fake.lock().clone() }
 }
 
 // -- server ---------------------------------------------------------------
@@ -104,9 +102,7 @@ struct FakeRedisProcess {
 
 #[async_trait]
 impl Process for FakeRedisProcess {
-    fn name(&self) -> &str {
-        "fakeredis"
-    }
+    fn name(&self) -> &str { "fakeredis" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // A fresh `serve` on every boot; the data is the shared Arc.
@@ -125,9 +121,7 @@ struct FaultWatch {
 }
 
 impl Invariant for FaultWatch {
-    fn name(&self) -> &'static str {
-        "fault_watch"
-    }
+    fn name(&self) -> &'static str { "fault_watch" }
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
         for e in q.since(SIM_FAULT_EVENT_NAME, &self.cursor) {
@@ -143,9 +137,7 @@ impl Invariant for FaultWatch {
         }
     }
 
-    fn reset(&mut self) {
-        self.cursor.set(0);
-    }
+    fn reset(&mut self) { self.cursor.set(0); }
 }
 
 // -- clients --------------------------------------------------------------
@@ -177,9 +169,7 @@ fn owner_of(value: &[u8]) -> Option<usize> {
     text.strip_prefix('c')?.split('|').next()?.parse().ok()
 }
 
-fn is_timeout(e: &KvError) -> bool {
-    matches!(e, KvError::Unavailable(m) if m.contains("timed out"))
-}
+fn is_timeout(e: &KvError) -> bool { matches!(e, KvError::Unavailable(m) if m.contains("timed out")) }
 
 impl Client {
     fn note_error(&mut self, e: &KvError) {

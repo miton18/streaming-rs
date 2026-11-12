@@ -63,9 +63,7 @@ impl World {
             ..Self::default()
         }
     }
-    fn fake(&self) -> &FakeWarp10 {
-        self.fake.as_ref().unwrap()
-    }
+    fn fake(&self) -> &FakeWarp10 { self.fake.as_ref().unwrap() }
     fn reset(&self) {
         self.fake().reset();
         self.bit_flips.store(0, Ordering::SeqCst);
@@ -81,9 +79,7 @@ struct FakeProcess {
 
 #[async_trait]
 impl Process for FakeProcess {
-    fn name(&self) -> &'static str {
-        "warp10"
-    }
+    fn name(&self) -> &'static str { "warp10" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         loop {
@@ -113,9 +109,7 @@ struct FaultWatch {
 }
 
 impl Invariant for FaultWatch {
-    fn name(&self) -> &'static str {
-        "fault_watch"
-    }
+    fn name(&self) -> &'static str { "fault_watch" }
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
         for e in q.since(SIM_FAULT_EVENT_NAME, &self.cursor) {
@@ -131,9 +125,7 @@ impl Invariant for FaultWatch {
         }
     }
 
-    fn reset(&mut self) {
-        self.cursor.set(0);
-    }
+    fn reset(&mut self) { self.cursor.set(0); }
 }
 
 // -- the workload -----------------------------------------------------------
@@ -207,9 +199,7 @@ struct Writer {
 
 #[async_trait]
 impl Workload for Writer {
-    fn name(&self) -> &'static str {
-        "writer"
-    }
+    fn name(&self) -> &'static str { "writer" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         self.stats = Stats::default();

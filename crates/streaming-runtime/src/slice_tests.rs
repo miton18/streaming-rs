@@ -29,18 +29,10 @@ struct Refusing(Arc<MemKv>);
 
 #[async_trait]
 impl Kv for Refusing {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, KvError> {
-        self.0.get(key).await
-    }
-    async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> {
-        self.0.set(key, value).await
-    }
-    async fn del(&self, keys: Vec<String>) -> Result<(), KvError> {
-        self.0.del(keys).await
-    }
-    async fn incr(&self, key: &str) -> Result<i64, KvError> {
-        self.0.incr(key).await
-    }
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, KvError> { self.0.get(key).await }
+    async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> { self.0.set(key, value).await }
+    async fn del(&self, keys: Vec<String>) -> Result<(), KvError> { self.0.del(keys).await }
+    async fn incr(&self, key: &str) -> Result<i64, KvError> { self.0.incr(key).await }
     async fn hsetnx(&self, key: &str, field: &str, value: Vec<u8>) -> Result<bool, KvError> {
         self.0.hsetnx(key, field, value).await
     }
@@ -53,24 +45,14 @@ impl Kv for Refusing {
         }
         self.0.hset(key, entries).await
     }
-    async fn hget(&self, key: &str, field: &str) -> Result<Option<Vec<u8>>, KvError> {
-        self.0.hget(key, field).await
-    }
-    async fn hgetall(&self, key: &str) -> Result<Vec<(String, Vec<u8>)>, KvError> {
-        self.0.hgetall(key).await
-    }
-    async fn hdel(&self, key: &str, fields: Vec<String>) -> Result<(), KvError> {
-        self.0.hdel(key, fields).await
-    }
+    async fn hget(&self, key: &str, field: &str) -> Result<Option<Vec<u8>>, KvError> { self.0.hget(key, field).await }
+    async fn hgetall(&self, key: &str) -> Result<Vec<(String, Vec<u8>)>, KvError> { self.0.hgetall(key).await }
+    async fn hdel(&self, key: &str, fields: Vec<String>) -> Result<(), KvError> { self.0.hdel(key, fields).await }
 }
 
-fn node() -> NodeId {
-    NodeId::new("count").unwrap()
-}
+fn node() -> NodeId { NodeId::new("count").unwrap() }
 
-fn window() -> Window {
-    Window::new(0, 10_000)
-}
+fn window() -> Window { Window::new(0, 10_000) }
 
 fn ctx(kv: DynKv, gc_grace: Duration) -> ActorCtx<TokioProviders> {
     let providers = TokioProviders::new();
@@ -155,9 +137,7 @@ async fn live(kv: &dyn Kv, ctx: &ActorCtx<TokioProviders>) -> Vec<u64> {
         .collect()
 }
 
-fn field(name: &str, epoch: u64) -> String {
-    keys::state_field(&Key::encode(&name.to_owned()).unwrap(), epoch)
-}
+fn field(name: &str, epoch: u64) -> String { keys::state_field(&Key::encode(&name.to_owned()).unwrap(), epoch) }
 
 #[test]
 fn backoff_doubles_up_to_its_ceiling() {

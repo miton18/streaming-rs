@@ -45,23 +45,17 @@ fn params() -> NodeParams {
 }
 
 /// Upper bound of the bytes of state the cluster minus one node holds.
-fn others_state_bound() -> usize {
-    (N - 1) * limits().max_node_state_bytes()
-}
+fn others_state_bound() -> usize { (N - 1) * limits().max_node_state_bytes() }
 
 /// Number of deltas needed at least to ship that state.
-fn min_deltas() -> usize {
-    others_state_bound().div_ceil(params().delta_budget_bytes - wire::MAX_VARINT_USIZE)
-}
+fn min_deltas() -> usize { others_state_bound().div_ceil(params().delta_budget_bytes - wire::MAX_VARINT_USIZE) }
 
 /// Bound asserted on the number of the rejoining node's own rounds until it
 /// holds the whole cluster state. Each round initiates one exchange (one
 /// delta received); inbound exchanges bring more. The factor absorbs
 /// connect failures / hangs (1 s timeout = 5 rounds) and exchanges with peers
 /// that are themselves still syncing.
-fn max_rounds_to_sync() -> u64 {
-    (2 * min_deltas() + 25) as u64
-}
+fn max_rounds_to_sync() -> u64 { (2 * min_deltas() + 25) as u64 }
 
 static MAX_ROUNDS_SEEN: AtomicU64 = AtomicU64::new(0);
 static MAX_BYTES_SEEN: AtomicU64 = AtomicU64::new(0);
@@ -182,9 +176,7 @@ impl LightWorkload {
 
 #[async_trait]
 impl Workload for LightWorkload {
-    fn name(&self) -> &str {
-        "light-state"
-    }
+    fn name(&self) -> &str { "light-state" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let mut tracked = BTreeMap::new();

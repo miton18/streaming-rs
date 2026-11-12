@@ -16,9 +16,7 @@ use std::{any::Any, fmt, str::FromStr, sync::Arc};
 pub type Datum = Arc<dyn Any + Send + Sync>;
 
 /// Wrap a value into a [`Datum`].
-pub fn datum<T: Any + Send + Sync>(value: T) -> Datum {
-    Arc::new(value)
-}
+pub fn datum<T: Any + Send + Sync>(value: T) -> Datum { Arc::new(value) }
 
 /// A replayable position inside one partition of a source.
 ///
@@ -43,9 +41,7 @@ impl Serialize for Position {
 }
 
 impl schemars::JsonSchema for Position {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Position".into()
-    }
+    fn schema_name() -> std::borrow::Cow<'static, str> { "Position".into() }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
@@ -77,9 +73,7 @@ impl<'de> Deserialize<'de> for Position {
 }
 
 impl fmt::Display for Position {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.0, self.1, self.2)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}.{}.{}", self.0, self.1, self.2) }
 }
 
 impl FromStr for Position {
@@ -103,9 +97,7 @@ pub struct Key(Arc<[u8]>);
 impl Key {
     /// Wrap already-encoded bytes.
     #[must_use]
-    pub fn from_bytes(bytes: impl Into<Arc<[u8]>>) -> Self {
-        Self(bytes.into())
-    }
+    pub fn from_bytes(bytes: impl Into<Arc<[u8]>>) -> Self { Self(bytes.into()) }
 
     /// Encode a typed key.
     pub fn encode<K: Serialize>(key: &K) -> Result<Self, String> {
@@ -121,9 +113,7 @@ impl Key {
 
     /// The encoded bytes.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
+    pub fn as_bytes(&self) -> &[u8] { &self.0 }
 
     /// Lowercase hexadecimal form, used as a KV field name.
     #[must_use]
@@ -165,9 +155,7 @@ impl Key {
 }
 
 impl fmt::Debug for Key {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Key({})", self.display_lossy())
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "Key({})", self.display_lossy()) }
 }
 
 /// Where a record comes from: the source position it derives from, plus a hash
@@ -185,9 +173,7 @@ pub struct Origin {
 impl Origin {
     /// Origin of a record freshly read from a source.
     #[must_use]
-    pub fn source(position: Position) -> Self {
-        Self { position, lineage: 0 }
-    }
+    pub fn source(position: Position) -> Self { Self { position, lineage: 0 } }
 
     /// Origin of the `index`-th output produced by node `node_hash` from a
     /// record with this origin.
@@ -265,21 +251,15 @@ impl EmitId {
 
     /// The id as a string.
     #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+    pub fn as_str(&self) -> &str { &self.0 }
 
     /// A stable 64-bit digest of the id.
     #[must_use]
-    pub fn digest(&self) -> u64 {
-        hash_str(&self.0)
-    }
+    pub fn digest(&self) -> u64 { hash_str(&self.0) }
 }
 
 impl fmt::Display for EmitId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
 }
 
 /// One element handed to a sink.
@@ -323,9 +303,7 @@ pub struct Windowed<V> {
 
 impl<V> Windowed<V> {
     /// Decode the key into its original type.
-    pub fn key<K: DeserializeOwned>(&self) -> Result<K, String> {
-        self.key.decode()
-    }
+    pub fn key<K: DeserializeOwned>(&self) -> Result<K, String> { self.key.decode() }
 }
 
 #[cfg(test)]

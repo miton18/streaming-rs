@@ -51,22 +51,16 @@ struct Coordinates {
 struct Missing;
 
 impl IntoResponse for Missing {
-    fn into_response(self) -> AxumResponse {
-        StatusCode::NOT_FOUND.into_response()
-    }
+    fn into_response(self) -> AxumResponse { StatusCode::NOT_FOUND.into_response() }
 }
 
 impl OperationOutput for Missing {
-    fn describe(operation: &mut OperationContext<'_>) {
-        operation.add_response("404", Response::new("Not found."));
-    }
+    fn describe(operation: &mut OperationContext<'_>) { operation.add_response("404", Response::new("Not found.")); }
 }
 
 /// Liveness.
 #[route(GET, "/healthz")]
-async fn healthz() -> &'static str {
-    "ok"
-}
+async fn healthz() -> &'static str { "ok" }
 
 /// Greet a name
 /// in two lines.

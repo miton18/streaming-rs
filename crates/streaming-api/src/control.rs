@@ -291,9 +291,7 @@ async fn being_deleted(kv: &dyn Kv, graph: &GraphKey) -> Result<bool, ControlErr
     Ok(kv.hget(keys::CLUSTER_DELETING, &graph.to_string()).await?.is_some())
 }
 
-fn not_found_graph(graph: &GraphKey) -> ControlError {
-    ControlError::GraphNotFound(graph.clone())
-}
+fn not_found_graph(graph: &GraphKey) -> ControlError { ControlError::GraphNotFound(graph.clone()) }
 
 /// The index entry of a graph that exists and is not being deleted.
 async fn live_entry(kv: &dyn Kv, graph: &GraphKey) -> Result<GraphIndexEntry, ControlError> {

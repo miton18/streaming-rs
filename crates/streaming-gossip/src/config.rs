@@ -217,9 +217,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_is_valid() {
-        GossipConfig::new("c", "n", 1, "127.0.0.1:7000").validate().unwrap();
-    }
+    fn default_config_is_valid() { GossipConfig::new("c", "n", 1, "127.0.0.1:7000").validate().unwrap(); }
 
     #[test]
     fn inconsistent_configs_are_rejected() {
@@ -286,9 +284,7 @@ mod tests {
         assert_eq!(wire::node_header_size(&nd, usize::MAX), l.max_node_header_bytes());
     }
 
-    fn rejected(c: &GossipConfig) -> bool {
-        matches!(c.validate(), Err(GossipError::InvalidConfig(_)))
-    }
+    fn rejected(c: &GossipConfig) -> bool { matches!(c.validate(), Err(GossipError::InvalidConfig(_))) }
 
     #[test]
     fn identity_lengths_are_inclusive() {

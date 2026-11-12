@@ -19,15 +19,11 @@ pub trait LoadProbe: Send + Sync + 'static {
 pub struct NoLoad;
 
 impl LoadProbe for NoLoad {
-    fn load(&self) -> Load {
-        Load::default()
-    }
+    fn load(&self) -> Load { Load::default() }
 }
 
 impl<F: Fn() -> Load + Send + Sync + 'static> LoadProbe for F {
-    fn load(&self) -> Load {
-        self()
-    }
+    fn load(&self) -> Load { self() }
 }
 
 /// Reads CPU time and resident memory of the current process from `/proc`.
@@ -41,9 +37,7 @@ pub struct ProcessLoad {
 }
 
 impl Default for ProcessLoad {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl ProcessLoad {
@@ -56,9 +50,7 @@ impl ProcessLoad {
     }
 
     /// CPU seconds consumed by the process so far.
-    fn cpu_seconds() -> Option<f64> {
-        parse_cpu_seconds(&std::fs::read_to_string("/proc/self/stat").ok()?)
-    }
+    fn cpu_seconds() -> Option<f64> { parse_cpu_seconds(&std::fs::read_to_string("/proc/self/stat").ok()?) }
 
     /// Resident and total memory, in bytes.
     fn memory() -> Option<(u64, u64)> {

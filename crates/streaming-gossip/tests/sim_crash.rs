@@ -77,9 +77,7 @@ impl CrashWorkload {
 
 #[async_trait]
 impl Workload for CrashWorkload {
-    fn name(&self) -> &str {
-        "crash"
-    }
+    fn name(&self) -> &str { "crash" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let start = ctx.time().now();
@@ -190,9 +188,7 @@ struct ZombieControl {
 
 #[async_trait]
 impl Workload for ZombieControl {
-    fn name(&self) -> &str {
-        "zombie-control"
-    }
+    fn name(&self) -> &str { "zombie-control" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let start = ctx.time().now();

@@ -40,9 +40,7 @@ fn check_sizes(registry: &Registry, params: &NodeParams, n: usize) {
 
 #[async_trait]
 impl Workload for ConvergenceWorkload {
-    fn name(&self) -> &str {
-        "convergence"
-    }
+    fn name(&self) -> &str { "convergence" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // All processes boot at t=0.
@@ -128,22 +126,14 @@ fn run(n: usize, network: Option<ChaosMode>, iterations: u64) {
 }
 
 #[test]
-fn convergence_3_nodes() {
-    run(3, None, 100);
-}
+fn convergence_3_nodes() { run(3, None, 100); }
 
 #[test]
-fn convergence_5_nodes() {
-    run(5, None, 100);
-}
+fn convergence_5_nodes() { run(5, None, 100); }
 
 #[test]
-fn convergence_9_nodes() {
-    run(9, None, 100);
-}
+fn convergence_9_nodes() { run(9, None, 100); }
 
 /// Heavier network chaos (partitions, clogging, random closes, pair latency).
 #[test]
-fn convergence_5_nodes_random_network_chaos() {
-    run(5, Some(ChaosMode::Random), 100);
-}
+fn convergence_5_nodes_random_network_chaos() { run(5, Some(ChaosMode::Random), 100); }

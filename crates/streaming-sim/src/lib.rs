@@ -94,33 +94,23 @@ impl SinkProbe {
 
     /// The value held for each emit id.
     #[must_use]
-    pub fn values(&self) -> Vec<String> {
-        self.rows.lock().values().map(|(_, value)| value.clone()).collect()
-    }
+    pub fn values(&self) -> Vec<String> { self.rows.lock().values().map(|(_, value)| value.clone()).collect() }
 
     /// Number of distinct emit ids received.
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.rows.lock().len()
-    }
+    pub fn len(&self) -> usize { self.rows.lock().len() }
 
     /// Whether nothing was received.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.rows.lock().is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.rows.lock().is_empty() }
 
     /// Number of writes that hit an emit id already present.
     #[must_use]
-    pub fn rewrites(&self) -> u64 {
-        self.rows.lock().values().map(|(writes, _)| u64::from(writes - 1)).sum()
-    }
+    pub fn rewrites(&self) -> u64 { self.rows.lock().values().map(|(writes, _)| u64::from(writes - 1)).sum() }
 
     /// Emit ids that were written with two different values.
     #[must_use]
-    pub fn conflicts(&self) -> Vec<String> {
-        self.conflicts.lock().clone()
-    }
+    pub fn conflicts(&self) -> Vec<String> { self.conflicts.lock().clone() }
 }
 
 /// What the driver produced and therefore expects to find.
@@ -260,14 +250,10 @@ pub struct SimClock<T: TimeProvider> {
 
 impl<T: TimeProvider> SimClock<T> {
     /// The exact simulated time.
-    pub fn exact(time: T) -> Self {
-        Self { time, drifting: false }
-    }
+    pub fn exact(time: T) -> Self { Self { time, drifting: false } }
 
     /// The simulated time as a process with a drifting clock reads it.
-    pub fn drifting(time: T) -> Self {
-        Self { time, drifting: true }
-    }
+    pub fn drifting(time: T) -> Self { Self { time, drifting: true } }
 }
 
 impl<T: TimeProvider> Clock for SimClock<T> {
@@ -845,9 +831,7 @@ impl Scenario {
 
     /// Size of the second-level windows.
     #[must_use]
-    pub fn big_window(&self) -> Duration {
-        self.window * 4
-    }
+    pub fn big_window(&self) -> Duration { self.window * 4 }
 
     /// The simulated graph: a windowed count per key, a stateless copy of every
     /// event, a diamond delivering every event twice to one sink, and a
@@ -938,16 +922,12 @@ pub struct WorkerProcess {
 impl WorkerProcess {
     /// A worker of the given scenario.
     #[must_use]
-    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self {
-        Self { slot, scenario }
-    }
+    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self { Self { slot, scenario } }
 }
 
 #[async_trait]
 impl Process for WorkerProcess {
-    fn name(&self) -> &str {
-        "worker"
-    }
+    fn name(&self) -> &str { "worker" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let env = env_of(&self.slot)?;
@@ -1136,16 +1116,12 @@ impl Deployer {
     /// A deployer for the given scenario. Idle unless it has
     /// [`Scenario::deploy`].
     #[must_use]
-    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self {
-        Self { slot, scenario }
-    }
+    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self { Self { slot, scenario } }
 }
 
 #[async_trait]
 impl Workload for Deployer {
-    fn name(&self) -> &str {
-        "deployer"
-    }
+    fn name(&self) -> &str { "deployer" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         if self.scenario.deploy {
@@ -1180,9 +1156,7 @@ pub struct Driver {
 impl Driver {
     /// A driver for the given scenario.
     #[must_use]
-    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self {
-        Self { slot, scenario }
-    }
+    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self { Self { slot, scenario } }
 
     fn counted(env: &SimEnv) -> u64 {
         env.counts
@@ -1453,9 +1427,7 @@ fn violation(message: String) -> SimulationError {
 
 #[async_trait]
 impl Workload for Driver {
-    fn name(&self) -> &str {
-        "driver"
-    }
+    fn name(&self) -> &str { "driver" }
 
     async fn setup(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
         let env = env_of(&self.slot)?;
@@ -1985,16 +1957,12 @@ impl Operator {
     /// An operator for the given scenario. Does nothing unless the scenario
     /// asks for one.
     #[must_use]
-    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self {
-        Self { slot, scenario }
-    }
+    pub fn new(slot: EnvSlot, scenario: Scenario) -> Self { Self { slot, scenario } }
 }
 
 #[async_trait]
 impl Workload for Operator {
-    fn name(&self) -> &str {
-        "operator"
-    }
+    fn name(&self) -> &str { "operator" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // The simulation ends as soon as one workload returns: this one must
@@ -2112,9 +2080,7 @@ pub struct Auditor {
 impl Auditor {
     /// An auditor for the current run.
     #[must_use]
-    pub fn new(slot: EnvSlot) -> Self {
-        Self { slot }
-    }
+    pub fn new(slot: EnvSlot) -> Self { Self { slot } }
 }
 
 /// `t:<tenant>:g:<graph>:s:<slice>:log` -> `tenant/graph/slice`.
@@ -2127,9 +2093,7 @@ fn slice_of_log(key: &str) -> Option<streaming_core::SliceKey> {
 
 #[async_trait]
 impl Workload for Auditor {
-    fn name(&self) -> &str {
-        "auditor"
-    }
+    fn name(&self) -> &str { "auditor" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let env = env_of(&self.slot)?;

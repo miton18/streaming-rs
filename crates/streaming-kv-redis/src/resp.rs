@@ -40,16 +40,12 @@ pub enum Value {
 pub struct RespError(pub String);
 
 impl fmt::Display for RespError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid RESP: {}", self.0)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "invalid RESP: {}", self.0) }
 }
 
 impl std::error::Error for RespError {}
 
-fn bad<T>(msg: impl Into<String>) -> Result<T, RespError> {
-    Err(RespError(msg.into()))
-}
+fn bad<T>(msg: impl Into<String>) -> Result<T, RespError> { Err(RespError(msg.into())) }
 
 /// Append a request (an array of bulk strings) to `out`.
 pub fn encode_command<A: AsRef<[u8]>>(args: &[A], out: &mut Vec<u8>) {
@@ -117,17 +113,13 @@ pub struct Decoder {
 }
 
 impl Default for Decoder {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl Decoder {
     /// A decoder with the default limits.
     #[must_use]
-    pub fn new() -> Self {
-        Self::with_limits(DEFAULT_MAX_BULK, DEFAULT_MAX_ARRAY)
-    }
+    pub fn new() -> Self { Self::with_limits(DEFAULT_MAX_BULK, DEFAULT_MAX_ARRAY) }
 
     /// A decoder rejecting bulk strings above `max_bulk` bytes and arrays
     /// above `max_array` elements.
@@ -141,20 +133,14 @@ impl Decoder {
     }
 
     /// Append received bytes.
-    pub fn feed(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
-    }
+    pub fn feed(&mut self, data: &[u8]) { self.buf.extend_from_slice(data); }
 
     /// The raw receive buffer, to read from a socket directly into.
-    pub fn buffer_mut(&mut self) -> &mut BytesMut {
-        &mut self.buf
-    }
+    pub fn buffer_mut(&mut self) -> &mut BytesMut { &mut self.buf }
 
     /// Number of buffered, not yet consumed bytes.
     #[must_use]
-    pub fn buffered(&self) -> usize {
-        self.buf.len()
-    }
+    pub fn buffered(&self) -> usize { self.buf.len() }
 
     /// Decode the next complete value, or `Ok(None)` when more bytes are needed.
     ///
@@ -267,9 +253,7 @@ impl Decoder {
 
     /// Drop `n` buffered bytes (test helper for garbage handling).
     #[doc(hidden)]
-    pub fn advance(&mut self, n: usize) {
-        self.buf.advance(n);
-    }
+    pub fn advance(&mut self, n: usize) { self.buf.advance(n); }
 }
 
 /// Find the CRLF-terminated line starting at `from`.
@@ -309,9 +293,7 @@ mod tests {
         v
     }
 
-    fn bulk(b: &[u8]) -> Value {
-        Value::Bulk(Bytes::copy_from_slice(b))
-    }
+    fn bulk(b: &[u8]) -> Value { Value::Bulk(Bytes::copy_from_slice(b)) }
 
     #[test]
     fn encodes_commands_as_bulk_arrays() {

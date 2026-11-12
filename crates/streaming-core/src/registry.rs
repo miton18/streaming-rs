@@ -62,9 +62,7 @@ pub enum TypeTag {
 impl TypeTag {
     /// The tag of a Rust type.
     #[must_use]
-    pub fn of<T: ?Sized + 'static>() -> Self {
-        TypeTag::Named(std::any::type_name::<T>().to_owned())
-    }
+    pub fn of<T: ?Sized + 'static>() -> Self { TypeTag::Named(std::any::type_name::<T>().to_owned()) }
 
     /// Whether a value of type `self` may flow into an input declared `other`.
     #[must_use]
@@ -86,15 +84,11 @@ impl fmt::Display for TypeTag {
 }
 
 impl Serialize for TypeTag {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { serializer.collect_str(self) }
 }
 
 impl schemars::JsonSchema for TypeTag {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "TypeTag".into()
-    }
+    fn schema_name() -> std::borrow::Cow<'static, str> { "TypeTag".into() }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
@@ -205,14 +199,10 @@ pub struct Catalog {
 impl Catalog {
     /// Look an operator up.
     #[must_use]
-    pub fn get(&self, op: &OpRef) -> Option<&OpDescriptor> {
-        self.ops.get(op)
-    }
+    pub fn get(&self, op: &OpRef) -> Option<&OpDescriptor> { self.ops.get(op) }
 
     /// Add or replace a descriptor.
-    pub fn insert(&mut self, descriptor: OpDescriptor) {
-        self.ops.insert(descriptor.op.clone(), descriptor);
-    }
+    pub fn insert(&mut self, descriptor: OpDescriptor) { self.ops.insert(descriptor.op.clone(), descriptor); }
 }
 
 /// What a connector factory receives when a node is instantiated.
@@ -306,15 +296,11 @@ impl<P: Providers> Registry<P> {
 }
 
 impl<P: Providers> Clone for Registry<P> {
-    fn clone(&self) -> Self {
-        Self { ops: self.ops.clone() }
-    }
+    fn clone(&self) -> Self { Self { ops: self.ops.clone() } }
 }
 
 impl<P: Providers> Default for Registry<P> {
-    fn default() -> Self {
-        Self::empty()
-    }
+    fn default() -> Self { Self::empty() }
 }
 
 fn parse_config<C: DeserializeOwned>(config: &Value) -> Result<C, OpError> {
@@ -358,9 +344,7 @@ where
 impl<P: Providers> Registry<P> {
     /// A registry with no operator at all.
     #[must_use]
-    pub fn empty() -> Self {
-        Self { ops: BTreeMap::new() }
-    }
+    pub fn empty() -> Self { Self { ops: BTreeMap::new() } }
 
     /// A registry holding the type-agnostic `std/*` operators
     /// (see [`crate::stdops`]).
@@ -693,9 +677,7 @@ mod tests {
         type In = u64;
         type Acc = (u64, u32);
         type Out = u64;
-        fn init(&self) -> Self::Acc {
-            (0, 0)
-        }
+        fn init(&self) -> Self::Acc { (0, 0) }
         fn add(&self, acc: &mut Self::Acc, item: &u64) {
             acc.0 += item;
             acc.1 += 1;
@@ -704,9 +686,7 @@ mod tests {
             into.0 += other.0;
             into.1 += other.1;
         }
-        fn finish(&self, acc: &Self::Acc) -> u64 {
-            acc.0
-        }
+        fn finish(&self, acc: &Self::Acc) -> u64 { acc.0 }
     }
 
     #[test]

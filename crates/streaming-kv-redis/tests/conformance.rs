@@ -18,9 +18,7 @@ fn config(addr: &str) -> RedisConfig {
 }
 
 #[tokio::test]
-async fn conformance_mem_kv() {
-    conformance(&MemKv::new()).await.expect("MemKv conforms");
-}
+async fn conformance_mem_kv() { conformance(&MemKv::new()).await.expect("MemKv conforms"); }
 
 #[tokio::test]
 async fn conformance_fake_redis() {

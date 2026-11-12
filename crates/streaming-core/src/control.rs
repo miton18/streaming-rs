@@ -31,9 +31,7 @@ impl Load {
     /// Whether the worker has no headroom left. Only a saturated worker
     /// justifies spreading a graph over more workers.
     #[must_use]
-    pub fn is_saturated(&self) -> bool {
-        self.cpu >= 0.85 || self.memory >= 0.85
-    }
+    pub fn is_saturated(&self) -> bool { self.cpu >= 0.85 || self.memory >= 0.85 }
 }
 
 /// What a worker advertises about itself.
@@ -72,9 +70,7 @@ pub struct MemberInfo {
 impl MemberInfo {
     /// Whether the last heartbeat is recent enough.
     #[must_use]
-    pub fn is_alive(&self, now_ms: Timestamp, timeout_ms: i64) -> bool {
-        now_ms - self.heartbeat_ms <= timeout_ms
-    }
+    pub fn is_alive(&self, now_ms: Timestamp, timeout_ms: i64) -> bool { now_ms - self.heartbeat_ms <= timeout_ms }
 }
 
 /// A tenant, as created through the API. Field `<tenant>` of

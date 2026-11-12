@@ -24,13 +24,9 @@ fn is_protocol<T: std::fmt::Debug>(what: &str, r: Result<T, KvError>) -> Result<
     }
 }
 
-fn ok<T>(what: &str, r: Result<T, KvError>) -> Result<T, String> {
-    r.map_err(|e| format!("{what}: {e}"))
-}
+fn ok<T>(what: &str, r: Result<T, KvError>) -> Result<T, String> { r.map_err(|e| format!("{what}: {e}")) }
 
-fn key(name: &str) -> String {
-    format!("conf:{name}")
-}
+fn key(name: &str) -> String { format!("conf:{name}") }
 
 /// Run the whole suite. `Err` describes the first violated expectation.
 ///

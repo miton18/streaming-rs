@@ -59,15 +59,9 @@ pub struct Generators {
     topics: Mutex<HashMap<String, Arc<Topic>>>,
 }
 
-fn default_partitions() -> u32 {
-    4
-}
-fn default_rate() -> u64 {
-    2_000
-}
-fn default_keys() -> u64 {
-    50
-}
+fn default_partitions() -> u32 { 4 }
+fn default_rate() -> u64 { 2_000 }
+fn default_keys() -> u64 { 50 }
 
 /// `demo/generator@1`: synthetic events, as JSON bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

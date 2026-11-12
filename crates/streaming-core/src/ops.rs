@@ -124,9 +124,7 @@ pub trait WindowAssigner: Send + Sync + 'static {
     fn assign(&self, ts: Timestamp, out: &mut Vec<Window>);
 
     /// How long after its end a window still accepts records.
-    fn allowed_lateness(&self) -> Duration {
-        Duration::ZERO
-    }
+    fn allowed_lateness(&self) -> Duration { Duration::ZERO }
 }
 
 /// A windowed aggregation, as written by operator authors.
@@ -173,9 +171,7 @@ pub trait DynAggregator: Send + Sync + 'static {
 pub(crate) struct TypedAggregator<A>(pub(crate) A);
 
 impl<A: Aggregator> DynAggregator for TypedAggregator<A> {
-    fn init(&self) -> DynAcc {
-        Box::new(self.0.init())
-    }
+    fn init(&self) -> DynAcc { Box::new(self.0.init()) }
 
     fn add(&self, acc: &mut DynAcc, item: &Datum) -> Result<(), OpError> {
         let acc = downcast_acc_mut::<A::Acc>(acc)?;

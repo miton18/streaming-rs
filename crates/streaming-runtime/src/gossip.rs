@@ -43,9 +43,7 @@ impl<P: Providers> GossipMembership<P> {
     }
 
     /// The underlying gossip node, for inspection.
-    pub fn gossip(&self) -> &Gossip<P> {
-        &self.gossip
-    }
+    pub fn gossip(&self) -> &Gossip<P> { &self.gossip }
 }
 
 #[async_trait]

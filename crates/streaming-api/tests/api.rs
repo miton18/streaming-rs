@@ -210,9 +210,7 @@ impl Env {
         }
     }
 
-    fn now(&self) -> i64 {
-        self.clock.load(Ordering::SeqCst)
-    }
+    fn now(&self) -> i64 { self.clock.load(Ordering::SeqCst) }
 
     /// Publish `graphs` as the code of the workers, the way a starting worker
     /// does.
@@ -269,9 +267,7 @@ impl Env {
         (parts.status, parts.headers, bytes)
     }
 
-    async fn get(&self, uri: &str) -> (StatusCode, Value) {
-        self.call(Method::GET, uri, None).await
-    }
+    async fn get(&self, uri: &str) -> (StatusCode, Value) { self.call(Method::GET, uri, None).await }
 
     async fn epoch(&self) -> i64 {
         self.kv
@@ -282,14 +278,10 @@ impl Env {
     }
 
     /// Add the graph `acme/<name>` of [`graph_body`] to the code.
-    async fn put_graph(&self, name: &str) -> Publication {
-        self.put_spec(spec(graph_body(name))).await
-    }
+    async fn put_graph(&self, name: &str) -> Publication { self.put_spec(spec(graph_body(name))).await }
 }
 
-fn spec(body: Value) -> GraphSpec {
-    serde_json::from_value(body).unwrap()
-}
+fn spec(body: Value) -> GraphSpec { serde_json::from_value(body).unwrap() }
 
 fn graph_body(name: &str) -> Value {
     json!({
@@ -306,9 +298,7 @@ fn graph_body(name: &str) -> Value {
     })
 }
 
-fn gk(graph: &str) -> GraphKey {
-    GraphKey::new("acme".parse().unwrap(), graph.parse().unwrap())
-}
+fn gk(graph: &str) -> GraphKey { GraphKey::new("acme".parse().unwrap(), graph.parse().unwrap()) }
 
 async fn publish_worker(env: &Env, worker: &str, heartbeat_ms: i64, snapshot: Option<WorkerSnapshot>) {
     let member = MemberInfo {

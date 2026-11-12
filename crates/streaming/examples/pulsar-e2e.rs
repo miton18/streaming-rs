@@ -57,6 +57,4 @@ fn count_per_key() -> GraphBuilder {
     graph
 }
 
-fn main() -> std::process::ExitCode {
-    App::new().tenant("acme", "Acme").graph(count_per_key()).main()
-}
+fn main() -> std::process::ExitCode { App::new().tenant("acme", "Acme").graph(count_per_key()).main() }

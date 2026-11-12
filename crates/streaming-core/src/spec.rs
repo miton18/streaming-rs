@@ -30,36 +30,16 @@ pub struct NodeSpec {
     pub config: Value,
 }
 
-fn default_out_of_orderness() -> Duration {
-    Duration::from_millis(500)
-}
-fn default_idle_timeout() -> Duration {
-    Duration::from_secs(30)
-}
-fn default_max_batch() -> usize {
-    1_000
-}
-fn default_linger() -> Duration {
-    Duration::from_millis(200)
-}
-fn default_mailbox_capacity() -> usize {
-    8
-}
-fn default_chunk_size() -> usize {
-    256
-}
-fn default_flush_interval() -> Duration {
-    Duration::from_secs(1)
-}
-fn default_max_in_flight_epochs() -> usize {
-    2
-}
-fn default_gc_grace() -> Duration {
-    Duration::from_secs(30)
-}
-fn default_max_pending_windows() -> usize {
-    16
-}
+fn default_out_of_orderness() -> Duration { Duration::from_millis(500) }
+fn default_idle_timeout() -> Duration { Duration::from_secs(30) }
+fn default_max_batch() -> usize { 1_000 }
+fn default_linger() -> Duration { Duration::from_millis(200) }
+fn default_mailbox_capacity() -> usize { 8 }
+fn default_chunk_size() -> usize { 256 }
+fn default_flush_interval() -> Duration { Duration::from_secs(1) }
+fn default_max_in_flight_epochs() -> usize { 2 }
+fn default_gc_grace() -> Duration { Duration::from_secs(30) }
+fn default_max_pending_windows() -> usize { 16 }
 
 /// Engine settings of a graph. Every field has a default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -177,9 +157,7 @@ fn canonical(value: &serde_json::Value) -> serde_json::Value {
 impl GraphSpec {
     /// The `tenant/graph` key of this graph.
     #[must_use]
-    pub fn key(&self) -> GraphKey {
-        GraphKey::new(self.tenant.clone(), self.graph.clone())
-    }
+    pub fn key(&self) -> GraphKey { GraphKey::new(self.tenant.clone(), self.graph.clone()) }
 
     /// Fingerprint of what the code declares for this graph: its settings,
     /// its nodes with their operator and configuration, and its edges. Two
@@ -208,9 +186,7 @@ impl GraphSpec {
 
     /// Look a node up.
     #[must_use]
-    pub fn node(&self, id: &NodeId) -> Option<&NodeSpec> {
-        self.nodes.iter().find(|node| &node.id == id)
-    }
+    pub fn node(&self, id: &NodeId) -> Option<&NodeSpec> { self.nodes.iter().find(|node| &node.id == id) }
 }
 
 /// Why a description was rejected.
@@ -521,9 +497,7 @@ impl Topology {
     ///
     /// Panics if `id` is not a node of this graph.
     #[must_use]
-    pub fn kind(&self, id: &NodeId) -> OpKind {
-        self.descriptors[id].kind
-    }
+    pub fn kind(&self, id: &NodeId) -> OpKind { self.descriptors[id].kind }
 
     /// Nodes of a given kind, in topological order.
     #[must_use]
@@ -730,9 +704,7 @@ mod tests {
         spec
     }
 
-    fn id(s: &str) -> NodeId {
-        NodeId::new(s).unwrap()
-    }
+    fn id(s: &str) -> NodeId { NodeId::new(s).unwrap() }
 
     #[test]
     fn valid_graph_is_cut_into_slices() {

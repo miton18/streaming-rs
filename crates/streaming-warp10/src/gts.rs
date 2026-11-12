@@ -89,39 +89,25 @@ impl Gts {
 }
 
 impl From<i64> for GtsValue {
-    fn from(v: i64) -> Self {
-        Self::Long(v)
-    }
+    fn from(v: i64) -> Self { Self::Long(v) }
 }
 impl From<i32> for GtsValue {
-    fn from(v: i32) -> Self {
-        Self::Long(i64::from(v))
-    }
+    fn from(v: i32) -> Self { Self::Long(i64::from(v)) }
 }
 impl From<u32> for GtsValue {
-    fn from(v: u32) -> Self {
-        Self::Long(i64::from(v))
-    }
+    fn from(v: u32) -> Self { Self::Long(i64::from(v)) }
 }
 impl From<f64> for GtsValue {
-    fn from(v: f64) -> Self {
-        Self::Double(v)
-    }
+    fn from(v: f64) -> Self { Self::Double(v) }
 }
 impl From<bool> for GtsValue {
-    fn from(v: bool) -> Self {
-        Self::Bool(v)
-    }
+    fn from(v: bool) -> Self { Self::Bool(v) }
 }
 impl From<&str> for GtsValue {
-    fn from(v: &str) -> Self {
-        Self::Text(v.to_owned())
-    }
+    fn from(v: &str) -> Self { Self::Text(v.to_owned()) }
 }
 impl From<String> for GtsValue {
-    fn from(v: String) -> Self {
-        Self::Text(v)
-    }
+    fn from(v: String) -> Self { Self::Text(v) }
 }
 
 /// Time unit of the Warp 10 platform (`warp.timeunits`). The default of Warp 10
@@ -197,9 +183,7 @@ pub enum EncodeError {
     },
 }
 
-fn is_unreserved(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
-}
+fn is_unreserved(b: u8) -> bool { b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') }
 
 /// Percent-encode `s` (UTF-8 bytes); only `A-Za-z0-9-_.~` stay as is.
 #[must_use]

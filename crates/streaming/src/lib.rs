@@ -73,9 +73,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// A store for registries built only to read their catalog.
-fn scratch_kv() -> DynKv {
-    MemKv::shared()
-}
+fn scratch_kv() -> DynKv { MemKv::shared() }
 
 /// The registry the operators of an application are registered in.
 pub type AppRegistry = Registry<TokioProviders>;
@@ -101,9 +99,7 @@ pub struct App {
 impl App {
     /// An application with no tenant, no graph, and the stock operators.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
     /// Declare a tenant, with the name people see. Every graph belongs to a
     /// declared tenant.
@@ -143,9 +139,7 @@ impl App {
 
     /// The graphs of the application, as the store keeps them.
     #[must_use]
-    pub fn graphs(&self) -> &[GraphSpec] {
-        &self.graphs
-    }
+    pub fn graphs(&self) -> &[GraphSpec] { &self.graphs }
 
     /// The operators of the application, stock ones included, for a worker
     /// whose store is `kv`.
@@ -674,9 +668,7 @@ mod tests {
         graph
     }
 
-    fn problems(app: &App) -> String {
-        app.check().expect_err("the application is refused").to_string()
-    }
+    fn problems(app: &App) -> String { app.check().expect_err("the application is refused").to_string() }
 
     #[test]
     fn an_application_says_everything_that_is_wrong_with_it() {

@@ -38,15 +38,11 @@ fn err(context: &str, error: impl std::fmt::Display) -> SinkError {
 }
 
 /// The slice part of an emit id (`<slice>/<position>/<lineage>`).
-pub(crate) fn slice_of(id: &EmitId) -> &str {
-    id.as_str().split('/').next().unwrap_or_default()
-}
+pub(crate) fn slice_of(id: &EmitId) -> &str { id.as_str().split('/').next().unwrap_or_default() }
 
 /// Producer name used for the elements of one slice.
 #[must_use]
-pub fn producer_name_for(base: &str, slice: &str) -> String {
-    format!("{base}-{slice}")
-}
+pub fn producer_name_for(base: &str, slice: &str) -> String { format!("{base}-{slice}") }
 
 /// Partition an element goes to.
 ///
@@ -141,9 +137,7 @@ impl<P: Providers> PulsarSink<P> {
 
     /// Counters of the last successful write.
     #[must_use]
-    pub fn last_write(&self) -> WriteStats {
-        *self.last.lock()
-    }
+    pub fn last_write(&self) -> WriteStats { *self.last.lock() }
 
     async fn destination(&self) -> Result<Producers<P>, SinkError> {
         let conn = self.client.get().await.map_err(|e| err("connect", e))?;

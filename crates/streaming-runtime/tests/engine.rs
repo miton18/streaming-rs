@@ -41,9 +41,7 @@ impl SinkConnector for Collect {
     }
 }
 
-fn spec() -> GraphSpec {
-    spec_idle_after("200ms")
-}
+fn spec() -> GraphSpec { spec_idle_after("200ms") }
 
 fn spec_idle_after(idle_timeout: &str) -> GraphSpec {
     serde_json::from_value(serde_json::json!({
@@ -231,18 +229,10 @@ type Fields = Vec<(String, Vec<u8>)>;
 
 #[async_trait]
 impl Kv for Behind {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, KvError> {
-        self.store.get(key).await
-    }
-    async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> {
-        self.store.set(key, value).await
-    }
-    async fn del(&self, keys: Vec<String>) -> Result<(), KvError> {
-        self.store.del(keys).await
-    }
-    async fn incr(&self, key: &str) -> Result<i64, KvError> {
-        self.store.incr(key).await
-    }
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, KvError> { self.store.get(key).await }
+    async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> { self.store.set(key, value).await }
+    async fn del(&self, keys: Vec<String>) -> Result<(), KvError> { self.store.del(keys).await }
+    async fn incr(&self, key: &str) -> Result<i64, KvError> { self.store.incr(key).await }
     async fn hsetnx(&self, key: &str, field: &str, value: Vec<u8>) -> Result<bool, KvError> {
         self.store.hsetnx(key, field, value).await
     }
@@ -258,9 +248,7 @@ impl Kv for Behind {
         }
         self.store.hgetall(key).await
     }
-    async fn hdel(&self, key: &str, fields: Vec<String>) -> Result<(), KvError> {
-        self.store.hdel(key, fields).await
-    }
+    async fn hdel(&self, key: &str, fields: Vec<String>) -> Result<(), KvError> { self.store.hdel(key, fields).await }
 }
 
 fn registry(kv: &DynKv, log: &Arc<MemLog>, counts: &Arc<Collect>, raw: &Arc<Collect>) -> Registry<TokioProviders> {

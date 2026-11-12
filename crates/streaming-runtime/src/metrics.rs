@@ -103,17 +103,11 @@ impl ActorMetrics {
         })
     }
 
-    pub(crate) fn watch_input(&self, sender: &mpsc::Sender<Msg>) {
-        self.inputs.lock().push(sender.downgrade());
-    }
+    pub(crate) fn watch_input(&self, sender: &mpsc::Sender<Msg>) { self.inputs.lock().push(sender.downgrade()); }
 
-    pub(crate) fn set_state(&self, state: ActorState) {
-        self.state.store(state_to_u8(state), Ordering::Relaxed);
-    }
+    pub(crate) fn set_state(&self, state: ActorState) { self.state.store(state_to_u8(state), Ordering::Relaxed); }
 
-    pub(crate) fn state(&self) -> ActorState {
-        state_from_u8(self.state.load(Ordering::Relaxed))
-    }
+    pub(crate) fn state(&self) -> ActorState { state_from_u8(self.state.load(Ordering::Relaxed)) }
 
     pub(crate) fn error(&self, message: impl Into<String>) {
         self.errors.fetch_add(1, Ordering::Relaxed);
@@ -170,22 +164,14 @@ impl<P: Providers> Meter<P> {
         }
     }
 
-    pub(crate) fn idle(&self) {
-        self.metrics.switch(self.time.now(), Phase::Idle);
-    }
+    pub(crate) fn idle(&self) { self.metrics.switch(self.time.now(), Phase::Idle); }
 
-    pub(crate) fn busy(&self) {
-        self.metrics.switch(self.time.now(), Phase::Busy);
-    }
+    pub(crate) fn busy(&self) { self.metrics.switch(self.time.now(), Phase::Busy); }
 
-    pub(crate) fn blocked(&self) {
-        self.metrics.switch(self.time.now(), Phase::Backpressured);
-    }
+    pub(crate) fn blocked(&self) { self.metrics.switch(self.time.now(), Phase::Backpressured); }
 
     /// Entering a call to the system a connector talks to.
-    pub(crate) fn waiting(&self) {
-        self.metrics.switch(self.time.now(), Phase::Waiting);
-    }
+    pub(crate) fn waiting(&self) { self.metrics.switch(self.time.now(), Phase::Waiting); }
 
     pub(crate) fn records_in(&self, count: usize) {
         self.metrics.records_in.fetch_add(count as u64, Ordering::Relaxed);
@@ -224,24 +210,16 @@ impl SliceMetrics {
         })
     }
 
-    pub(crate) fn set_state(&self, state: ActorState) {
-        self.state.store(state_to_u8(state), Ordering::Relaxed);
-    }
+    pub(crate) fn set_state(&self, state: ActorState) { self.state.store(state_to_u8(state), Ordering::Relaxed); }
 
-    pub(crate) fn state(&self) -> ActorState {
-        state_from_u8(self.state.load(Ordering::Relaxed))
-    }
+    pub(crate) fn state(&self) -> ActorState { state_from_u8(self.state.load(Ordering::Relaxed)) }
 }
 
 /// Order-preserving mapping of a timestamp onto an unsigned position component.
-pub(crate) fn ts_key(ts: Timestamp) -> u64 {
-    (ts as u64) ^ (1 << 63)
-}
+pub(crate) fn ts_key(ts: Timestamp) -> u64 { (ts as u64) ^ (1 << 63) }
 
 /// Inverse of [`ts_key`].
-pub(crate) fn ts_unkey(key: u64) -> Timestamp {
-    (key ^ (1 << 63)) as Timestamp
-}
+pub(crate) fn ts_unkey(key: u64) -> Timestamp { (key ^ (1 << 63)) as Timestamp }
 
 /// What the snapshotter remembers about an actor between two snapshots.
 #[derive(Debug, Clone, Copy, Default)]

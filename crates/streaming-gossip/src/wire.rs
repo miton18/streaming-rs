@@ -153,9 +153,7 @@ pub const fn varint_len(v: u64) -> usize {
 
 /// Encoded size of a string.
 #[must_use]
-pub fn string_size(s: &str) -> usize {
-    varint_len(s.len() as u64) + s.len()
-}
+pub fn string_size(s: &str) -> usize { varint_len(s.len() as u64) + s.len() }
 
 /// Encoded size of a key update.
 #[must_use]

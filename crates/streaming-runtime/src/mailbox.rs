@@ -98,9 +98,7 @@ pub(crate) struct Outputs {
 }
 
 impl Outputs {
-    pub(crate) fn new(edges: Vec<mpsc::Sender<Msg>>) -> Self {
-        Self { edges }
-    }
+    pub(crate) fn new(edges: Vec<mpsc::Sender<Msg>>) -> Self { Self { edges } }
 
     /// Send to every output, waiting for room. Time spent waiting is accounted
     /// as backpressure; the meter is left in the busy phase.
@@ -126,9 +124,7 @@ mod tests {
     use super::*;
     use futures::FutureExt;
 
-    fn barrier(epoch: u64) -> Msg {
-        Msg::Barrier(Barrier { epoch, watermark: 0 })
-    }
+    fn barrier(epoch: u64) -> Msg { Msg::Barrier(Barrier { epoch, watermark: 0 }) }
 
     #[test]
     fn barriers_are_aligned_across_inputs() {

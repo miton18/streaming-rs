@@ -118,9 +118,7 @@ pub enum InitialPosition {
     Latest,
 }
 
-fn default_receiver_queue_size() -> usize {
-    1000
-}
+fn default_receiver_queue_size() -> usize { 1000 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

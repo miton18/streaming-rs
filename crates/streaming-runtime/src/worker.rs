@@ -56,9 +56,7 @@ pub struct KvMembership {
 impl KvMembership {
     /// Membership stored in `kv`.
     #[must_use]
-    pub fn new(kv: DynKv) -> Self {
-        Self { kv }
-    }
+    pub fn new(kv: DynKv) -> Self { Self { kv } }
 }
 
 #[async_trait]
@@ -687,15 +685,9 @@ mod tests {
             }
             self.inner.get(key).await
         }
-        async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> {
-            self.inner.set(key, value).await
-        }
-        async fn del(&self, keys: Vec<String>) -> Result<(), KvError> {
-            self.inner.del(keys).await
-        }
-        async fn incr(&self, key: &str) -> Result<i64, KvError> {
-            self.inner.incr(key).await
-        }
+        async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> { self.inner.set(key, value).await }
+        async fn del(&self, keys: Vec<String>) -> Result<(), KvError> { self.inner.del(keys).await }
+        async fn incr(&self, key: &str) -> Result<i64, KvError> { self.inner.incr(key).await }
         async fn hsetnx(&self, key: &str, field: &str, value: Vec<u8>) -> Result<bool, KvError> {
             self.inner.hsetnx(key, field, value).await
         }
@@ -716,9 +708,7 @@ mod tests {
         }
     }
 
-    fn me() -> WorkerId {
-        WorkerId::new("worker-a").unwrap()
-    }
+    fn me() -> WorkerId { WorkerId::new("worker-a").unwrap() }
 
     fn registry(log: &Arc<MemLog>) -> Registry<TokioProviders> {
         let mut registry = Registry::<TokioProviders>::standard();
@@ -757,9 +747,7 @@ mod tests {
         config
     }
 
-    fn slice_key(graph: &str) -> SliceKey {
-        format!("acme/{graph}/src.events.0").parse().unwrap()
-    }
+    fn slice_key(graph: &str) -> SliceKey { format!("acme/{graph}/src.events.0").parse().unwrap() }
 
     fn graph_key(graph: &str) -> GraphKey {
         GraphKey::new(TenantId::new("acme").unwrap(), GraphId::new(graph).unwrap())

@@ -18,9 +18,7 @@ struct IsolationWorkload {
 
 #[async_trait]
 impl Workload for IsolationWorkload {
-    fn name(&self) -> &str {
-        "isolation"
-    }
+    fn name(&self) -> &str { "isolation" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // The workload is not a process: its topology lists every process;

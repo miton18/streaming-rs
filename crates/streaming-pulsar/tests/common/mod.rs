@@ -135,14 +135,10 @@ impl Broker {
     }
 
     /// Turn broker-side deduplication on.
-    pub fn deduplicate(&self) {
-        self.state.lock().dedup = true;
-    }
+    pub fn deduplicate(&self) { self.state.lock().dedup = true; }
 
     /// Stop confirming what producers send, as a broker that stalls would.
-    pub fn withhold_receipts(&self) {
-        self.state.lock().silent = true;
-    }
+    pub fn withhold_receipts(&self) { self.state.lock().silent = true; }
 
     /// Messages stored on `topic`.
     pub fn messages(&self, topic: &str) -> Vec<Stored> {
@@ -164,9 +160,7 @@ impl Broker {
     }
 
     /// Client connections open now.
-    pub fn live_connections(&self) -> usize {
-        self.state.lock().live
-    }
+    pub fn live_connections(&self) -> usize { self.state.lock().live }
 
     /// Commands of type `kind` received so far.
     pub fn seen(&self, kind: Type) -> Vec<pb::BaseCommand> {

@@ -3,9 +3,7 @@
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-fn document() -> Value {
-    serde_json::to_value(streaming_api::openapi()).unwrap()
-}
+fn document() -> Value { serde_json::to_value(streaming_api::openapi()).unwrap() }
 
 const COMMITTED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/openapi.json");
 

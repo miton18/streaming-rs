@@ -117,13 +117,9 @@ impl<P: Providers> std::fmt::Debug for RedisKv<P> {
     }
 }
 
-fn unavailable(msg: impl Into<String>) -> KvError {
-    KvError::Unavailable(msg.into())
-}
+fn unavailable(msg: impl Into<String>) -> KvError { KvError::Unavailable(msg.into()) }
 
-fn protocol(msg: impl Into<String>) -> KvError {
-    KvError::Protocol(msg.into())
-}
+fn protocol(msg: impl Into<String>) -> KvError { KvError::Protocol(msg.into()) }
 
 impl<P: Providers> RedisKv<P> {
     /// Create a client. Nothing is connected until the first command.
@@ -182,9 +178,7 @@ impl<P: Providers> RedisKv<P> {
 
     /// The configuration in effect (limits already normalised).
     #[must_use]
-    pub fn config(&self) -> &RedisConfig {
-        &self.config
-    }
+    pub fn config(&self) -> &RedisConfig { &self.config }
 
     // -- connection management ------------------------------------------
 

@@ -80,14 +80,10 @@ impl SliceShared {
     }
 
     /// The exit reason, once the instance has ended.
-    pub(crate) fn exit(&self) -> Option<SliceExit> {
-        self.exit.lock().clone()
-    }
+    pub(crate) fn exit(&self) -> Option<SliceExit> { self.exit.lock().clone() }
 
     #[cfg(test)]
-    pub(crate) fn set_exit(&self, exit: SliceExit) {
-        *self.exit.lock() = Some(exit);
-    }
+    pub(crate) fn set_exit(&self, exit: SliceExit) { *self.exit.lock() = Some(exit); }
 }
 
 /// Everything needed to run one slice instance.
@@ -180,15 +176,11 @@ trait Retry {
 }
 
 impl Retry for KvError {
-    fn transient(&self) -> bool {
-        !matches!(self, KvError::TooLarge { .. })
-    }
+    fn transient(&self) -> bool { !matches!(self, KvError::TooLarge { .. }) }
 }
 
 impl Retry for StateError {
-    fn transient(&self) -> bool {
-        matches!(self, StateError::Kv(error) if error.transient())
-    }
+    fn transient(&self) -> bool { matches!(self, StateError::Kv(error) if error.transient()) }
 }
 
 /// Repeat an idempotent store call until it gets through, however long the
@@ -294,13 +286,9 @@ struct ActorCtx<P: Providers> {
 }
 
 impl<P: Providers> ActorCtx<P> {
-    async fn sleep(&self, duration: Duration) {
-        let _ = self.env.providers.time().sleep(duration).await;
-    }
+    async fn sleep(&self, duration: Duration) { let _ = self.env.providers.time().sleep(duration).await; }
 
-    fn now(&self) -> Duration {
-        self.env.providers.time().now()
-    }
+    fn now(&self) -> Duration { self.env.providers.time().now() }
 
     /// Repeat an idempotent store call until it gets through.
     async fn persist<T, E, Fut>(&self, call: impl FnMut() -> Fut) -> Result<T, E>

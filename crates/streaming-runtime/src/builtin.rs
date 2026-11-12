@@ -15,9 +15,7 @@ use streaming_core::{
     control::OutputRow, keys, ops::downcast,
 };
 
-fn default_retain() -> usize {
-    500
-}
+fn default_retain() -> usize { 500 }
 
 /// `std/kv-sink@1`: keeps the most recent elements of a node as JSON rows
 /// readable through the HTTP API.

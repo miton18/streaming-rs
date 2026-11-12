@@ -161,15 +161,11 @@ pub struct MemKv {
 impl MemKv {
     /// An empty store.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
     /// An empty store behind a shared handle.
     #[must_use]
-    pub fn shared() -> Arc<Self> {
-        Arc::new(Self::new())
-    }
+    pub fn shared() -> Arc<Self> { Arc::new(Self::new()) }
 
     /// Traffic and size counters.
     #[must_use]
@@ -195,17 +191,11 @@ impl MemKv {
 
     /// Every key currently stored, in order. Meant for tests and debugging.
     #[must_use]
-    pub fn keys(&self) -> Vec<String> {
-        self.entries.lock().keys().cloned().collect()
-    }
+    pub fn keys(&self) -> Vec<String> { self.entries.lock().keys().cloned().collect() }
 
-    fn read(&self) {
-        self.reads.fetch_add(1, Ordering::Relaxed);
-    }
+    fn read(&self) { self.reads.fetch_add(1, Ordering::Relaxed); }
 
-    fn write(&self) {
-        self.writes.fetch_add(1, Ordering::Relaxed);
-    }
+    fn write(&self) { self.writes.fetch_add(1, Ordering::Relaxed); }
 }
 
 fn wrong_type(key: &str) -> KvError {

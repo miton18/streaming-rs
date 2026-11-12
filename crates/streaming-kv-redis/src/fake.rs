@@ -79,9 +79,7 @@ impl Hash {
         }
     }
 
-    fn len(&self) -> usize {
-        self.index.len()
-    }
+    fn len(&self) -> usize { self.index.len() }
 }
 
 #[derive(Debug, Clone)]
@@ -114,13 +112,9 @@ impl std::fmt::Debug for FakeRedis {
     }
 }
 
-fn err(msg: &str) -> Value {
-    Value::Error(msg.to_owned())
-}
+fn err(msg: &str) -> Value { Value::Error(msg.to_owned()) }
 
-fn wrong_type() -> Value {
-    err("WRONGTYPE Operation against a key holding the wrong kind of value")
-}
+fn wrong_type() -> Value { err("WRONGTYPE Operation against a key holding the wrong kind of value") }
 
 fn arity(cmd: &str) -> Value {
     Value::Error(format!(
@@ -129,9 +123,7 @@ fn arity(cmd: &str) -> Value {
     ))
 }
 
-fn bulk(b: &[u8]) -> Value {
-    Value::Bulk(Bytes::copy_from_slice(b))
-}
+fn bulk(b: &[u8]) -> Value { Value::Bulk(Bytes::copy_from_slice(b)) }
 
 /// Strict Redis integer parsing (`string2ll`): no `+`, no leading zeros.
 fn parse_i64(raw: &[u8]) -> Option<i64> {
@@ -148,9 +140,7 @@ struct Session {
 impl FakeRedis {
     /// An empty server without authentication.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
     /// An empty server requiring `AUTH` (`username` `None` is the default
     /// user, `AUTH <password>`).
@@ -177,21 +167,15 @@ impl FakeRedis {
 
     /// How many times a command (upper case, e.g. `"HSCAN"`) was received.
     #[must_use]
-    pub fn command_count(&self, name: &str) -> u64 {
-        self.shared.stats.lock().get(name).copied().unwrap_or(0)
-    }
+    pub fn command_count(&self, name: &str) -> u64 { self.shared.stats.lock().get(name).copied().unwrap_or(0) }
 
     /// Number of connections served so far (including closed ones).
     #[must_use]
-    pub fn connections_accepted(&self) -> u64 {
-        self.shared.connections.load(Ordering::Relaxed)
-    }
+    pub fn connections_accepted(&self) -> u64 { self.shared.connections.load(Ordering::Relaxed) }
 
     /// Number of keys stored.
     #[must_use]
-    pub fn key_count(&self) -> usize {
-        self.shared.store.lock().len()
-    }
+    pub fn key_count(&self) -> usize { self.shared.store.lock().len() }
 
     /// Direct read of a string key, bypassing the network (for invariants).
     #[must_use]
@@ -211,9 +195,7 @@ impl FakeRedis {
         }
     }
 
-    fn max_value(&self) -> usize {
-        self.shared.max_value_bytes.unwrap_or(5 * 1024 * 1024)
-    }
+    fn max_value(&self) -> usize { self.shared.max_value_bytes.unwrap_or(5 * 1024 * 1024) }
 
     /// Execute one command. Atomic: the store lock is held for the whole
     /// command and no `await` happens inside.
@@ -541,9 +523,7 @@ mod tests {
         fake.execute(session, &args)
     }
 
-    fn fresh() -> (FakeRedis, Session) {
-        (FakeRedis::new(), Session { authed: true })
-    }
+    fn fresh() -> (FakeRedis, Session) { (FakeRedis::new(), Session { authed: true }) }
 
     #[test]
     fn strings_and_wrong_type() {

@@ -17,9 +17,7 @@ use streaming_core::{Operator, Registry, Windowed};
 use streaming_pulsar::{PulsarMessage, PulsarOutput};
 use streaming_warp10::Gts;
 
-fn default_label() -> String {
-    "key".to_owned()
-}
+fn default_label() -> String { "key".to_owned() }
 
 /// `std/count-to-json@1`: turns a windowed count into a JSON object
 /// `{key, count, windowStart, windowEnd}`.

@@ -91,13 +91,9 @@ pub fn all_process_ips_with_self(ctx: &SimContext) -> Vec<String> {
     ips.into_iter().map(|ip| ip.to_string()).collect()
 }
 
-pub fn node_id_for(ip: &str) -> String {
-    format!("node-{ip}")
-}
+pub fn node_id_for(ip: &str) -> String { format!("node-{ip}") }
 
-pub fn addr_for(ip: &str) -> String {
-    format!("{ip}:{PORT}")
-}
+pub fn addr_for(ip: &str) -> String { format!("{ip}:{PORT}") }
 
 pub struct LiveNode {
     pub gossip: Gossip<SimProviders>,
@@ -123,9 +119,7 @@ pub struct RegistryInner {
 pub struct Registry(pub Arc<Mutex<RegistryInner>>);
 
 impl Registry {
-    pub fn clear(&self) {
-        *self.0.lock() = RegistryInner::default();
-    }
+    pub fn clear(&self) { *self.0.lock() = RegistryInner::default(); }
 
     pub fn live(&self) -> Vec<(String, Gossip<SimProviders>)> {
         self.0
@@ -178,9 +172,7 @@ pub struct GossipProcess {
 
 #[async_trait]
 impl Process for GossipProcess {
-    fn name(&self) -> &str {
-        "gossip"
-    }
+    fn name(&self) -> &str { "gossip" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let ip = ctx.my_ip().to_string();
@@ -236,9 +228,7 @@ impl Process for GossipProcess {
     }
 }
 
-pub fn err(e: impl std::fmt::Display) -> SimulationError {
-    fail(e.to_string())
-}
+pub fn err(e: impl std::fmt::Display) -> SimulationError { fail(e.to_string()) }
 
 /// Build a workload error; printed immediately (the runner only logs it via
 /// tracing) together with the seed.
@@ -378,6 +368,4 @@ pub fn check_report(name: &str, report: &SimulationReport) {
 }
 
 /// Sleep helper for workloads.
-pub async fn sleep(ctx: &SimContext, d: Duration) -> SimulationResult<()> {
-    ctx.time().sleep(d).await.map_err(err)
-}
+pub async fn sleep(ctx: &SimContext, d: Duration) -> SimulationResult<()> { ctx.time().sleep(d).await.map_err(err) }

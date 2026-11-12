@@ -201,9 +201,7 @@ mod tests {
     use crate::stdops::{Count, Identity, Sliding, Tumbling};
     use std::time::Duration;
 
-    fn id(s: &str) -> NodeId {
-        NodeId::new(s).unwrap()
-    }
+    fn id(s: &str) -> NodeId { NodeId::new(s).unwrap() }
 
     #[test]
     fn builds_the_description_a_worker_reads() {

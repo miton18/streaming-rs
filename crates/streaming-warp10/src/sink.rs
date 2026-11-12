@@ -57,9 +57,7 @@ impl<P: Providers> Warp10Sink<P> {
 
     /// The configuration in use.
     #[must_use]
-    pub fn config(&self) -> &Warp10Config {
-        &self.config
-    }
+    pub fn config(&self) -> &Warp10Config { &self.config }
 
     /// Encode a batch and cut it into request bodies of at most
     /// `max_batch_bytes` (a single point larger than that travels alone).

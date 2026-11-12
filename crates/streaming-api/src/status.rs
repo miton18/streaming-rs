@@ -541,9 +541,7 @@ fn aggregate_node(
     }
 }
 
-fn percent(ratio: f64) -> String {
-    format!("{:.0}%", ratio * 100.0)
-}
+fn percent(ratio: f64) -> String { format!("{:.0}%", ratio * 100.0) }
 
 /// Find what limits a graph. See the bottleneck rule of `docs/http-api.md`.
 ///
@@ -847,9 +845,7 @@ pub fn graph_detail(
     }
 }
 
-fn dot_escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
-}
+fn dot_escape(text: &str) -> String { text.replace('\\', "\\\\").replace('"', "\\\"") }
 
 /// The topology as Graphviz DOT: one line per node (label: id and operator)
 /// and one per edge.
@@ -886,13 +882,9 @@ mod tests {
     const NOW: i64 = 1_000_000;
     const TIMEOUT: i64 = 5_000;
 
-    fn node(id: &str) -> NodeId {
-        NodeId::new(id).unwrap()
-    }
+    fn node(id: &str) -> NodeId { NodeId::new(id).unwrap() }
 
-    fn worker(id: &str) -> WorkerId {
-        WorkerId::new(id).unwrap()
-    }
+    fn worker(id: &str) -> WorkerId { WorkerId::new(id).unwrap() }
 
     fn descriptor(op: &str, kind: OpKind) -> OpDescriptor {
         OpDescriptor {

@@ -32,9 +32,7 @@ fn sync(a: &mut ClusterState, b: &mut ClusterState, budget: usize, now: Duration
     (ia, ib)
 }
 
-fn values_of(s: &ClusterState, id: &str) -> Option<BTreeMap<String, String>> {
-    s.node_view(id).map(|v| v.values)
-}
+fn values_of(s: &ClusterState, id: &str) -> Option<BTreeMap<String, String>> { s.node_view(id).map(|v| v.values) }
 
 #[test]
 fn local_limits_are_enforced() {
@@ -599,13 +597,9 @@ impl SeqRng {
     }
 }
 impl TargetRng for SeqRng {
-    fn index(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
-    }
+    fn index(&mut self, n: usize) -> usize { (self.next() % n as u64) as usize }
     #[allow(clippy::cast_precision_loss)]
-    fn chance(&mut self, p: f64) -> bool {
-        (self.next() % 1_000_000) as f64 / 1_000_000.0 < p
-    }
+    fn chance(&mut self, p: f64) -> bool { (self.next() % 1_000_000) as f64 / 1_000_000.0 < p }
 }
 
 #[test]
@@ -1023,9 +1017,7 @@ fn a_tombstoned_key_counts_as_a_new_key() {
 #[derive(Default)]
 struct Recorder(Vec<f64>);
 impl TargetRng for Recorder {
-    fn index(&mut self, _: usize) -> usize {
-        0
-    }
+    fn index(&mut self, _: usize) -> usize { 0 }
     fn chance(&mut self, p: f64) -> bool {
         self.0.push(p);
         false

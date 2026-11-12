@@ -148,9 +148,7 @@ struct Counters {
     max_delta_bytes: AtomicU64,
 }
 
-fn inc(c: &AtomicU64) {
-    c.fetch_add(1, Ordering::Relaxed);
-}
+fn inc(c: &AtomicU64) { c.fetch_add(1, Ordering::Relaxed); }
 
 struct Inner<P: Providers> {
     providers: P,
@@ -205,12 +203,8 @@ where
 struct ProviderRng<'a, P: Providers>(&'a P);
 
 impl<P: Providers> TargetRng for ProviderRng<'_, P> {
-    fn index(&mut self, n: usize) -> usize {
-        self.0.random().random_range(0..n)
-    }
-    fn chance(&mut self, p: f64) -> bool {
-        p > 0.0 && self.0.random().random_bool(p.min(1.0))
-    }
+    fn index(&mut self, n: usize) -> usize { self.0.random().random_range(0..n) }
+    fn chance(&mut self, p: f64) -> bool { p > 0.0 && self.0.random().random_bool(p.min(1.0)) }
 }
 
 impl<P: Providers> Gossip<P> {
@@ -290,33 +284,23 @@ impl<P: Providers> Gossip<P> {
 
     /// Our node id.
     #[must_use]
-    pub fn node_id(&self) -> &str {
-        &self.inner.config.node_id
-    }
+    pub fn node_id(&self) -> &str { &self.inner.config.node_id }
 
     /// Our generation.
     #[must_use]
-    pub fn generation(&self) -> u64 {
-        self.inner.config.generation
-    }
+    pub fn generation(&self) -> u64 { self.inner.config.generation }
 
     /// Our advertise address.
     #[must_use]
-    pub fn advertise_addr(&self) -> &str {
-        &self.inner.config.advertise_addr
-    }
+    pub fn advertise_addr(&self) -> &str { &self.inner.config.advertise_addr }
 
     /// The configuration in use.
     #[must_use]
-    pub fn config(&self) -> &GossipConfig {
-        &self.inner.config
-    }
+    pub fn config(&self) -> &GossipConfig { &self.inner.config }
 
     /// Every known node, including self, sorted by node id.
     #[must_use]
-    pub fn members(&self) -> Vec<Member> {
-        self.inner.state.lock().members()
-    }
+    pub fn members(&self) -> Vec<Member> { self.inner.state.lock().members() }
 
     /// Alive nodes, including self, sorted by node id.
     #[must_use]
@@ -328,15 +312,11 @@ impl<P: Providers> Gossip<P> {
 
     /// Internal replicated state of one node (debugging / tests).
     #[must_use]
-    pub fn node_view(&self, node_id: &str) -> Option<NodeView> {
-        self.inner.state.lock().node_view(node_id)
-    }
+    pub fn node_view(&self, node_id: &str) -> Option<NodeView> { self.inner.state.lock().node_view(node_id) }
 
     /// Bumps whenever membership or any value changes.
     #[must_use]
-    pub fn changes(&self) -> watch::Receiver<u64> {
-        self.inner.changes.subscribe()
-    }
+    pub fn changes(&self) -> watch::Receiver<u64> { self.inner.changes.subscribe() }
 
     /// Current counters.
     #[must_use]
@@ -377,28 +357,20 @@ impl<P: Providers> Gossip<P> {
 
     /// The shutdown token of this node.
     #[must_use]
-    pub fn shutdown_token(&self) -> &CancellationToken {
-        &self.inner.shutdown
-    }
+    pub fn shutdown_token(&self) -> &CancellationToken { &self.inner.shutdown }
 
     /// Stop every task of this node.
-    pub fn shutdown(&self) {
-        self.inner.shutdown.cancel();
-    }
+    pub fn shutdown(&self) { self.inner.shutdown.cancel(); }
 
     /// A guard that shuts the node down when dropped. Hold it in the future
     /// that owns the node (e.g. a simulated `Process::run`) so that aborting
     /// that future stops the node's tasks.
     #[must_use]
-    pub fn drop_guard(&self) -> DropGuard {
-        self.inner.shutdown.clone().drop_guard()
-    }
+    pub fn drop_guard(&self) -> DropGuard { self.inner.shutdown.clone().drop_guard() }
 }
 
 impl<P: Providers> Inner<P> {
-    fn bump(&self) {
-        self.changes.send_modify(|v| *v = v.wrapping_add(1));
-    }
+    fn bump(&self) { self.changes.send_modify(|v| *v = v.wrapping_add(1)); }
 
     fn apply(&self, delta: Delta) {
         let now = self.providers.time().timer();
@@ -442,9 +414,7 @@ impl<P: Providers> Inner<P> {
         }
     }
 
-    fn tie_break(&self) -> u64 {
-        self.providers.random().random_range(0..u64::MAX)
-    }
+    fn tie_break(&self) -> u64 { self.providers.random().random_range(0..u64::MAX) }
 
     /// Digest + delta for a peer digest, sizes recorded.
     fn answer(&self, peer: &wire::Digest) -> Result<(wire::Digest, Delta), WireError> {
@@ -577,9 +547,7 @@ where
 struct InboundSlot<P: Providers>(Arc<Inner<P>>);
 
 impl<P: Providers> Drop for InboundSlot<P> {
-    fn drop(&mut self) {
-        self.0.inbound.fetch_sub(1, Ordering::Relaxed);
-    }
+    fn drop(&mut self) { self.0.inbound.fetch_sub(1, Ordering::Relaxed); }
 }
 
 async fn server_loop<P: Providers>(inner: Arc<Inner<P>>, listener: <P::Network as NetworkProvider>::TcpListener) {

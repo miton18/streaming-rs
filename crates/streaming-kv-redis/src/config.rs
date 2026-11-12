@@ -146,9 +146,7 @@ impl RedisConfig {
 
     /// Host part of [`Self::addr`], without brackets or port (TLS server name).
     #[must_use]
-    pub fn host(&self) -> &str {
-        host_of(&self.addr)
-    }
+    pub fn host(&self) -> &str { host_of(&self.addr) }
 }
 
 pub(crate) fn tls_unavailable() -> KvError {

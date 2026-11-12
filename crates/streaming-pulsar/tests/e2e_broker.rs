@@ -43,17 +43,11 @@ use streaming_pulsar::{
 mod common;
 
 /// The broker of `PULSAR_E2E_URL`, or else the fake one of `common`.
-fn broker() -> Option<String> {
-    Some(std::env::var("PULSAR_E2E_URL").unwrap_or_else(|_| common::shared().url.clone()))
-}
+fn broker() -> Option<String> { Some(std::env::var("PULSAR_E2E_URL").unwrap_or_else(|_| common::shared().url.clone())) }
 
-fn real_broker() -> bool {
-    std::env::var("PULSAR_E2E_URL").is_ok()
-}
+fn real_broker() -> bool { std::env::var("PULSAR_E2E_URL").is_ok() }
 
-fn admin_addr() -> String {
-    std::env::var("PULSAR_E2E_ADMIN").unwrap_or_else(|_| "localhost:8080".to_owned())
-}
+fn admin_addr() -> String { std::env::var("PULSAR_E2E_ADMIN").unwrap_or_else(|_| "localhost:8080".to_owned()) }
 
 /// Minimal HTTP/1.1 client for the admin REST API (no extra dependency).
 fn admin(method: &str, path: &str, body: &str) -> (u16, String) {
@@ -185,9 +179,7 @@ async fn drain(reader: &mut Box<dyn PartitionReader>, count: usize, within: Dura
     records
 }
 
-fn msg(record: &SourceRecord) -> &PulsarMessage {
-    record.value.downcast_ref::<PulsarMessage>().unwrap()
-}
+fn msg(record: &SourceRecord) -> &PulsarMessage { record.value.downcast_ref::<PulsarMessage>().unwrap() }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_reads_partitions_acks_and_redelivers() {

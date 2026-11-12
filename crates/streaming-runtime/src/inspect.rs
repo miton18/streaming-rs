@@ -40,9 +40,7 @@ pub async fn slice_head(kv: &dyn Kv, slice: &SliceKey) -> Result<Option<SliceHea
 /// Whether an emitter slice whose head is at `position` has emitted `window`
 /// entirely.
 #[must_use]
-pub fn covers(position: Option<Position>, window: &streaming_core::Window) -> bool {
-    state::emitted(window, position)
-}
+pub fn covers(position: Option<Position>, window: &streaming_core::Window) -> bool { state::emitted(window, position) }
 
 /// The plan generation under which the commit record `value`, just written
 /// to the log of `slice` under `field`, was written. `None` for anything

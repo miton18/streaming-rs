@@ -273,13 +273,9 @@ mod tests {
         }
     }
 
-    fn source(config: &Value) -> Result<SourceConfig, OpError> {
-        SourceConfig::from_json(&context(), config)
-    }
+    fn source(config: &Value) -> Result<SourceConfig, OpError> { SourceConfig::from_json(&context(), config) }
 
-    fn sink(config: &Value) -> Result<SinkConfig, OpError> {
-        SinkConfig::from_json(&context(), config)
-    }
+    fn sink(config: &Value) -> Result<SinkConfig, OpError> { SinkConfig::from_json(&context(), config) }
 
     #[test]
     fn registers_both_operators() {

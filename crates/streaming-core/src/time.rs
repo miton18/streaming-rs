@@ -21,33 +21,23 @@ pub struct Window {
 impl Window {
     /// Build a window.
     #[must_use]
-    pub fn new(start: Timestamp, end: Timestamp) -> Self {
-        Self { start, end }
-    }
+    pub fn new(start: Timestamp, end: Timestamp) -> Self { Self { start, end } }
 
     /// Whether `ts` falls inside the window.
     #[must_use]
-    pub fn contains(&self, ts: Timestamp) -> bool {
-        ts >= self.start && ts < self.end
-    }
+    pub fn contains(&self, ts: Timestamp) -> bool { ts >= self.start && ts < self.end }
 }
 
 impl Ord for Window {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.end, self.start).cmp(&(other.end, other.start))
-    }
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering { (self.end, self.start).cmp(&(other.end, other.start)) }
 }
 
 impl PartialOrd for Window {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
 impl fmt::Display for Window {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.start, self.end)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}-{}", self.start, self.end) }
 }
 
 impl FromStr for Window {
@@ -105,9 +95,7 @@ pub fn format_duration(duration: Duration) -> String {
 pub struct DurationText;
 
 impl schemars::JsonSchema for DurationText {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Duration".into()
-    }
+    fn schema_name() -> std::borrow::Cow<'static, str> { "Duration".into() }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({

@@ -90,9 +90,7 @@ fn id_schema(kind: &str, extra: &[char]) -> schemars::Schema {
     })
 }
 
-fn extra_text(extra: &[char]) -> String {
-    extra.iter().map(|c| format!(", `{c}`")).collect()
-}
+fn extra_text(extra: &[char]) -> String { extra.iter().map(|c| format!(", `{c}`")).collect() }
 
 macro_rules! string_id {
     ($(#[$m:meta])* $name:ident, $kind:literal, [$($extra:literal),*]) => {
@@ -203,15 +201,11 @@ pub struct GraphKey {
 impl GraphKey {
     /// Build a graph key.
     #[must_use]
-    pub fn new(tenant: TenantId, graph: GraphId) -> Self {
-        Self { tenant, graph }
-    }
+    pub fn new(tenant: TenantId, graph: GraphId) -> Self { Self { tenant, graph } }
 }
 
 impl fmt::Display for GraphKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.tenant, self.graph)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}/{}", self.tenant, self.graph) }
 }
 
 impl FromStr for GraphKey {
@@ -302,15 +296,11 @@ impl FromStr for SliceId {
 }
 
 impl Serialize for SliceId {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { serializer.collect_str(self) }
 }
 
 impl schemars::JsonSchema for SliceId {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "SliceId".into()
-    }
+    fn schema_name() -> std::borrow::Cow<'static, str> { "SliceId".into() }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
@@ -342,9 +332,7 @@ pub struct SliceKey {
 impl SliceKey {
     /// The graph this slice belongs to.
     #[must_use]
-    pub fn graph_key(&self) -> GraphKey {
-        GraphKey::new(self.tenant.clone(), self.graph.clone())
-    }
+    pub fn graph_key(&self) -> GraphKey { GraphKey::new(self.tenant.clone(), self.graph.clone()) }
 }
 
 impl fmt::Display for SliceKey {
@@ -373,15 +361,11 @@ impl FromStr for SliceKey {
 }
 
 impl Serialize for SliceKey {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { serializer.collect_str(self) }
 }
 
 impl schemars::JsonSchema for SliceKey {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "SliceKey".into()
-    }
+    fn schema_name() -> std::borrow::Cow<'static, str> { "SliceKey".into() }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({

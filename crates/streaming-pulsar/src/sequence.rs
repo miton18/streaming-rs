@@ -117,9 +117,7 @@ impl SequenceLayout {
 
     /// Bits per component: the three position components, then the index.
     #[must_use]
-    pub fn bits(&self) -> [u8; 4] {
-        self.bits
-    }
+    pub fn bits(&self) -> [u8; 4] { self.bits }
 
     /// Pack four components; fails if one does not fit its width.
     pub fn pack(&self, components: [u64; 4]) -> Result<u64, String> {

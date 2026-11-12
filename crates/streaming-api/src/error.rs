@@ -267,15 +267,11 @@ impl ApiError {
 
     /// Its code.
     #[must_use]
-    pub fn code(&self) -> &'static ErrorCode {
-        self.code
-    }
+    pub fn code(&self) -> &'static ErrorCode { self.code }
 
     /// Its message, rendered from the code and the context.
     #[must_use]
-    pub fn message(&self) -> String {
-        render(self.code.template, &self.context)
-    }
+    pub fn message(&self) -> String { render(self.code.template, &self.context) }
 
     /// A body that is not the expected JSON.
     pub(crate) fn body(error: &serde_json::Error) -> Self {
@@ -314,9 +310,7 @@ pub(crate) struct ErrorBody {
 }
 
 impl JsonSchema for ErrorBody {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "ErrorBody".into()
-    }
+    fn schema_name() -> std::borrow::Cow<'static, str> { "ErrorBody".into() }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         let mut codes = String::new();
@@ -375,9 +369,7 @@ impl OperationOutput for ApiError {
 }
 
 /// The path parameter an identifier kind comes from (`tenant id` -> `tenant`).
-fn parameter_of(kind: &str) -> &str {
-    kind.strip_suffix(" id").unwrap_or(kind)
-}
+fn parameter_of(kind: &str) -> &str { kind.strip_suffix(" id").unwrap_or(kind) }
 
 impl From<IdError> for ApiError {
     fn from(error: IdError) -> Self {

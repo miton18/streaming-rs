@@ -129,9 +129,7 @@ impl FakeWarp10 {
     }
 
     /// Queue a fault for an upcoming request.
-    pub fn push_fault(&self, fault: Fault) {
-        self.inner.lock().faults.push_back(fault);
-    }
+    pub fn push_fault(&self, fault: Fault) { self.inner.lock().faults.push_back(fault); }
 
     /// Fail the next `n` requests with `status`.
     pub fn fail_next(&self, n: usize, status: u16) {
@@ -166,39 +164,27 @@ impl FakeWarp10 {
 
     /// Number of faults still queued.
     #[must_use]
-    pub fn pending_faults(&self) -> usize {
-        self.inner.lock().faults.len()
-    }
+    pub fn pending_faults(&self) -> usize { self.inner.lock().faults.len() }
 
     /// Everything stored.
     #[must_use]
-    pub fn points(&self) -> BTreeMap<PointKey, GtsValue> {
-        self.inner.lock().points.clone()
-    }
+    pub fn points(&self) -> BTreeMap<PointKey, GtsValue> { self.inner.lock().points.clone() }
 
     /// One stored value.
     #[must_use]
-    pub fn get(&self, key: &PointKey) -> Option<GtsValue> {
-        self.inner.lock().points.get(key).cloned()
-    }
+    pub fn get(&self, key: &PointKey) -> Option<GtsValue> { self.inner.lock().points.get(key).cloned() }
 
     /// Number of stored points.
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.inner.lock().points.len()
-    }
+    pub fn len(&self) -> usize { self.inner.lock().points.len() }
 
     /// Whether nothing is stored.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.inner.lock().points.is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.inner.lock().points.is_empty() }
 
     /// Counters.
     #[must_use]
-    pub fn stats(&self) -> FakeStats {
-        self.inner.lock().stats
-    }
+    pub fn stats(&self) -> FakeStats { self.inner.lock().stats }
 
     /// Decide what to do with a request. Pure with respect to the network, so
     /// it can be unit-tested.

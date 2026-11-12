@@ -19,9 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 
-fn zero() -> Duration {
-    Duration::ZERO
-}
+fn zero() -> Duration { Duration::ZERO }
 
 /// Fixed-size, non-overlapping windows aligned on the epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,9 +55,7 @@ impl WindowAssigner for Tumbling {
         out.push(Window::new(start, start + size));
     }
 
-    fn allowed_lateness(&self) -> Duration {
-        self.allowed_lateness
-    }
+    fn allowed_lateness(&self) -> Duration { self.allowed_lateness }
 }
 
 /// Fixed-size windows starting every `slide`, aligned on the epoch.
@@ -105,9 +101,7 @@ impl WindowAssigner for Sliding {
         }
     }
 
-    fn allowed_lateness(&self) -> Duration {
-        self.allowed_lateness
-    }
+    fn allowed_lateness(&self) -> Duration { self.allowed_lateness }
 }
 
 fn check_positive(what: &str, duration: Duration) -> Result<(), OpError> {
@@ -134,9 +128,7 @@ impl Count {
 }
 
 impl DynAggregator for Count {
-    fn init(&self) -> DynAcc {
-        Box::new(0_u64)
-    }
+    fn init(&self) -> DynAcc { Box::new(0_u64) }
 
     fn add(&self, acc: &mut DynAcc, _item: &Datum) -> Result<(), OpError> {
         let count = acc.downcast_mut::<u64>().ok_or(OpError::Type { expected: "u64" })?;

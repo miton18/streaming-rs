@@ -51,106 +51,72 @@ pub const CLUSTER_PLACEMENT: &str = "cluster:placement";
 
 /// Metrics snapshot of a worker.
 #[must_use]
-pub fn worker_metrics(worker: &WorkerId) -> String {
-    format!("cluster:metrics:{worker}")
-}
+pub fn worker_metrics(worker: &WorkerId) -> String { format!("cluster:metrics:{worker}") }
 
 /// Prefix of every key owned by a tenant.
 #[must_use]
-pub fn tenant_prefix(tenant: &TenantId) -> String {
-    format!("t:{tenant}:")
-}
+pub fn tenant_prefix(tenant: &TenantId) -> String { format!("t:{tenant}:") }
 
 /// Prefix of every key owned by a graph.
 #[must_use]
-pub fn graph_prefix(graph: &GraphKey) -> String {
-    format!("t:{}:g:{}", graph.tenant, graph.graph)
-}
+pub fn graph_prefix(graph: &GraphKey) -> String { format!("t:{}:g:{}", graph.tenant, graph.graph) }
 
 /// Description of a graph.
 #[must_use]
-pub fn graph_spec(graph: &GraphKey) -> String {
-    format!("{}:spec", graph_prefix(graph))
-}
+pub fn graph_spec(graph: &GraphKey) -> String { format!("{}:spec", graph_prefix(graph)) }
 
 /// Counter the versions of a graph's descriptions are drawn from: two
 /// writers never store two descriptions under one version.
 #[must_use]
-pub fn graph_version(graph: &GraphKey) -> String {
-    format!("{}:version", graph_prefix(graph))
-}
+pub fn graph_version(graph: &GraphKey) -> String { format!("{}:version", graph_prefix(graph)) }
 
 /// Description of a graph as the code of the workers built it, before the
 /// configuration changes made through the API are applied.
 #[must_use]
-pub fn graph_code(graph: &GraphKey) -> String {
-    format!("{}:code", graph_prefix(graph))
-}
+pub fn graph_code(graph: &GraphKey) -> String { format!("{}:code", graph_prefix(graph)) }
 
 /// Configuration fields of a graph's nodes set through the API, laid over
 /// [`graph_code`] to make [`graph_spec`].
 #[must_use]
-pub fn graph_overrides(graph: &GraphKey) -> String {
-    format!("{}:overrides", graph_prefix(graph))
-}
+pub fn graph_overrides(graph: &GraphKey) -> String { format!("{}:overrides", graph_prefix(graph)) }
 
 /// The successive declarations of a graph by the code of the workers.
 #[must_use]
-pub fn graph_declarations(graph: &GraphKey) -> String {
-    format!("{}:declarations", graph_prefix(graph))
-}
+pub fn graph_declarations(graph: &GraphKey) -> String { format!("{}:declarations", graph_prefix(graph)) }
 
 /// Desired run state of a graph.
 #[must_use]
-pub fn graph_desired(graph: &GraphKey) -> String {
-    format!("{}:desired", graph_prefix(graph))
-}
+pub fn graph_desired(graph: &GraphKey) -> String { format!("{}:desired", graph_prefix(graph)) }
 
 /// Execution plan of a graph.
 #[must_use]
-pub fn graph_plan(graph: &GraphKey) -> String {
-    format!("{}:plan", graph_prefix(graph))
-}
+pub fn graph_plan(graph: &GraphKey) -> String { format!("{}:plan", graph_prefix(graph)) }
 
 /// Rows written by a `std/kv-sink@1` node.
 #[must_use]
-pub fn graph_output(graph: &GraphKey, node: &NodeId) -> String {
-    format!("{}:out:{node}", graph_prefix(graph))
-}
+pub fn graph_output(graph: &GraphKey, node: &NodeId) -> String { format!("{}:out:{node}", graph_prefix(graph)) }
 
-fn slice_prefix(slice: &SliceKey) -> String {
-    format!("t:{}:g:{}:s:{}", slice.tenant, slice.graph, slice.slice)
-}
+fn slice_prefix(slice: &SliceKey) -> String { format!("t:{}:g:{}:s:{}", slice.tenant, slice.graph, slice.slice) }
 
 /// Commit log of a slice.
 #[must_use]
-pub fn slice_log(slice: &SliceKey) -> String {
-    format!("{}:log", slice_prefix(slice))
-}
+pub fn slice_log(slice: &SliceKey) -> String { format!("{}:log", slice_prefix(slice)) }
 
 /// Seal of a slice log: the epochs at or below its highest field are final.
 #[must_use]
-pub fn slice_seal(slice: &SliceKey) -> String {
-    format!("{}:seal", slice_prefix(slice))
-}
+pub fn slice_seal(slice: &SliceKey) -> String { format!("{}:seal", slice_prefix(slice)) }
 
 /// Field of a slice seal declaring every epoch up to `epoch` final.
 #[must_use]
-pub fn seal_field(epoch: u64) -> String {
-    format!("f:{epoch}")
-}
+pub fn seal_field(epoch: u64) -> String { format!("f:{epoch}") }
 
 /// Inverse of [`seal_field`].
 #[must_use]
-pub fn parse_seal_field(field: &str) -> Option<u64> {
-    field.strip_prefix("f:")?.parse().ok()
-}
+pub fn parse_seal_field(field: &str) -> Option<u64> { field.strip_prefix("f:")?.parse().ok() }
 
 /// Index of the windows a slice holds state for, for one aggregate node.
 #[must_use]
-pub fn slice_window_index(slice: &SliceKey, node: &NodeId) -> String {
-    format!("{}:idx:{node}", slice_prefix(slice))
-}
+pub fn slice_window_index(slice: &SliceKey, node: &NodeId) -> String { format!("{}:idx:{node}", slice_prefix(slice)) }
 
 /// Accumulators of one window of one aggregate node, for one slice.
 #[must_use]
@@ -160,21 +126,15 @@ pub fn slice_window(slice: &SliceKey, node: &NodeId, window: &Window) -> String 
 
 /// Field of a slice log holding the commit record of `epoch`.
 #[must_use]
-pub fn commit_field(epoch: u64) -> String {
-    format!("c:{epoch}")
-}
+pub fn commit_field(epoch: u64) -> String { format!("c:{epoch}") }
 
 /// Inverse of [`commit_field`].
 #[must_use]
-pub fn parse_commit_field(field: &str) -> Option<u64> {
-    field.strip_prefix("c:")?.parse().ok()
-}
+pub fn parse_commit_field(field: &str) -> Option<u64> { field.strip_prefix("c:")?.parse().ok() }
 
 /// Field of a window hash holding the accumulator of `key` as of `epoch`.
 #[must_use]
-pub fn state_field(key: &Key, epoch: u64) -> String {
-    format!("{}@{epoch}", key.to_hex())
-}
+pub fn state_field(key: &Key, epoch: u64) -> String { format!("{}@{epoch}", key.to_hex()) }
 
 /// Inverse of [`state_field`].
 #[must_use]

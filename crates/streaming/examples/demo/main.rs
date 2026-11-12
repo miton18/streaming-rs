@@ -10,6 +10,4 @@
 
 mod graphs;
 
-fn main() -> std::process::ExitCode {
-    graphs::app().main()
-}
+fn main() -> std::process::ExitCode { graphs::app().main() }

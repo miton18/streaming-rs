@@ -151,15 +151,11 @@ impl<S> Route<S> {
 
     /// Its method.
     #[must_use]
-    pub fn method(&self) -> Method {
-        self.method
-    }
+    pub fn method(&self) -> Method { self.method }
 
     /// Its path, in axum's syntax, which is also OpenAPI's (`/a/{b}`).
     #[must_use]
-    pub fn path(&self) -> &'static str {
-        self.path
-    }
+    pub fn path(&self) -> &'static str { self.path }
 }
 
 /// How `#[route]` describes an operation.
@@ -172,9 +168,7 @@ pub struct ApiRouter<S> {
 }
 
 impl<S: Clone + Send + Sync + 'static> Default for ApiRouter<S> {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl<S: Clone + Send + Sync + 'static> ApiRouter<S> {
@@ -279,9 +273,7 @@ impl<S: Clone + Send + Sync + 'static> ApiRouter<S> {
     }
 
     /// The axum router serving every route.
-    pub fn into_router(self) -> Router<S> {
-        self.router
-    }
+    pub fn into_router(self) -> Router<S> { self.router }
 }
 
 fn generator(contract: Contract) -> SchemaGenerator {
@@ -346,9 +338,7 @@ pub struct OperationContext<'a> {
 
 impl OperationContext<'_> {
     /// Set the operation id (the handler's name, in lowerCamelCase).
-    pub fn set_operation_id(&mut self, id: &str) {
-        self.operation.operation_id = Some(id.to_owned());
-    }
+    pub fn set_operation_id(&mut self, id: &str) { self.operation.operation_id = Some(id.to_owned()); }
 
     /// Set the summary (first paragraph) and description (the rest) from the
     /// handler's doc comment.
@@ -362,15 +352,11 @@ impl OperationContext<'_> {
     }
 
     /// Add a tag.
-    pub fn add_tag(&mut self, tag: &str) {
-        self.operation.tags.push(tag.to_owned());
-    }
+    pub fn add_tag(&mut self, tag: &str) { self.operation.tags.push(tag.to_owned()); }
 
     /// The names of the path's `{param}` segments, in order.
     #[must_use]
-    pub fn path_params(&self) -> &[String] {
-        &self.path_params
-    }
+    pub fn path_params(&self) -> &[String] { &self.path_params }
 
     /// The schema of `T` as it serializes (for a response), usually a
     /// reference to a component.
@@ -380,9 +366,7 @@ impl OperationContext<'_> {
 
     /// The schema of `T` as it deserializes (for a request body), usually a
     /// reference to a component.
-    pub fn request_schema<T: JsonSchema + ?Sized>(&mut self) -> Value {
-        self.requests.subschema_for::<T>().to_value()
-    }
+    pub fn request_schema<T: JsonSchema + ?Sized>(&mut self) -> Value { self.requests.subschema_for::<T>().to_value() }
 
     /// The schema of `T` as it deserializes, inline: the object whose
     /// properties are parameters.
@@ -392,14 +376,10 @@ impl OperationContext<'_> {
     }
 
     /// Add a parameter.
-    pub fn add_parameter(&mut self, parameter: Parameter) {
-        self.operation.parameters.push(parameter);
-    }
+    pub fn add_parameter(&mut self, parameter: Parameter) { self.operation.parameters.push(parameter); }
 
     /// Set the request body.
-    pub fn set_request_body(&mut self, body: RequestBody) {
-        self.operation.request_body = Some(body);
-    }
+    pub fn set_request_body(&mut self, body: RequestBody) { self.operation.request_body = Some(body); }
 
     /// Add (or replace) the response of a status (`"200"`, `"default"`, ...).
     pub fn add_response(&mut self, status: &str, response: Response) {
@@ -533,9 +513,7 @@ impl OperationOutput for &'static str {
 }
 
 impl OperationOutput for String {
-    fn describe(operation: &mut OperationContext<'_>) {
-        <&'static str as OperationOutput>::describe(operation);
-    }
+    fn describe(operation: &mut OperationContext<'_>) { <&'static str as OperationOutput>::describe(operation); }
 }
 
 impl OperationOutput for () {
@@ -681,9 +659,7 @@ pub struct RequestBody {
 impl RequestBody {
     /// A required JSON body.
     #[must_use]
-    pub fn json(schema: Value) -> Self {
-        Self::with_content("application/json", schema)
-    }
+    pub fn json(schema: Value) -> Self { Self::with_content("application/json", schema) }
 
     /// A required body of one media type.
     #[must_use]

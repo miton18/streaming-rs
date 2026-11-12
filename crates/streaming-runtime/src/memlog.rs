@@ -19,9 +19,7 @@ struct Partition {
 }
 
 impl Partition {
-    fn end(&self) -> u64 {
-        self.base + self.records.len() as u64
-    }
+    fn end(&self) -> u64 { self.base + self.records.len() as u64 }
 }
 
 /// A partitioned, append-only, in-memory log.
@@ -36,9 +34,7 @@ pub struct MemLog {
 impl MemLog {
     /// A log with `partitions` partitions that keeps every record.
     #[must_use]
-    pub fn new(partitions: u32) -> Arc<Self> {
-        Self::with_retention(partitions, false)
-    }
+    pub fn new(partitions: u32) -> Arc<Self> { Self::with_retention(partitions, false) }
 
     /// A log that drops records once they are acknowledged, when
     /// `release_acked` is set.
@@ -53,9 +49,7 @@ impl MemLog {
 
     /// Number of partitions.
     #[must_use]
-    pub fn partitions(&self) -> u32 {
-        self.partitions.lock().len() as u32
-    }
+    pub fn partitions(&self) -> u32 { self.partitions.lock().len() as u32 }
 
     /// Add a partition at the end. Returns its index.
     pub fn add_partition(&self) -> u32 {
@@ -145,9 +139,7 @@ impl MemLog {
     }
 
     /// Resolves at the next append.
-    pub async fn appended(&self) {
-        self.appended.notified().await;
-    }
+    pub async fn appended(&self) { self.appended.notified().await; }
 
     /// A source connector reading this log.
     pub fn source<P: Providers>(self: &Arc<Self>, providers: P) -> Arc<dyn SourceConnector> {
@@ -165,9 +157,7 @@ struct MemLogSource<P: Providers> {
 
 #[async_trait]
 impl<P: Providers> SourceConnector for MemLogSource<P> {
-    async fn partitions(&self) -> Result<u32, SourceError> {
-        Ok(self.log.partitions())
-    }
+    async fn partitions(&self) -> Result<u32, SourceError> { Ok(self.log.partitions()) }
 
     async fn open(&self, partition: u32, after: Option<Position>) -> Result<Box<dyn PartitionReader>, SourceError> {
         Ok(Box::new(MemLogReader {
@@ -207,9 +197,7 @@ impl<P: Providers> PartitionReader for MemLogReader<P> {
         Ok(())
     }
 
-    async fn end_position(&mut self) -> Result<Option<Position>, SourceError> {
-        Ok(self.log.end(self.partition))
-    }
+    async fn end_position(&mut self) -> Result<Option<Position>, SourceError> { Ok(self.log.end(self.partition)) }
 }
 
 #[cfg(test)]

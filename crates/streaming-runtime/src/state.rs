@@ -137,9 +137,7 @@ pub(crate) struct LogView {
 
 impl LogView {
     /// The most recent commit, if the slice ever committed.
-    pub(crate) fn head(&self) -> Option<&CommitRecord> {
-        self.records.last()
-    }
+    pub(crate) fn head(&self) -> Option<&CommitRecord> { self.records.last() }
 }
 
 /// Prefix of the field that closes a log to plans older than a generation.
@@ -613,17 +611,11 @@ mod tests {
     use futures::executor::block_on;
     use streaming_core::MemKv;
 
-    fn slice() -> SliceKey {
-        "acme/g/src.events.0".parse().unwrap()
-    }
+    fn slice() -> SliceKey { "acme/g/src.events.0".parse().unwrap() }
 
-    fn node() -> NodeId {
-        NodeId::new("count").unwrap()
-    }
+    fn node() -> NodeId { NodeId::new("count").unwrap() }
 
-    fn key(name: &str) -> Key {
-        Key::encode(&name.to_owned()).unwrap()
-    }
+    fn key(name: &str) -> Key { Key::encode(&name.to_owned()).unwrap() }
 
     fn record(epoch: u64, owner: &str, entries: &[(&str, u64, u64)]) -> CommitRecord {
         CommitRecord {

@@ -29,9 +29,7 @@ impl Clock for SystemClock {
 }
 
 impl<F: Fn() -> Timestamp + Send + Sync + 'static> Clock for F {
-    fn now_ms(&self) -> Timestamp {
-        self()
-    }
+    fn now_ms(&self) -> Timestamp { self() }
 }
 
 /// Resolves the secrets referenced by a graph description.
@@ -49,9 +47,7 @@ pub trait SecretProvider: Send + Sync + 'static {
 pub struct NoSecrets;
 
 impl SecretProvider for NoSecrets {
-    fn get(&self, _tenant: &TenantId, _name: &str) -> Option<String> {
-        None
-    }
+    fn get(&self, _tenant: &TenantId, _name: &str) -> Option<String> { None }
 }
 
 /// Secrets held in memory, keyed by `(tenant, name)`.
@@ -63,9 +59,7 @@ pub struct StaticSecrets {
 impl StaticSecrets {
     /// An empty set.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
     /// Add a secret.
     #[must_use]
@@ -107,9 +101,7 @@ impl EnvSecrets {
 }
 
 impl SecretProvider for EnvSecrets {
-    fn get(&self, tenant: &TenantId, name: &str) -> Option<String> {
-        std::env::var(Self::variable(tenant, name)).ok()
-    }
+    fn get(&self, tenant: &TenantId, name: &str) -> Option<String> { std::env::var(Self::variable(tenant, name)).ok() }
 }
 
 #[cfg(test)]

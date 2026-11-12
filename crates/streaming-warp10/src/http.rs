@@ -129,9 +129,7 @@ impl Endpoint {
 
     /// The port to connect to: explicit, or 80 / 443.
     #[must_use]
-    pub fn effective_port(&self) -> u16 {
-        self.port.unwrap_or(if self.tls { 443 } else { 80 })
-    }
+    pub fn effective_port(&self) -> u16 { self.port.unwrap_or(if self.tls { 443 } else { 80 }) }
 
     /// `host:port` as handed to `NetworkProvider::connect`.
     #[must_use]
@@ -537,9 +535,7 @@ mod tests {
         max_body: 64,
     };
 
-    fn resp(bytes: &[u8]) -> Response {
-        parse_response(bytes, true, L).unwrap().unwrap()
-    }
+    fn resp(bytes: &[u8]) -> Response { parse_response(bytes, true, L).unwrap().unwrap() }
 
     #[test]
     fn endpoint_parsing() {

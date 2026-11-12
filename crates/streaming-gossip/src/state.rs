@@ -154,14 +154,10 @@ impl NodeState {
             .collect()
     }
 
-    fn live_count(&self) -> usize {
-        self.kvs.values().filter(|v| v.value.is_some()).count()
-    }
+    fn live_count(&self) -> usize { self.kvs.values().filter(|v| v.value.is_some()).count() }
 }
 
-fn live_count(kvs: &BTreeMap<String, Versioned>) -> usize {
-    kvs.values().filter(|v| v.value.is_some()).count()
-}
+fn live_count(kvs: &BTreeMap<String, Versioned>) -> usize { kvs.values().filter(|v| v.value.is_some()).count() }
 
 fn visible_eq(a: &BTreeMap<String, Versioned>, b: &BTreeMap<String, Versioned>) -> bool {
     let live = |m: &BTreeMap<String, Versioned>| {
@@ -249,20 +245,14 @@ impl ClusterState {
 
     /// Local node id.
     #[must_use]
-    pub fn self_id(&self) -> &str {
-        &self.self_id
-    }
+    pub fn self_id(&self) -> &str { &self.self_id }
 
     /// Counters.
     #[must_use]
-    pub fn counters(&self) -> &StateCounters {
-        &self.counters
-    }
+    pub fn counters(&self) -> &StateCounters { &self.counters }
 
     #[allow(clippy::expect_used)]
-    fn me(&mut self) -> &mut NodeState {
-        self.nodes.get_mut(&self.self_id).expect("self node is never removed")
-    }
+    fn me(&mut self) -> &mut NodeState { self.nodes.get_mut(&self.self_id).expect("self node is never removed") }
 
     /// Publish / overwrite a local key. Returns whether anything changed.
     ///
@@ -327,15 +317,11 @@ impl ClusterState {
     }
 
     /// Increment the local heartbeat (once per round).
-    pub fn beat(&mut self) {
-        self.me().heartbeat += 1;
-    }
+    pub fn beat(&mut self) { self.me().heartbeat += 1; }
 
     /// Local heartbeat.
     #[must_use]
-    pub fn heartbeat(&self) -> u64 {
-        self.nodes.get(&self.self_id).map_or(0, |n| n.heartbeat)
-    }
+    pub fn heartbeat(&self) -> u64 { self.nodes.get(&self.self_id).map_or(0, |n| n.heartbeat) }
 
     /// Digest of everything known.
     #[must_use]
@@ -800,9 +786,7 @@ impl ClusterState {
 
     /// Whether a forgotten record exists for `id`.
     #[must_use]
-    pub fn is_forgotten(&self, id: &str) -> bool {
-        self.forgotten.contains_key(id)
-    }
+    pub fn is_forgotten(&self, id: &str) -> bool { self.forgotten.contains_key(id) }
 }
 
 /// Randomness source for [`select_targets`].
