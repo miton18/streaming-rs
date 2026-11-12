@@ -383,4 +383,41 @@ mod tests {
             ));
         });
     }
+
+    #[test]
+    fn hash_json_helpers() {
+        block_on(async {
+            let kv: DynKv = MemKv::shared();
+            assert_eq!(kv.hget_json::<u32>("h", "a").await.unwrap(), None);
+            kv.hset_json("h", "a", &1_u32).await.unwrap();
+            kv.hset_json("h", "b", &2_u32).await.unwrap();
+            kv.hset("h", vec![("bad".into(), b"{".to_vec())]).await.unwrap();
+            assert_eq!(kv.hget_json::<u32>("h", "b").await.unwrap(), Some(2));
+            // Undecodable fields are skipped.
+            assert_eq!(
+                kv.hgetall_json::<u32>("h").await.unwrap(),
+                vec![("a".to_owned(), 1), ("b".to_owned(), 2)]
+            );
+        });
+    }
+
+    #[test]
+    fn stats_count_traffic_keys_and_bytes() {
+        block_on(async {
+            let kv = MemKv::shared();
+            assert_eq!(kv.stats(), MemKvStats::default());
+            kv.set("ab", b"xyz".to_vec()).await.unwrap();
+            kv.hset("hh", vec![("f".into(), b"1234".to_vec()), ("gg".into(), b"5".to_vec())])
+                .await
+                .unwrap();
+            kv.get("ab").await.unwrap();
+            kv.hget("hh", "f").await.unwrap();
+            kv.hgetall("hh").await.unwrap();
+            let stats = kv.stats();
+            assert_eq!((stats.reads, stats.writes, stats.keys), (3, 2, 2));
+            // "ab" + "xyz", then "hh" + "f" + "1234" + "gg" + "5".
+            assert_eq!(stats.bytes, 5 + 10);
+            assert_eq!(kv.keys(), ["ab", "hh"]);
+        });
+    }
 }

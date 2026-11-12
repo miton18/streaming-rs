@@ -175,6 +175,14 @@ mod tests {
     }
 
     #[test]
+    fn cluster_and_tenant_keys() {
+        let worker = crate::ids::WorkerId::new("worker-1").unwrap();
+        assert_eq!(worker_metrics(&worker), "cluster:metrics:worker-1");
+        let tenant = crate::ids::TenantId::new("acme").unwrap();
+        assert_eq!(tenant_prefix(&tenant), "t:acme:");
+    }
+
+    #[test]
     fn fields_round_trip() {
         assert_eq!(parse_commit_field(&commit_field(42)), Some(42));
         assert_eq!(parse_commit_field("m"), None);

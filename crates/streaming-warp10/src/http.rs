@@ -562,6 +562,9 @@ mod tests {
         assert_eq!(e.address(), "[::1]:9");
         assert_eq!(e.host_header(), "[::1]:9");
 
+        let e = Endpoint::parse("http://[::1]/x").unwrap();
+        assert_eq!((e.host.as_str(), e.port), ("::1", None));
+
         let e = Endpoint::parse("http://h?a=b").unwrap();
         assert_eq!(e.path, "/?a=b");
         assert_eq!(Endpoint::parse("http://h:80/p").unwrap().host_header(), "h");
@@ -576,6 +579,9 @@ mod tests {
             "http://h:x/",
             "http://h /x",
             "http://[::1/x",
+            "http://[::1]x/",
+            "http://h/a\u{1}b",
+            "http://h/a b",
         ] {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
         }
@@ -718,6 +724,57 @@ mod tests {
             (418, "Status"),
         ] {
             assert_eq!(reason_phrase(status), phrase);
+        }
+    }
+
+    #[test]
+    fn request_lines_refuse_control_characters_anywhere() {
+        let ok = build_request("POST", "/p", "h", &[], b"");
+        assert!(ok.is_ok());
+        for (method, path, host) in [
+            ("PO\rST", "/p", "h"),
+            ("POST", "/p\n", "h"),
+            ("POST", "/p", "h\0"),
+            ("POST", "/a b", "h"),
+            ("PO ST", "/p", "h"),
+        ] {
+            assert!(
+                build_request(method, path, host, &[], b"").is_err(),
+                "{method:?} {path:?} {host:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_equal_content_lengths_are_accepted() {
+        let r = resp(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\ncontent-length: 2\r\n\r\nhi");
+        assert_eq!(r.body, b"hi");
+    }
+
+    #[test]
+    fn a_chunk_overflowing_the_room_left_is_cut_there() {
+        // 40 + 40 bytes against a cap of 64: the second chunk only gets 24.
+        let mut raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n28\r\n".to_vec();
+        raw.extend(std::iter::repeat_n(b'x', 40));
+        raw.extend(b"\r\n28\r\n");
+        raw.extend(std::iter::repeat_n(b'y', 40));
+        raw.extend(b"\r\n0\r\n\r\n");
+        let r = resp(&raw);
+        assert_eq!((r.body.len(), r.truncated), (64, true));
+        assert_eq!(&r.body[38..42], b"xxyy");
+    }
+
+    #[test]
+    fn request_lines_need_a_method_and_a_target() {
+        for bad in [
+            &b"GET  HTTP/1.1\r\nHost: h\r\n\r\n"[..],
+            b" /x HTTP/1.1\r\nHost: h\r\n\r\n",
+        ] {
+            assert!(
+                parse_request(bad, false, L).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
         }
     }
 

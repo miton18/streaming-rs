@@ -146,6 +146,9 @@ pub struct SimEnv {
     pub boots: Mutex<u64>,
     /// Set by the driver once every event is produced.
     pub production_done: Mutex<bool>,
+    /// Set by the driver when it deletes the graph, at the very end: the
+    /// commit logs then go, and what was acknowledged no longer matters.
+    pub deleting: Mutex<bool>,
     /// Multiplier applied to the probability of every injected fault.
     pub fault_scale: f64,
     /// Upper bound of the latency of an ordinary KV command, in milliseconds.
@@ -195,6 +198,7 @@ impl SimEnv {
             sink_ambiguous: Mutex::new(0),
             boots: Mutex::new(0),
             production_done: Mutex::new(false),
+            deleting: Mutex::new(false),
             operator_actions: Mutex::default(),
             audit: Mutex::default(),
             audits: Mutex::new(0),
@@ -447,7 +451,7 @@ impl<P: Providers> PartitionReader for ChaosReader<P> {
                 .ok()
                 .flatten()
                 .and_then(|head| head.position);
-            if committed.is_none_or(|at| at < upto) {
+            if committed.is_none_or(|at| at < upto) && !*self.env.deleting.lock() {
                 self.env.audit.lock().push(format!(
                     "partition {} was acknowledged up to {upto:?} while {committed:?} is committed",
                     self.partition
@@ -1174,30 +1178,26 @@ impl Workload for Driver {
         // falsify a count, but they would fill a real store.
         let started = ctx.time().now();
         loop {
-            // The logs of slices that left the plan must go as well.
-            let planned: BTreeSet<String> = store
+            // The logs of slices that left the plan must go as well: once
+            // all they committed is emitted, retired slices are closed, then
+            // purged.
+            let plan = store
                 .get_json::<streaming_core::control::GraphPlan>(&keys::graph_plan(&self.scenario.spec().key()))
                 .await
                 .ok()
                 .flatten()
-                .map(|plan| {
-                    plan.slices
-                        .iter()
-                        .chain(&plan.retired)
-                        .map(|slice| format!(":s:{slice}:log"))
-                        .collect()
-                })
                 .unwrap_or_default();
-            let leaked: Vec<String> = env
-                .kv
-                .keys()
-                .into_iter()
-                .filter(|key| {
-                    key.contains(":w:")
-                        || key.contains(":idx:")
-                        || (key.ends_with(":log") && !planned.iter().any(|log| key.ends_with(log.as_str())))
-                })
+            let planned: BTreeSet<String> = plan.slices.iter().map(|slice| format!(":s:{slice}:log")).collect();
+            let mut leaked: Vec<String> = plan
+                .retired
+                .iter()
+                .map(|slice| format!("retired slice {slice}"))
                 .collect();
+            leaked.extend(env.kv.keys().into_iter().filter(|key| {
+                key.contains(":w:")
+                    || key.contains(":idx:")
+                    || (key.ends_with(":log") && !planned.iter().any(|log| key.ends_with(log.as_str())))
+            }));
             if leaked.is_empty() {
                 break;
             }
@@ -1220,6 +1220,52 @@ impl Workload for Driver {
                 return Err(violation(format!("commit log `{key}` grew to {fields} fields")));
             }
         }
+
+        // Deleting the graph removes everything it left in the store.
+        let graph = self.scenario.spec().key();
+        let failed = |error: KvError| violation(error.to_string());
+        let Some(mut entry) = store
+            .hget_json::<GraphIndexEntry>(keys::CLUSTER_GRAPHS, &graph.to_string())
+            .await
+            .map_err(failed)?
+        else {
+            return Err(violation(format!("graph {graph} left the index")));
+        };
+        entry.deleting = true;
+        *env.deleting.lock() = true;
+        store
+            .hset_json(keys::CLUSTER_GRAPHS, &graph.to_string(), &entry)
+            .await
+            .map_err(failed)?;
+        store.incr(keys::CLUSTER_EPOCH).await.map_err(failed)?;
+        let prefix = keys::graph_prefix(&graph);
+        let started = ctx.time().now();
+        loop {
+            let left: Vec<String> = env
+                .kv
+                .keys()
+                .into_iter()
+                .filter(|key| key.starts_with(&prefix))
+                .collect();
+            let indexed = store
+                .hget(keys::CLUSTER_GRAPHS, &graph.to_string())
+                .await
+                .map_err(failed)?
+                .is_some();
+            if left.is_empty() && !indexed {
+                break;
+            }
+            if ctx.time().now().saturating_sub(started) > Duration::from_secs(300) {
+                dump(&env).await;
+                return Err(violation(format!(
+                    "the deleted graph left {} keys, e.g. {:?} (still indexed: {indexed})",
+                    left.len(),
+                    &left[..left.len().min(3)]
+                )));
+            }
+            let _ = ctx.time().sleep(Duration::from_millis(500)).await;
+        }
+        assert_sometimes!(true, "a deleted graph was purged");
         Ok(())
     }
 
@@ -1566,6 +1612,9 @@ impl Workload for Auditor {
                 _ = ctx.time().sleep(Duration::from_millis(100)) => {}
             }
             *env.audits.lock() += 1;
+            if *env.deleting.lock() {
+                continue;
+            }
             for key in env.kv.keys() {
                 let Some(slice) = slice_of_log(&key) else {
                     continue;

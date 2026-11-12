@@ -233,4 +233,22 @@ mod tests {
         let rest = log.read(0, 0, 10);
         assert_eq!(rest.iter().map(|r| r.position.1).collect::<Vec<_>>(), [3, 4, 5]);
     }
+
+    #[test]
+    fn partitions_are_added_and_removed_at_the_end() {
+        let log = MemLog::new(2);
+        assert_eq!(log.add_partition(), 2);
+        assert_eq!(log.add_partition(), 3);
+        assert_eq!(log.partitions(), 4);
+        log.append(3, 0, datum(1_u64));
+        log.remove_partition();
+        assert_eq!(log.partitions(), 3);
+        assert_eq!(log.end(3), None);
+        log.remove_partition();
+        log.remove_partition();
+        assert_eq!(log.partitions(), 1);
+        // The last partition stays.
+        log.remove_partition();
+        assert_eq!(log.partitions(), 1);
+    }
 }

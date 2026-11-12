@@ -415,6 +415,13 @@ mod tests {
     }
 
     #[test]
+    fn graph_keys_display_and_parse() {
+        let key = GraphKey::new(TenantId::new("acme").unwrap(), GraphId::new("g").unwrap());
+        assert_eq!(key.to_string(), "acme/g");
+        assert_eq!("acme/g".parse::<GraphKey>().unwrap(), key);
+    }
+
+    #[test]
     fn slice_round_trip() {
         for s in ["src.events.3", "agg.count"] {
             let slice: SliceId = s.parse().unwrap();

@@ -315,41 +315,7 @@ impl<P: Providers> Worker<P> {
             }
         }
 
-        let finished: Vec<SliceKey> = running
-            .iter()
-            .filter(|(_, slice)| slice.done.load(Ordering::Relaxed))
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in finished {
-            let Some(slice) = running.remove(&key) else {
-                continue;
-            };
-            let book = books.entry(key.clone()).or_default();
-            if slice.shared.metrics.commits.load(Ordering::Relaxed) > 0 {
-                book.failures = 0;
-            }
-            // Back off exponentially while a slice keeps failing before its
-            // first commit, so that a broken graph does not spin.
-            let jitter = 1.0 + self.env.providers.random().random_ratio();
-            let factor = f64::from(1_u32 << book.failures.min(5));
-            let retry_at = now + self.config.restart_backoff.mul_f64(jitter * factor);
-            match slice.shared.exit() {
-                Some(SliceExit::Fenced) => {
-                    book.lifetime.fenced += 1;
-                    book.failures += 1;
-                    book.retry_at = Some(retry_at);
-                    book.last_error = Some("fenced: another worker committed this slice".to_owned());
-                    tracing::info!(slice = %key, "slice fenced");
-                }
-                Some(SliceExit::Failed(error)) => {
-                    tracing::warn!(slice = %key, %error, "slice failed");
-                    book.failures += 1;
-                    book.retry_at = Some(retry_at);
-                    book.last_error = Some(error);
-                }
-                _ => book.last_error = None,
-            }
-        }
+        self.reap(running, books, now);
 
         for (key, slice) in running.iter() {
             match target.get(key) {
@@ -426,6 +392,45 @@ impl<P: Providers> Worker<P> {
             );
         }
         books.retain(|key, _| target.contains_key(key) || running.contains_key(key));
+    }
+
+    /// Book the slice instances that ended: why, and when to start them again.
+    fn reap(&self, running: &mut BTreeMap<SliceKey, Running>, books: &mut BTreeMap<SliceKey, Book>, now: Duration) {
+        let finished: Vec<SliceKey> = running
+            .iter()
+            .filter(|(_, slice)| slice.done.load(Ordering::Relaxed))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in finished {
+            let Some(slice) = running.remove(&key) else {
+                continue;
+            };
+            let book = books.entry(key.clone()).or_default();
+            if slice.shared.metrics.commits.load(Ordering::Relaxed) > 0 {
+                book.failures = 0;
+            }
+            // Back off exponentially while a slice keeps failing before its
+            // first commit, so that a broken graph does not spin.
+            let jitter = 1.0 + self.env.providers.random().random_ratio();
+            let factor = f64::from(1_u32 << book.failures.min(5));
+            let retry_at = now + self.config.restart_backoff.mul_f64(jitter * factor);
+            match slice.shared.exit() {
+                Some(SliceExit::Fenced) => {
+                    book.lifetime.fenced += 1;
+                    book.failures += 1;
+                    book.retry_at = Some(retry_at);
+                    book.last_error = Some("fenced: another worker committed this slice".to_owned());
+                    tracing::info!(slice = %key, "slice fenced");
+                }
+                Some(SliceExit::Failed(error)) => {
+                    tracing::warn!(slice = %key, %error, "slice failed");
+                    book.failures += 1;
+                    book.retry_at = Some(retry_at);
+                    book.last_error = Some(error);
+                }
+                _ => book.last_error = None,
+            }
+        }
     }
 
     fn snapshot(
@@ -593,5 +598,479 @@ impl<P: Providers> Worker<P> {
         kill.cancel();
         self.membership.leave(&me).await;
         let _ = kv.del(vec![keys::worker_metrics(&me)]).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        memlog::MemLog,
+        metrics::{ActorIdent, ActorMetrics},
+    };
+    use moonpool_core::TokioProviders;
+    use std::sync::atomic::AtomicU64;
+    use streaming_core::{
+        GraphId, Kv, MemKv, NoSecrets, Registry, SliceId, SystemClock, TenantId, TypeTag, control::GraphIndexEntry,
+    };
+
+    /// Counts the reads of the cluster epoch and of the graph index.
+    struct Counting {
+        inner: MemKv,
+        epochs: AtomicU64,
+        indexes: AtomicU64,
+    }
+
+    #[async_trait]
+    impl Kv for Counting {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, KvError> {
+            if key == keys::CLUSTER_EPOCH {
+                self.epochs.fetch_add(1, Ordering::Relaxed);
+            }
+            self.inner.get(key).await
+        }
+        async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> {
+            self.inner.set(key, value).await
+        }
+        async fn del(&self, keys: Vec<String>) -> Result<(), KvError> {
+            self.inner.del(keys).await
+        }
+        async fn incr(&self, key: &str) -> Result<i64, KvError> {
+            self.inner.incr(key).await
+        }
+        async fn hsetnx(&self, key: &str, field: &str, value: Vec<u8>) -> Result<bool, KvError> {
+            self.inner.hsetnx(key, field, value).await
+        }
+        async fn hset(&self, key: &str, entries: Vec<(String, Vec<u8>)>) -> Result<(), KvError> {
+            self.inner.hset(key, entries).await
+        }
+        async fn hget(&self, key: &str, field: &str) -> Result<Option<Vec<u8>>, KvError> {
+            self.inner.hget(key, field).await
+        }
+        async fn hgetall(&self, key: &str) -> Result<Vec<(String, Vec<u8>)>, KvError> {
+            if key == keys::CLUSTER_GRAPHS {
+                self.indexes.fetch_add(1, Ordering::Relaxed);
+            }
+            self.inner.hgetall(key).await
+        }
+        async fn hdel(&self, key: &str, fields: Vec<String>) -> Result<(), KvError> {
+            self.inner.hdel(key, fields).await
+        }
+    }
+
+    fn me() -> WorkerId {
+        WorkerId::new("worker-a").unwrap()
+    }
+
+    fn registry(log: &Arc<MemLog>) -> Registry<TokioProviders> {
+        let mut registry = Registry::<TokioProviders>::standard();
+        let log = log.clone();
+        registry.register_source::<u64>("test/log@1", "", move |context, _| {
+            Ok(log.source(context.providers.clone()))
+        });
+        registry.register_sink("test/broken@1", "", TypeTag::Any, |_, _| {
+            Err(streaming_core::OpError::Config("broken on purpose".into()))
+        });
+        registry
+    }
+
+    fn worker(kv: DynKv, config: WorkerConfig) -> Worker<TokioProviders> {
+        let log = MemLog::new(1);
+        let mut registry = registry(&log);
+        crate::builtin::register(&mut registry, kv.clone());
+        Worker::new(
+            RuntimeEnv {
+                providers: TokioProviders::new(),
+                kv,
+                clock: Arc::new(SystemClock),
+                secrets: Arc::new(NoSecrets),
+                registry: Arc::new(registry),
+            },
+            config,
+        )
+        .with_load_probe(Arc::new(crate::NoLoad))
+    }
+
+    fn config() -> WorkerConfig {
+        let mut config = WorkerConfig::new(me());
+        config.tick = Duration::from_millis(10);
+        config.restart_backoff = Duration::from_millis(100);
+        config.controller_grace = Duration::ZERO;
+        config
+    }
+
+    fn slice_key(graph: &str) -> SliceKey {
+        format!("acme/{graph}/src.events.0").parse().unwrap()
+    }
+
+    fn graph_key(graph: &str) -> GraphKey {
+        GraphKey::new(TenantId::new("acme").unwrap(), GraphId::new(graph).unwrap())
+    }
+
+    fn spec(graph: &str, version: u64, sink: &str) -> GraphSpec {
+        serde_json::from_value(serde_json::json!({
+            "tenant": "acme",
+            "graph": graph,
+            "version": version,
+            "nodes": [
+                {"id": "events", "op": "test/log@1"},
+                {"id": "out", "op": sink}
+            ],
+            "edges": [["events", "out"]]
+        }))
+        .unwrap()
+    }
+
+    /// Store a graph, its plan and its placement on `worker`.
+    async fn store(kv: &dyn Kv, graph: &str, spec_version: u64, plan_version: u64, worker: &str) {
+        let key = graph_key(graph);
+        kv.set_json(&keys::graph_spec(&key), &spec(graph, spec_version, "test/broken@1"))
+            .await
+            .unwrap();
+        let plan = GraphPlan {
+            spec_version: plan_version,
+            slices: vec!["src.events.0".parse::<SliceId>().unwrap()],
+            generation: 1,
+            ..GraphPlan::default()
+        };
+        kv.set_json(&keys::graph_plan(&key), &plan).await.unwrap();
+        kv.hset_json(
+            keys::CLUSTER_GRAPHS,
+            &key.to_string(),
+            &GraphIndexEntry {
+                tenant: key.tenant.clone(),
+                graph: key.graph.clone(),
+                version: spec_version,
+                updated_ms: 0,
+                deleting: false,
+            },
+        )
+        .await
+        .unwrap();
+        let mut placement: Placement = kv.get_json(keys::CLUSTER_PLACEMENT).await.unwrap().unwrap_or_default();
+        placement
+            .assignments
+            .insert(slice_key(graph), WorkerId::new(worker).unwrap());
+        kv.set_json(keys::CLUSTER_PLACEMENT, &placement).await.unwrap();
+    }
+
+    fn finished(exit: Option<SliceExit>, commits: u64) -> Running {
+        let shared = SliceShared::new();
+        if let Some(exit) = exit {
+            shared.set_exit(exit);
+        }
+        shared.metrics.commits.store(commits, Ordering::Relaxed);
+        Running {
+            stop: CancellationToken::new(),
+            control: watch::channel(Control {
+                run: RunState::Running,
+                paused_nodes: Default::default(),
+            })
+            .0,
+            shared,
+            spec_version: 1,
+            plan_generation: 1,
+            done: Arc::new(AtomicBool::new(true)),
+            actor_samples: BTreeMap::new(),
+            slice_sample: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ended_slices_are_booked_with_an_exponential_backoff() {
+        let w = worker(MemKv::shared(), config());
+        let base = Duration::from_millis(100);
+        let now = Duration::from_secs(100);
+        let cases = [
+            // (exit, commits, failures before, failures after, factor, error)
+            (Some(SliceExit::Fenced), 0, 2, 3, 4, Some("fenced")),
+            (Some(SliceExit::Failed("boom".into())), 0, 7, 8, 32, Some("boom")),
+            // A slice that committed before failing starts afresh.
+            (Some(SliceExit::Failed("boom".into())), 1, 3, 1, 1, Some("boom")),
+            (Some(SliceExit::Stopped), 0, 2, 2, 0, None),
+            (None, 0, 2, 2, 0, None),
+        ];
+        for (exit, commits, before, after, factor, error) in cases {
+            let key = slice_key("g");
+            let mut running = BTreeMap::from([(key.clone(), finished(exit, commits))]);
+            let mut books = BTreeMap::from([(
+                key.clone(),
+                Book {
+                    failures: before,
+                    last_error: Some("old".into()),
+                    ..Book::default()
+                },
+            )]);
+            w.reap(&mut running, &mut books, now);
+            assert!(running.is_empty());
+            let book = &books[&key];
+            assert_eq!(book.failures, after, "{error:?}");
+            assert_eq!(book.last_error.as_deref().map(|e| e.split(':').next().unwrap()), error,);
+            assert_eq!(book.lifetime.fenced, u64::from(error == Some("fenced")));
+            match book.retry_at {
+                None => assert_eq!(factor, 0),
+                Some(at) => {
+                    let delay = at - now;
+                    assert!(
+                        delay >= base * factor && delay <= base * factor * 2,
+                        "{delay:?} for a factor of {factor}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn actor(kind: ActorKind, node: &str, records_out: u64) -> Arc<ActorMetrics> {
+        let metrics = ActorMetrics::new(
+            ActorIdent {
+                tenant: TenantId::new("acme").unwrap(),
+                graph: GraphId::new("g").unwrap(),
+                slice: "src.events.0".parse().unwrap(),
+                node: NodeId::new(node).unwrap(),
+                kind,
+                op: streaming_core::OpRef::new("test/x@1").unwrap(),
+            },
+            Duration::ZERO,
+        );
+        metrics.records_out.store(records_out, Ordering::Relaxed);
+        metrics.switch(Duration::from_millis(500), crate::metrics::Phase::Busy);
+        metrics
+    }
+
+    #[test]
+    fn snapshots_add_up_tenant_usage_and_show_waiting_slices() {
+        let w = worker(MemKv::shared(), config());
+        let running_slice = finished(None, 0);
+        running_slice.shared.actors.lock().extend([
+            actor(ActorKind::Source, "events", 30),
+            actor(ActorKind::Map, "decode", 1000),
+            actor(ActorKind::Sink, "out", 7),
+        ]);
+        let mut running = BTreeMap::from([(slice_key("g"), running_slice)]);
+        let waiting = slice_key("h");
+        let books = BTreeMap::from([
+            (
+                waiting.clone(),
+                Book {
+                    last_error: Some("boom".into()),
+                    lifetime: SliceLifetime { fenced: 2, restarts: 3 },
+                    ..Book::default()
+                },
+            ),
+            // Assigned and healthy, not running yet: not shown.
+            (slice_key("i"), Book::default()),
+        ]);
+        let snapshot = w.snapshot(
+            &mut running,
+            &books,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            streaming_core::control::Load::default(),
+        );
+        let usage = &snapshot.tenants[&TenantId::new("acme").unwrap()];
+        assert_eq!(usage.actors, 3);
+        // Busy half of the second each.
+        assert!((usage.busy - 1.5).abs() < 1e-9, "{usage:?}");
+        // What the sources read.
+        assert!((usage.in_per_sec - 30.0).abs() < 1e-9, "{usage:?}");
+        assert_eq!(snapshot.slices.len(), 2);
+        let shown = snapshot
+            .slices
+            .iter()
+            .find(|slice| slice.graph.as_str() == "h")
+            .unwrap();
+        assert_eq!(shown.state, ActorState::Failed);
+        assert_eq!(shown.last_error.as_deref(), Some("boom"));
+        assert_eq!((shown.fenced, shown.restarts), (2, 3));
+    }
+
+    #[tokio::test]
+    async fn documents_are_read_again_on_epoch_changes_or_every_thirty_ticks() {
+        let kv = Arc::new(Counting {
+            inner: MemKv::new(),
+            epochs: AtomicU64::new(0),
+            indexes: AtomicU64::new(0),
+        });
+        let w = worker(kv.clone(), config());
+        let mut synced = None;
+        for _ in 0..94 {
+            w.sync(&mut synced).await.unwrap();
+        }
+        assert_eq!(kv.epochs.load(Ordering::Relaxed), 94);
+        // Calls 1, 32, 63 and 94.
+        assert_eq!(kv.indexes.load(Ordering::Relaxed), 4);
+        kv.inner.incr(keys::CLUSTER_EPOCH).await.unwrap();
+        w.sync(&mut synced).await.unwrap();
+        assert_eq!(kv.indexes.load(Ordering::Relaxed), 5);
+    }
+
+    #[tokio::test]
+    async fn only_runnable_graphs_placed_here_are_synced() {
+        let kv: DynKv = MemKv::shared();
+        store(kv.as_ref(), "mine", 1, 1, "worker-a").await;
+        store(kv.as_ref(), "theirs", 1, 1, "worker-b").await;
+        store(kv.as_ref(), "stale", 2, 1, "worker-a").await;
+        let mut failed = GraphPlan {
+            spec_version: 1,
+            error: Some("cannot plan".into()),
+            ..GraphPlan::default()
+        };
+        store(kv.as_ref(), "failed", 1, 1, "worker-a").await;
+        failed.slices = vec!["src.events.0".parse().unwrap()];
+        kv.set_json(&keys::graph_plan(&graph_key("failed")), &failed)
+            .await
+            .unwrap();
+        store(kv.as_ref(), "gone", 1, 1, "worker-a").await;
+        let mut entry: GraphIndexEntry = kv
+            .hget_json(keys::CLUSTER_GRAPHS, &graph_key("gone").to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        entry.deleting = true;
+        kv.hset_json(keys::CLUSTER_GRAPHS, &graph_key("gone").to_string(), &entry)
+            .await
+            .unwrap();
+        let w = worker(kv.clone(), config());
+        let mut synced = None;
+        w.sync(&mut synced).await.unwrap();
+        let graphs: Vec<String> = synced
+            .unwrap()
+            .graphs
+            .keys()
+            .map(|graph| graph.graph.to_string())
+            .collect();
+        assert_eq!(graphs, ["mine"]);
+        // Unless placement is ignored.
+        let mut config = config();
+        config.ignore_placement = true;
+        let w = worker(kv.clone(), config);
+        let mut synced = None;
+        w.sync(&mut synced).await.unwrap();
+        assert_eq!(synced.unwrap().graphs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_broken_slice_fails_restarts_and_shows_why_then_the_worker_leaves() {
+        let kv: DynKv = MemKv::shared();
+        let graph = graph_key("broken");
+        kv.set_json(&keys::graph_spec(&graph), &spec("broken", 1, "test/broken@1"))
+            .await
+            .unwrap();
+        kv.hset_json(
+            keys::CLUSTER_GRAPHS,
+            &graph.to_string(),
+            &GraphIndexEntry {
+                tenant: graph.tenant.clone(),
+                graph: graph.graph.clone(),
+                version: 1,
+                updated_ms: 0,
+                deleting: false,
+            },
+        )
+        .await
+        .unwrap();
+        kv.incr(keys::CLUSTER_EPOCH).await.unwrap();
+        let mut config = config();
+        config.restart_backoff = Duration::from_millis(20);
+        let w = worker(kv.clone(), config);
+        let shutdown = CancellationToken::new();
+        let run = tokio::spawn(w.run(shutdown.clone()));
+        let metrics = keys::worker_metrics(&me());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let shown = loop {
+            let snapshot: Option<WorkerSnapshot> = kv.get_json(&metrics).await.unwrap();
+            if let Some(slice) = snapshot.and_then(|snapshot| {
+                snapshot
+                    .slices
+                    .into_iter()
+                    .find(|s| s.restarts >= 2 && s.state == ActorState::Failed)
+            }) {
+                break slice;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the slice never restarted");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            shown
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("broken on purpose")),
+            "{shown:?}"
+        );
+        // The catalog is published.
+        assert!(kv.hget(keys::CLUSTER_CATALOG, "std/count@1").await.unwrap().is_some());
+        assert!(kv.hget(keys::CLUSTER_MEMBERS, me().as_str()).await.unwrap().is_some());
+        shutdown.cancel();
+        run.await.unwrap();
+        assert!(kv.hget(keys::CLUSTER_MEMBERS, me().as_str()).await.unwrap().is_none());
+        assert!(kv.get(&metrics).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_may_not_control_places_nothing() {
+        let kv: DynKv = MemKv::shared();
+        store(kv.as_ref(), "g", 1, 1, "worker-a").await;
+        kv.del(vec![keys::CLUSTER_PLACEMENT.to_owned()]).await.unwrap();
+        let mut config = config();
+        config.controller = false;
+        let w = worker(kv.clone(), config);
+        let shutdown = CancellationToken::new();
+        let run = tokio::spawn(w.run(shutdown.clone()));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(kv.get(keys::CLUSTER_PLACEMENT).await.unwrap().is_none());
+        shutdown.cancel();
+        run.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn slices_are_started_steered_stopped_and_restarted() {
+        let kv: DynKv = MemKv::shared();
+        store(kv.as_ref(), "g", 1, 1, "worker-a").await;
+        let w = worker(kv.clone(), config());
+        let kill = CancellationToken::new();
+        let scope = TaskScope::new(TokioProviders::new(), kill.clone());
+        let mut synced = None;
+        w.sync(&mut synced).await.unwrap();
+        let mut synced = synced.unwrap();
+        let key = slice_key("g");
+        let (mut running, mut books) = (BTreeMap::new(), BTreeMap::new());
+        let now = Duration::from_secs(10);
+        w.reconcile(&scope, &synced, &mut running, &mut books, now);
+        assert!(running.contains_key(&key));
+        assert_eq!(books[&key].lifetime.restarts, 0);
+        // Still running: nothing new.
+        running.get_mut(&key).unwrap().done = Arc::new(AtomicBool::new(false));
+        w.reconcile(&scope, &synced, &mut running, &mut books, now);
+        assert_eq!(books[&key].lifetime.restarts, 0);
+        // The control plane pauses the graph: the slice hears of it.
+        let docs = synced.graphs.get_mut(&graph_key("g")).unwrap();
+        docs.desired.state = RunState::Paused;
+        w.reconcile(&scope, &synced, &mut running, &mut books, now);
+        assert_eq!(running[&key].control.borrow().run, RunState::Paused);
+        assert!(!running[&key].stop.is_cancelled());
+        // A new version of the graph: the instance stops.
+        let docs = synced.graphs.get_mut(&graph_key("g")).unwrap();
+        docs.spec_version = 2;
+        w.reconcile(&scope, &synced, &mut running, &mut books, now);
+        assert!(running[&key].stop.is_cancelled());
+        // It fails; it is started again once its backoff has passed.
+        let docs = synced.graphs.get_mut(&graph_key("g")).unwrap();
+        docs.spec_version = 1;
+        running[&key].shared.set_exit(SliceExit::Failed("boom".into()));
+        running[&key].done.store(true, Ordering::Relaxed);
+        w.reconcile(&scope, &synced, &mut running, &mut books, now);
+        assert!(!running.contains_key(&key));
+        let at = books[&key].retry_at.unwrap();
+        w.reconcile(&scope, &synced, &mut running, &mut books, at - Duration::from_millis(1));
+        assert!(!running.contains_key(&key));
+        w.reconcile(&scope, &synced, &mut running, &mut books, at);
+        assert!(running.contains_key(&key));
+        assert_eq!(books[&key].lifetime.restarts, 1);
+        // A stopped graph runs nothing.
+        let docs = synced.graphs.get_mut(&graph_key("g")).unwrap();
+        docs.desired.state = RunState::Stopped;
+        w.reconcile(&scope, &synced, &mut running, &mut books, at);
+        assert!(running[&key].stop.is_cancelled());
+        kill.cancel();
     }
 }

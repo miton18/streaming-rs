@@ -77,3 +77,30 @@ pub async fn start_redis(extra: &[&str]) -> Option<RealRedis> {
     }
     panic!("redis-server did not start listening on {addr}");
 }
+
+/// Serve a `FakeRedis` on a free local port through the tokio providers.
+///
+/// Another process may take the port between [`free_port`] and the bind:
+/// a failed bind is retried on another port.
+pub async fn start_fake(fake: streaming_kv_redis::FakeRedis) -> (String, tokio_util::sync::CancellationToken) {
+    for _ in 0..20 {
+        let addr = format!("127.0.0.1:{}", free_port());
+        let token = tokio_util::sync::CancellationToken::new();
+        let (a, t, f) = (addr.clone(), token.clone(), fake.clone());
+        let server = tokio::spawn(async move { f.serve(moonpool_core::TokioProviders::new(), &a, t).await });
+        // The bind happens on the first poll of the task.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if server.is_finished() {
+            continue;
+        }
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                // Let the readiness probe's own connection be counted and closed.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                return (addr, token);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    panic!("fake did not start");
+}

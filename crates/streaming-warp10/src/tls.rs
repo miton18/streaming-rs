@@ -20,3 +20,16 @@ pub(crate) fn client_config(extra_roots_der: &[Vec<u8>]) -> Result<Arc<ClientCon
         .with_no_client_auth();
     Ok(Arc::new(config))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_roots_are_trusted_and_bad_extra_roots_refused() {
+        let config = client_config(&[]).unwrap();
+        assert!(!config.crypto_provider().cipher_suites.is_empty());
+        let error = client_config(&[b"not a certificate".to_vec()]).unwrap_err();
+        assert!(error.starts_with("invalid extra root certificate: "), "{error}");
+    }
+}

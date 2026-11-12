@@ -430,6 +430,126 @@ mod tests {
 }
 
 #[cfg(test)]
+mod counter_tests {
+    use super::*;
+
+    const STATES: [ActorState; 6] = [
+        ActorState::Starting,
+        ActorState::Running,
+        ActorState::Paused,
+        ActorState::Draining,
+        ActorState::Stopped,
+        ActorState::Failed,
+    ];
+
+    fn ident() -> ActorIdent {
+        ActorIdent {
+            tenant: TenantId::new("acme").unwrap(),
+            graph: GraphId::new("g").unwrap(),
+            slice: "src.events.0".parse().unwrap(),
+            node: NodeId::new("sink").unwrap(),
+            kind: ActorKind::Sink,
+            op: OpRef::new("test/sink@1").unwrap(),
+        }
+    }
+
+    #[test]
+    fn states_round_trip() {
+        let actor = ActorMetrics::new(ident(), Duration::ZERO);
+        let slice = SliceMetrics::new();
+        assert_eq!(actor.state(), ActorState::Starting);
+        assert_eq!(slice.state(), ActorState::Starting);
+        for state in STATES {
+            actor.set_state(state);
+            slice.set_state(state);
+            assert_eq!(actor.state(), state);
+            assert_eq!(slice.state(), state);
+        }
+        for state in STATES.into_iter().rev() {
+            actor.set_state(state);
+            assert_eq!(actor.state(), state);
+        }
+    }
+
+    #[test]
+    fn errors_are_counted_and_the_last_one_kept() {
+        let actor = ActorMetrics::new(ident(), Duration::ZERO);
+        actor.error("first");
+        actor.error("second");
+        let (snapshot, _) = snapshot_actor(&actor, None, Duration::ZERO, Duration::from_secs(1));
+        assert_eq!(snapshot.errors, 2);
+        assert_eq!(snapshot.last_error.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn the_meter_switches_phases_and_counts_records() {
+        let providers = moonpool_core::TokioProviders::new();
+        let meter = Meter::new(&providers, ActorMetrics::new(ident(), Duration::ZERO));
+        let phase = || meter.metrics.phase.load(Ordering::Relaxed);
+        meter.busy();
+        assert_eq!(phase(), Phase::Busy as u8);
+        meter.waiting();
+        assert_eq!(phase(), Phase::Waiting as u8);
+        meter.blocked();
+        assert_eq!(phase(), Phase::Backpressured as u8);
+        meter.idle();
+        assert_eq!(phase(), Phase::Idle as u8);
+        meter.records_in(3);
+        meter.records_in(4);
+        meter.records_out(5);
+        assert_eq!(meter.metrics.records_in.load(Ordering::Relaxed), 7);
+        assert_eq!(meter.metrics.records_out.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn waiting_counts_as_busy() {
+        let ms = Duration::from_millis;
+        let actor = ActorMetrics::new(ident(), ms(0));
+        actor.switch(ms(100), Phase::Busy); // idle 100
+        actor.switch(ms(300), Phase::Waiting); // busy 200
+        actor.switch(ms(800), Phase::Backpressured); // waiting 500
+        actor.switch(ms(1000), Phase::Idle); // blocked 200
+        actor.records_out.store(500, Ordering::Relaxed);
+        let (s, _) = snapshot_actor(&actor, None, ms(1000), ms(2000));
+        assert!((s.out_per_sec - 250.0).abs() < 1e-9, "{s:?}");
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(near(s.idle, 0.1), "{s:?}");
+        assert!(near(s.busy, 0.7), "{s:?}");
+        assert!(near(s.waiting, 0.5), "{s:?}");
+        assert!(near(s.backpressured, 0.2), "{s:?}");
+        // No time elapsed: idle by convention.
+        let fresh = ActorMetrics::new(ident(), ms(0));
+        let (s, _) = snapshot_actor(&fresh, None, ms(0), ms(1000));
+        assert!(near(s.idle, 1.0) && near(s.busy, 0.0), "{s:?}");
+    }
+
+    #[test]
+    fn commit_latency_is_averaged_over_the_interval() {
+        let tenant = TenantId::new("acme").unwrap();
+        let graph = GraphId::new("g").unwrap();
+        let slice: SliceId = "src.events.0".parse().unwrap();
+        let metrics = SliceMetrics::new();
+        metrics.commits.store(2, Ordering::Relaxed);
+        metrics.commit_ns.store(1_000_000, Ordering::Relaxed);
+        let lifetime = SliceLifetime { fenced: 1, restarts: 2 };
+        let (s, sample) = snapshot_slice(&tenant, &graph, &slice, &metrics, lifetime, None);
+        assert!((s.commit_ms - 0.5).abs() < 1e-9, "{s:?}");
+        assert_eq!(s.watermark_ms, None);
+        assert_eq!((s.fenced, s.restarts), (1, 2));
+        metrics.commits.store(6, Ordering::Relaxed);
+        metrics.commit_ns.store(9_000_000, Ordering::Relaxed);
+        metrics.watermark.store(42, Ordering::Relaxed);
+        let (s, sample) = snapshot_slice(&tenant, &graph, &slice, &metrics, lifetime, Some(sample));
+        assert!((s.commit_ms - 2.0).abs() < 1e-9, "{s:?}");
+        assert_eq!(s.commits, 6);
+        assert_eq!(s.watermark_ms, Some(42));
+        // No commit in the interval.
+        let (s, _) = snapshot_slice(&tenant, &graph, &slice, &metrics, lifetime, Some(sample));
+        assert!(s.commit_ms.abs() < 1e-9, "{s:?}");
+    }
+}
+
+#[cfg(test)]
 mod window_tests {
     use super::*;
 

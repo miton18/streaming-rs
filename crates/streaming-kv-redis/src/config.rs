@@ -280,6 +280,9 @@ mod tests {
             "redis://token@h",
             "redis://u:%zz@h",
             "redis://[::1",
+            "redis://[]:6379",
+            "redis://[]",
+            "redis://:6379",
             "",
         ] {
             assert!(RedisConfig::from_url(url).is_err(), "{url}");
@@ -307,6 +310,10 @@ mod tests {
             password: Some("topsecret".into()),
             ..RedisConfig::default()
         };
-        assert!(!format!("{c:?}").contains("topsecret"));
+        let shown = format!("{c:?}");
+        assert!(!shown.contains("topsecret"), "{shown}");
+        assert!(shown.starts_with("RedisConfig {"), "{shown}");
+        assert!(shown.contains("password: Some(\"<redacted>\")"), "{shown}");
+        assert!(shown.contains("addr: \"127.0.0.1:6379\""), "{shown}");
     }
 }

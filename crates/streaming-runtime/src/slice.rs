@@ -83,6 +83,11 @@ impl SliceShared {
     pub(crate) fn exit(&self) -> Option<SliceExit> {
         self.exit.lock().clone()
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_exit(&self, exit: SliceExit) {
+        *self.exit.lock() = Some(exit);
+    }
 }
 
 /// Everything needed to run one slice instance.

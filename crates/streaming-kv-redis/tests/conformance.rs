@@ -9,30 +9,12 @@ use streaming_kv_redis::{
     FakeRedis, RedisConfig, RedisKv,
     testkit::{conformance, conformance_incr_overflow},
 };
-use tokio_util::sync::CancellationToken;
 
 fn config(addr: &str) -> RedisConfig {
     RedisConfig {
         addr: addr.to_owned(),
         ..RedisConfig::default()
     }
-}
-
-/// Serve a `FakeRedis` on a free local port through the tokio providers.
-async fn start_fake(fake: FakeRedis) -> (String, CancellationToken) {
-    let addr = format!("127.0.0.1:{}", common::free_port());
-    let token = CancellationToken::new();
-    let (a, t) = (addr.clone(), token.clone());
-    tokio::spawn(async move {
-        fake.serve(TokioProviders::new(), &a, t).await.expect("serve");
-    });
-    for _ in 0..200 {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return (addr, token);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("fake did not start");
 }
 
 #[tokio::test]
@@ -43,7 +25,7 @@ async fn conformance_mem_kv() {
 #[tokio::test]
 async fn conformance_fake_redis() {
     let fake = FakeRedis::new();
-    let (addr, token) = start_fake(fake.clone()).await;
+    let (addr, token) = common::start_fake(fake.clone()).await;
     let kv = RedisKv::new(TokioProviders::new(), config(&addr));
     kv.ping().await.expect("ping");
     conformance(&kv).await.expect("RedisKv over FakeRedis conforms");

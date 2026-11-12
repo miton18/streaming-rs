@@ -260,6 +260,26 @@ mod tests {
     }
 
     #[test]
+    fn a_body_may_reach_the_limit_exactly() {
+        let points: Vec<Emit> = (0..2)
+            .map(|i| emit(i, datum(Gts::new("m").at(i64::try_from(i).unwrap()).value(1))))
+            .collect();
+        // Two 10-byte lines fit in a 20-byte body.
+        let bodies = sink(20, TimeUnit::Ms).bodies(&points).unwrap();
+        assert_eq!(bodies.len(), 1);
+        let bodies = sink(19, TimeUnit::Ms).bodies(&points).unwrap();
+        assert_eq!(bodies.len(), 2);
+    }
+
+    #[test]
+    fn debug_forms_hide_the_token() {
+        let s = sink(10, TimeUnit::Ms);
+        let debug = format!("{s:?}");
+        assert!(debug.starts_with("Warp10Sink {"), "{debug}");
+        assert!(debug.contains("<redacted>") && !debug.contains("tok\""), "{debug}");
+    }
+
+    #[test]
     fn a_foreign_datum_fails_the_whole_batch() {
         let batch = vec![
             emit(0, datum(Gts::new("m").value(1))),
@@ -284,6 +304,8 @@ mod tests {
         let long = "x".repeat(1000);
         let e = excerpt(long.as_bytes(), "tok");
         assert!(e.chars().count() <= EXCERPT_CHARS + 3 && e.ends_with("..."));
+        let exact = "y".repeat(EXCERPT_CHARS);
+        assert_eq!(excerpt(exact.as_bytes(), "tok"), exact);
         assert_eq!(excerpt(b"a\nb\r\nc", "tok"), "a b  c");
         assert_eq!(excerpt(b"bad SECRET here", "SECRET"), "bad *** here");
         assert_eq!(excerpt(b"", "tok"), "<empty body>");

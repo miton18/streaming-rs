@@ -128,4 +128,25 @@ mod tests {
             "STREAMING_SECRET__ACME__WARP10_WRITE"
         );
     }
+
+    #[test]
+    fn clocks_tell_the_time() {
+        let before = 1_700_000_000_000; // November 2023
+        assert!(SystemClock.now_ms() > before);
+        let fixed = || 42;
+        assert_eq!(fixed.now_ms(), 42);
+    }
+
+    #[test]
+    fn no_secrets_and_environment_secrets() {
+        let tenant = TenantId::new("mutants-env-tenant").unwrap();
+        assert_eq!(NoSecrets.get(&tenant, "anything"), None);
+        let variable = EnvSecrets::variable(&tenant, "token");
+        assert_eq!(EnvSecrets.get(&tenant, "token"), None);
+        // SAFETY: the variable is unique to this test, and the other tests of
+        // this crate never read the environment.
+        unsafe { std::env::set_var(&variable, "from-env") };
+        assert_eq!(EnvSecrets.get(&tenant, "token").as_deref(), Some("from-env"));
+        unsafe { std::env::remove_var(&variable) };
+    }
 }

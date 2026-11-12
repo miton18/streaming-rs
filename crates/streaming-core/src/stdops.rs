@@ -282,6 +282,48 @@ mod tests {
     }
 
     #[test]
+    fn sliding_windows_before_the_epoch() {
+        let assigner = Sliding {
+            size: Duration::from_secs(10),
+            slide: Duration::from_secs(5),
+            allowed_lateness: Duration::ZERO,
+        };
+        let mut out = Vec::new();
+        assigner.assign(-3_000, &mut out);
+        assert_eq!(out, vec![Window::new(-5_000, 5_000), Window::new(-10_000, 0)]);
+    }
+
+    #[test]
+    fn allowed_lateness_is_configured_or_zero() {
+        let registry = crate::registry::Registry::<moonpool_core::TokioProviders>::standard();
+        let build = |op: &str, config: serde_json::Value| match registry.get(&crate::ids::OpRef::new(op).unwrap()) {
+            Some((_, crate::registry::OpFactory::Window(factory))) => factory(&config).unwrap(),
+            _ => panic!("{op} is not a window"),
+        };
+        let tumbling = build("std/tumbling@1", serde_json::json!({"size": "5m"}));
+        assert_eq!(tumbling.allowed_lateness(), Duration::ZERO);
+        let tumbling = build(
+            "std/tumbling@1",
+            serde_json::json!({"size": "5m", "allowed_lateness": "2s"}),
+        );
+        assert_eq!(tumbling.allowed_lateness(), Duration::from_secs(2));
+        let sliding = build("std/sliding@1", serde_json::json!({"size": "5m", "slide": "1m"}));
+        assert_eq!(sliding.allowed_lateness(), Duration::ZERO);
+        let sliding = build(
+            "std/sliding@1",
+            serde_json::json!({"size": "5m", "slide": "1m", "allowed_lateness": "3s"}),
+        );
+        assert_eq!(sliding.allowed_lateness(), Duration::from_secs(3));
+
+        // An assigner that does not say accepts nothing late.
+        struct Plain;
+        impl WindowAssigner for Plain {
+            fn assign(&self, _: Timestamp, _: &mut Vec<Window>) {}
+        }
+        assert_eq!(Plain.allowed_lateness(), Duration::ZERO);
+    }
+
+    #[test]
     fn window_configs_are_validated() {
         let registry = crate::registry::Registry::<moonpool_core::TokioProviders>::standard();
         let check = |op: &str, config: serde_json::Value| match registry.get(&crate::ids::OpRef::new(op).unwrap()) {

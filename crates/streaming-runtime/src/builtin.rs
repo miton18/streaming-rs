@@ -125,3 +125,98 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, kv: DynKv) {
         ],
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moonpool_core::TokioProviders;
+    use streaming_core::{
+        EmitId, GraphId, Kv, MemKv, NodeId, OpContext, OpRef, Origin, Position, SliceId, TenantId,
+        clock::{NoSecrets, SystemClock},
+        datum,
+        registry::OpFactory,
+    };
+
+    fn sink(kv: &Arc<MemKv>, config: Value) -> Arc<dyn SinkConnector> {
+        let mut registry = Registry::<TokioProviders>::empty();
+        register(&mut registry, kv.clone());
+        let op = OpRef::new("std/kv-sink@1").unwrap();
+        let Some((_, OpFactory::Sink(factory))) = registry.get(&op) else {
+            panic!("std/kv-sink@1 is not registered as a sink");
+        };
+        let context = OpContext {
+            providers: TokioProviders::new(),
+            clock: Arc::new(SystemClock),
+            secrets: Arc::new(NoSecrets),
+            tenant: TenantId::new("acme").unwrap(),
+            graph: GraphId::new("g").unwrap(),
+            node: NodeId::new("out").unwrap(),
+        };
+        factory(&context, &config).unwrap()
+    }
+
+    fn emits(range: std::ops::Range<u64>) -> Vec<Emit> {
+        let slice = SliceId::Source {
+            node: NodeId::new("n").unwrap(),
+            partition: 0,
+        };
+        range
+            .map(|n| {
+                let origin = Origin::source(Position(0, n, 0));
+                Emit {
+                    id: EmitId::new(&slice, &origin),
+                    origin,
+                    ts: n as Timestamp,
+                    key: None,
+                    value: datum(Value::from(n)),
+                }
+            })
+            .collect()
+    }
+
+    const ROWS: &str = "t:acme:g:g:out:out";
+
+    async fn rows(kv: &dyn Kv) -> Vec<i64> {
+        let rows: Vec<(String, OutputRow)> = kv.hgetall_json(ROWS).await.unwrap();
+        let mut ts: Vec<i64> = rows.into_iter().map(|(_, row)| row.ts).collect();
+        ts.sort_unstable();
+        ts
+    }
+
+    #[tokio::test]
+    async fn the_most_recent_rows_are_kept() {
+        let graph = GraphKey::new(TenantId::new("acme").unwrap(), GraphId::new("g").unwrap());
+        assert_eq!(keys::graph_output(&graph, &NodeId::new("out").unwrap()), ROWS);
+        let kv = Arc::new(MemKv::new());
+        let out = sink(&kv, serde_json::json!({"retain": 3}));
+        out.write(&emits(0..3)).await.unwrap();
+        assert_eq!(rows(&*kv).await, [0, 1, 2]);
+        out.write(&emits(3..4)).await.unwrap();
+        assert_eq!(rows(&*kv).await, [1, 2, 3]);
+        // Writing an element again replaces its row.
+        out.write(&emits(3..4)).await.unwrap();
+        assert_eq!(rows(&*kv).await, [1, 2, 3]);
+        // A new instance starts from the rows already there.
+        let again = sink(&kv, serde_json::json!({"retain": 3}));
+        again.write(&emits(4..5)).await.unwrap();
+        assert_eq!(rows(&*kv).await, [2, 3, 4]);
+        let kv: &dyn Kv = &*kv;
+        let row: OutputRow = kv
+            .hget_json(ROWS, &emits(4..5)[0].id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.value, Value::from(4));
+    }
+
+    #[tokio::test]
+    async fn five_hundred_rows_by_default() {
+        for config in [Value::Null, serde_json::json!({})] {
+            let kv = Arc::new(MemKv::new());
+            let out = sink(&kv, config);
+            out.write(&emits(0..501)).await.unwrap();
+            let kept = rows(&*kv).await;
+            assert_eq!((kept.len(), kept[0]), (500, 1));
+        }
+    }
+}

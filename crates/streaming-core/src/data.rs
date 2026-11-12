@@ -381,6 +381,36 @@ mod tests {
     }
 
     #[test]
+    fn debug_and_display_forms() {
+        let key = Key::encode(&"user-42".to_owned()).unwrap();
+        assert_eq!(format!("{key:?}"), "Key(user-42)");
+        let slice: crate::ids::SliceId = "src.events.0".parse().unwrap();
+        let origin = Origin::source(Position(1, 2, 3));
+        let id = EmitId::new(&slice, &origin);
+        assert_eq!(id.to_string(), id.as_str());
+        assert!(id.to_string().starts_with("src.events.0/"), "{id}");
+        let record = Record {
+            value: datum(7_u8),
+            ts: 99,
+            key: Some(key.clone()),
+            window: None,
+            origin,
+        };
+        let debug = format!("{record:?}");
+        assert!(debug.starts_with("Record {") && debug.contains("ts: 99"), "{debug}");
+        assert!(debug.contains("user-42"), "{debug}");
+        let emit = Emit {
+            id: id.clone(),
+            origin,
+            ts: 5,
+            key: Some(key),
+            value: datum(()),
+        };
+        let debug = format!("{emit:?}");
+        assert!(debug.starts_with("Emit {") && debug.contains("ts: 5"), "{debug}");
+    }
+
+    #[test]
     fn hashes_are_pinned() {
         // Lineages and emit ids are persisted and compared across restarts
         // and upgrades: these values must never change. `mix(0, 0)` is the

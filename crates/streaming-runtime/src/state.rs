@@ -781,4 +781,91 @@ mod tests {
             );
         });
     }
+
+    async fn fields(kv: &MemKv, key: &str) -> Vec<String> {
+        let kv: &dyn Kv = kv;
+        kv.hgetall(key)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(field, _)| field)
+            .collect()
+    }
+
+    #[test]
+    fn a_window_hash_keeps_one_field_per_key() {
+        block_on(async {
+            let kv = MemKv::new();
+            let hash = keys::slice_window(&slice(), &node(), &Window::new(0, 10_000));
+            materialize(&kv, &slice(), &record(1, "o", &[("a", 1, 0), ("b", 1, 0)]))
+                .await
+                .unwrap();
+            materialize(&kv, &slice(), &record(2, "o", &[("a", 2, 1)]))
+                .await
+                .unwrap();
+            // Rewriting an epoch over itself keeps its field.
+            materialize(&kv, &slice(), &record(3, "o", &[("b", 2, 3)]))
+                .await
+                .unwrap();
+            let mut expected = vec![
+                keys::state_field(&key("a"), 2),
+                keys::state_field(&key("b"), 1),
+                keys::state_field(&key("b"), 3),
+            ];
+            expected.sort();
+            assert_eq!(fields(&kv, &hash).await, expected);
+        });
+    }
+
+    #[test]
+    fn compaction_keeps_the_highest_seal_only() {
+        block_on(async {
+            let kv = MemKv::new();
+            for epoch in 1..=4 {
+                try_commit(&kv, &slice(), &record(epoch, "o", &[])).await.unwrap();
+            }
+            let seal = keys::slice_seal(&slice());
+            compact(&kv, &slice(), 1, &[1], 0).await.unwrap();
+            compact(&kv, &slice(), 2, &[2], 0).await.unwrap();
+            // Without the previous floor, older seals are not looked for.
+            assert_eq!(fields(&kv, &seal).await.len(), 2);
+            compact(&kv, &slice(), 3, &[3, 4], 2).await.unwrap();
+            assert_eq!(fields(&kv, &seal).await, [keys::seal_field(3)]);
+            // Only fields at or below the floor go.
+            assert_eq!(fields(&kv, &keys::slice_log(&slice())).await, [keys::commit_field(4)]);
+            // A previous floor equal to the new one changes nothing more.
+            compact(&kv, &slice(), 3, &[], 3).await.unwrap();
+            assert_eq!(fields(&kv, &seal).await, [keys::seal_field(3)]);
+            sweep(&kv, &slice(), &[4]).await.unwrap();
+            assert!(fields(&kv, &keys::slice_log(&slice())).await.is_empty());
+            sweep(&kv, &slice(), &[]).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn closing_a_log_voids_older_plans_and_purging_keeps_the_mark() {
+        block_on(async {
+            let kv = MemKv::new();
+            try_commit(&kv, &slice(), &record(1, "o", &[("a", 1, 0)]))
+                .await
+                .unwrap();
+            materialize(&kv, &slice(), &record(1, "o", &[("a", 1, 0)]))
+                .await
+                .unwrap();
+            compact(&kv, &slice(), 1, &[], 0).await.unwrap();
+            close_log(&kv, &slice(), 3).await.unwrap();
+            assert_eq!(read_seal(&kv, &slice()).await.unwrap().plan, 3);
+            purge_closed(&kv, &slice(), &[node()]).await.unwrap();
+            let left: Vec<String> = kv.keys();
+            assert_eq!(left, [keys::slice_seal(&slice())], "{left:?}");
+            assert_eq!(
+                fields(&kv, &keys::slice_seal(&slice())).await,
+                [format!("{PLAN_FLOOR}3")]
+            );
+            // Purging again finds nothing to do.
+            purge_closed(&kv, &slice(), &[node()]).await.unwrap();
+            let seal = read_seal(&kv, &slice()).await.unwrap();
+            assert_eq!((seal.floor, seal.plan), (0, 3));
+        });
+    }
 }

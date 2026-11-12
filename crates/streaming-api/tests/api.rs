@@ -15,8 +15,8 @@ use streaming_api::{ApiConfig, ApiState, router};
 use streaming_core::{
     DynKv, GraphKey, MemKv, OpDescriptor, OpKind, OpRef, Registry, TypeTag,
     control::{
-        ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, Load, MemberInfo, OutputRow, Placement,
-        RunState, SliceSnapshot, TenantRecord, TenantUsage, WorkerSnapshot,
+        ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, GraphPlan, Load, MemberInfo, OutputRow,
+        Placement, RunState, SliceSnapshot, TenantRecord, TenantUsage, WorkerSnapshot,
     },
     keys,
 };
@@ -473,6 +473,7 @@ async fn put_creates_then_bumps_the_version_and_the_epoch() {
     assert_eq!(spec["version"], 1);
     let desired: DesiredState = env.kv.get_json(&keys::graph_desired(&gk("g"))).await.unwrap().unwrap();
     assert_eq!(desired.state, RunState::Running);
+    assert_eq!(desired.updated_ms, NOW);
     let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
     assert_eq!((entry.version, entry.deleting), (1, false));
 
@@ -1151,6 +1152,62 @@ async fn ui_is_served_with_a_spa_fallback() {
             "code": "ROUTE_NOT_FOUND",
             "context": {"path": "/api/v1/whatever"}
         })
+    );
+}
+
+#[tokio::test]
+async fn ui_assets_are_served_for_get_and_head_only() {
+    let env = Env::new().await;
+    let (status, headers, css) = env.raw(Method::GET, "/assets/app.css", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/css"));
+    assert!(!String::from_utf8_lossy(&css).contains("<title>"));
+    let (status, _, _) = env.raw(Method::HEAD, "/", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = env.raw(Method::POST, "/", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    // A path climbing out of the embedded files gets the index.
+    let (_, _, index) = env.raw(Method::GET, "/", None).await;
+    let (status, _, body) = env.raw(Method::GET, "/assets/../assets/app.css", None).await;
+    assert_eq!((status, body), (StatusCode::OK, index));
+}
+
+#[tokio::test]
+async fn graph_detail_shows_the_stored_plan() {
+    let env = Env::new().await;
+    env.put_graph("g").await;
+    let plan = GraphPlan {
+        spec_version: 1,
+        planned_ms: NOW,
+        slices: vec!["src.events.0".parse().unwrap()],
+        ..GraphPlan::default()
+    };
+    env.kv.set_json(&keys::graph_plan(&gk("g")), &plan).await.unwrap();
+    let (status, body) = env.get("/api/v1/tenants/acme/graphs/g").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["plan"]["specVersion"], 1);
+    assert_eq!(body["plan"]["slices"], json!(["src.events.0"]));
+}
+
+#[tokio::test]
+async fn a_state_change_keeps_the_paused_nodes() {
+    let env = Env::new().await;
+    env.put_graph("g").await;
+    env.call(Method::POST, "/api/v1/tenants/acme/graphs/g/nodes/count/pause", None)
+        .await;
+    env.clock.store(NOW + 5, Ordering::SeqCst);
+    env.call(
+        Method::POST,
+        "/api/v1/tenants/acme/graphs/g/state",
+        Some(json!({"state": "paused"})),
+    )
+    .await;
+    let desired: DesiredState = env.kv.get_json(&keys::graph_desired(&gk("g"))).await.unwrap().unwrap();
+    assert_eq!(desired.state, RunState::Paused);
+    assert_eq!(desired.updated_ms, NOW + 5);
+    assert_eq!(
+        desired.paused_nodes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["count"]
     );
 }
 

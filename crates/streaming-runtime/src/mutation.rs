@@ -34,11 +34,14 @@ pub enum Mutant {
     JoinWithoutWatermark,
     /// The emitter forgets the slices whose partition is gone.
     EmitWithoutRetired,
+    /// A graph being deleted is purged without closing its logs first, nor
+    /// waiting for the commands in flight to land.
+    DeleteWithoutClosing,
 }
 
 impl Mutant {
     /// Every mutant.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::CommitWithoutFencing,
         Self::CommitBelowTheSeal,
         Self::AckBeforeCommit,
@@ -49,6 +52,7 @@ impl Mutant {
         Self::EmptyWithoutCopy,
         Self::JoinWithoutWatermark,
         Self::EmitWithoutRetired,
+        Self::DeleteWithoutClosing,
     ];
 }
 

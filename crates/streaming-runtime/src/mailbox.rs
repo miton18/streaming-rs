@@ -151,4 +151,20 @@ mod tests {
         // Edge a is readable again.
         assert!(matches!(inputs.next().now_or_never(), Some(Input::Records(_))));
     }
+
+    #[test]
+    fn an_actor_without_inputs_waits_forever() {
+        let mut inputs = Inputs::new(Vec::new());
+        assert!(inputs.next().now_or_never().is_none());
+        // A single edge that delivered its barrier is read again at once.
+        let (tx, rx) = mpsc::channel(8);
+        let mut inputs = Inputs::new(vec![rx]);
+        tx.try_send(barrier(3)).unwrap();
+        assert!(matches!(
+            inputs.next().now_or_never(),
+            Some(Input::Barrier(Barrier { epoch: 3, .. }))
+        ));
+        tx.try_send(Msg::Records(Vec::new())).unwrap();
+        assert!(matches!(inputs.next().now_or_never(), Some(Input::Records(_))));
+    }
 }

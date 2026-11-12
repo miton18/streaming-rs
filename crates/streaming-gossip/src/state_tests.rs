@@ -701,3 +701,346 @@ fn randomized_convergence() {
         }
     }
 }
+
+fn limited(id: &str, limits: Limits) -> ClusterState {
+    let cfg = StateConfig { limits, ..cfg() };
+    ClusterState::new(id, 1, &format!("{id}:7000"), cfg, Duration::ZERO)
+}
+
+/// A snapshot of node `id` holding `keys` values `k0..`, at versions `1..`.
+fn snapshot(id: &str, generation: u64, heartbeat: u64, keys: usize, tag: &str) -> Delta {
+    Delta {
+        nodes: vec![NodeDelta {
+            node_id: id.into(),
+            generation,
+            addr: format!("{id}:7000"),
+            heartbeat,
+            reset: true,
+            from_version: 0,
+            to_version: keys as u64,
+            last_gc_version: 0,
+            updates: (0..keys)
+                .map(|i| KeyUpdate {
+                    key: format!("k{i}"),
+                    value: Some(format!("{tag}{i}")),
+                    version: i as u64 + 1,
+                })
+                .collect(),
+        }],
+    }
+}
+
+/// An incremental delta of node `id` (generation 1) covering `(from, to]`.
+fn increment(id: &str, heartbeat: u64, from: u64, updates: Vec<KeyUpdate>) -> Delta {
+    let to = updates.last().map_or(from, |u| u.version);
+    Delta {
+        nodes: vec![NodeDelta {
+            node_id: id.into(),
+            generation: 1,
+            addr: format!("{id}:7000"),
+            heartbeat,
+            reset: false,
+            from_version: from,
+            to_version: to,
+            last_gc_version: 0,
+            updates,
+        }],
+    }
+}
+
+#[test]
+fn identity_heartbeat_and_mixing() {
+    let mut a = node("a", 1);
+    assert_eq!(a.self_id(), "a");
+    assert_eq!(a.heartbeat(), 0);
+    a.beat();
+    a.beat();
+    assert_eq!(a.heartbeat(), 2);
+    // FNV-1a, salted, then folded.
+    assert_eq!(mix("", 0), 0xcbf2_9ce2_dbb6_c401);
+    assert_eq!(mix("a", 0), 0xaf63_dc49_fd1f_0ee8);
+    assert_eq!(mix("node-1", 0x5555_aaaa_0f0f_f0f0), 0x50a4_2fd5_2648_a6ae);
+}
+
+#[test]
+fn nodes_the_peer_knows_in_a_newer_generation_are_not_sent() {
+    let mut a = node("a", 1);
+    a.set_local("k", "v", Duration::ZERO).unwrap();
+    let peer = Digest {
+        entries: vec![DigestEntry {
+            node_id: "a".into(),
+            generation: 2,
+            heartbeat: 0,
+            max_version: 0,
+            last_gc_version: 0,
+        }],
+    };
+    let (d, info) = a.compute_delta(&peer, 1 << 16, 0);
+    assert!(d.nodes.is_empty(), "{d:?}");
+    assert_eq!(info.resets, 0);
+}
+
+#[test]
+fn a_peer_exactly_at_the_gc_version_needs_no_reset() {
+    let mut a = node("a", 1);
+    a.set_local("k", "v", Duration::ZERO).unwrap();
+    a.set_local("x", "v", Duration::ZERO).unwrap();
+    a.remove_local("x", Duration::ZERO);
+    a.tick(cfg().tombstone_grace);
+    let view = a.node_view("a").unwrap();
+    assert_eq!((view.max_version, view.last_gc_version), (3, 3));
+    let peer = |max_version| Digest {
+        entries: vec![DigestEntry {
+            node_id: "a".into(),
+            generation: 1,
+            heartbeat: 100,
+            max_version,
+            last_gc_version: 0,
+        }],
+    };
+    let (d, _) = a.compute_delta(&peer(3), 1 << 16, 0);
+    assert!(d.nodes.is_empty(), "{d:?}");
+    let (d, _) = a.compute_delta(&peer(2), 1 << 16, 0);
+    assert!(d.nodes[0].reset);
+    assert_eq!(a.counters().resets_sent, 1);
+    a.compute_delta(&peer(1), 1 << 16, 0);
+    assert_eq!(a.counters().resets_sent, 2);
+}
+
+#[test]
+fn a_header_may_fill_the_budget_exactly() {
+    let mut a = node("a", 1);
+    a.beat();
+    let peer = Digest {
+        entries: vec![DigestEntry {
+            node_id: "a".into(),
+            generation: 1,
+            heartbeat: 0,
+            max_version: 0,
+            last_gc_version: 0,
+        }],
+    };
+    let (full, _) = a.compute_delta(&peer, usize::MAX, 0);
+    let size = delta_size(&full);
+    let (d, info) = a.compute_delta(&peer, size, 0);
+    assert!(!info.truncated);
+    assert_eq!(d, full);
+    let (d, info) = a.compute_delta(&peer, size - 1, 0);
+    assert!(info.truncated && d.nodes.is_empty(), "{d:?}");
+}
+
+/// Budgets one byte short of a delta whose node count, or update count,
+/// needs a two-byte length prefix.
+#[test]
+fn length_prefixes_growing_to_two_bytes_are_accounted() {
+    let mut x = node("x", 1);
+    for i in 0..130 {
+        let (d, _) = node(&format!("n{i}"), 1).compute_delta(&Digest::default(), 1 << 16, 0);
+        x.apply_delta(d, S);
+    }
+    let limits = Limits {
+        max_keys: 200,
+        ..Limits::default()
+    };
+    let mut a = limited("a", limits);
+    for i in 0..130 {
+        a.set_local(&format!("k{i}"), "v", Duration::ZERO).unwrap();
+    }
+    for s in [&mut x, &mut a] {
+        let (full, info) = s.compute_delta(&Digest::default(), usize::MAX, 0);
+        assert!(!info.truncated);
+        let size = delta_size(&full);
+        let (d, info) = s.compute_delta(&Digest::default(), size, 0);
+        assert!(!info.truncated && delta_size(&d) == size);
+        let (d, info) = s.compute_delta(&Digest::default(), size - 1, 0);
+        assert!(info.truncated);
+        assert!(info.bytes < size && delta_size(&d) == info.bytes);
+    }
+}
+
+#[test]
+fn a_truncated_snapshot_accounts_only_the_tombstones_it_covers() {
+    let mut a = node("a", 1);
+    let t = Duration::ZERO;
+    a.set_local("k1", "v", t).unwrap(); // 1
+    a.set_local("t1", "v", t).unwrap(); // 2
+    a.remove_local("t1", t); // 3
+    a.set_local("k2", "v", t).unwrap(); // 4
+    a.set_local("t2", "v", t).unwrap(); // 5
+    a.remove_local("t2", t); // 6
+    a.set_local("k3", "v", t).unwrap(); // 7
+    let (full, _) = a.compute_delta(&Digest::default(), usize::MAX, 0);
+    assert_eq!(full.nodes[0].last_gc_version, 6);
+    let budget = delta_size(&full) - wire::key_update_size("k3", Some("v"), 7);
+    let (d, info) = a.compute_delta(&Digest::default(), budget, 0);
+    assert!(info.truncated);
+    let nd = &d.nodes[0];
+    assert!(nd.reset);
+    assert_eq!(nd.updates.len(), 2);
+    assert_eq!((nd.to_version, nd.last_gc_version), (4, 3));
+}
+
+#[test]
+fn a_forgotten_node_comes_back_only_in_a_newer_life() {
+    let mut a = node("a", 1);
+    let mut b = node("b", 1);
+    b.beat();
+    sync(&mut a, &mut b, 1 << 16, S);
+    a.tick(S + cfg().forget_after);
+    assert!(a.is_forgotten("b"));
+    let (older, _) = node("b", 0).compute_delta(&Digest::default(), 1 << 16, 0);
+    assert!(!a.apply_delta(older, 2 * S));
+    assert!(a.node_view("b").is_none());
+    let (newer, _) = node("b", 2).compute_delta(&Digest::default(), 1 << 16, 0);
+    assert!(a.apply_delta(newer, 3 * S));
+    assert_eq!(a.node_view("b").unwrap().generation, 2);
+}
+
+#[test]
+fn forgotten_records_expire_after_forget_after_exactly() {
+    let mut a = node("a", 1);
+    let mut b = node("b", 1);
+    b.beat();
+    sync(&mut a, &mut b, 1 << 16, S);
+    let at = S + cfg().forget_after;
+    a.tick(at);
+    a.tick(at + cfg().forget_after - Duration::from_millis(1));
+    assert!(a.is_forgotten("b"));
+    a.tick(at + cfg().forget_after);
+    assert!(!a.is_forgotten("b"));
+}
+
+#[test]
+fn max_nodes_counts_self_and_is_inclusive() {
+    let limits = Limits {
+        max_nodes: 3,
+        ..Limits::default()
+    };
+    let mut x = limited("x", limits);
+    for id in ["a", "b", "c"] {
+        x.apply_delta(snapshot(id, 1, 1, 1, "v"), S);
+    }
+    assert!(x.node_view("b").is_some());
+    assert!(x.node_view("c").is_none());
+    assert_eq!(x.counters().nodes_discovered, 2);
+    assert_eq!(x.counters().node_deltas_rejected, 1);
+}
+
+#[test]
+fn snapshots_of_exactly_max_keys_are_accepted() {
+    let limits = Limits {
+        max_keys: 2,
+        ..Limits::default()
+    };
+    let mut x = limited("x", limits);
+    x.apply_delta(snapshot("a", 1, 1, 1, "v"), S);
+    // A newer generation.
+    x.apply_delta(snapshot("a", 2, 1, 2, "v"), S);
+    assert_eq!(x.node_view("a").unwrap().values.len(), 2);
+    x.apply_delta(snapshot("a", 3, 1, 3, "v"), S);
+    assert_eq!(x.node_view("a").unwrap().generation, 2);
+    // A reset in the same generation.
+    x.apply_delta(snapshot("a", 2, 2, 2, "w"), S);
+    assert_eq!(x.node_view("a").unwrap().values["k0"], "w0");
+    x.apply_delta(snapshot("a", 2, 3, 3, "z"), S);
+    assert_eq!(x.node_view("a").unwrap().values["k0"], "w0");
+    assert_eq!(x.counters().node_deltas_rejected, 2);
+    // Learnt but never seen progressing: a generation bump is no revival.
+    assert_eq!(x.counters().nodes_revived, 0);
+}
+
+#[test]
+fn same_generation_resets_report_visible_changes_only() {
+    let mut x = node("x", 1);
+    assert!(x.apply_delta(snapshot("a", 1, 1, 2, "v"), S));
+    // Progress: alive.
+    assert!(x.apply_delta(snapshot("a", 1, 2, 2, "v"), S));
+    assert!(x.node_view("a").unwrap().alive);
+    assert!(!x.apply_delta(snapshot("a", 1, 2, 2, "v"), S));
+    assert!(x.apply_delta(snapshot("a", 1, 2, 2, "w"), S));
+}
+
+#[test]
+fn a_redelivered_tombstone_keeps_its_first_time() {
+    let mut x = node("x", 1);
+    x.apply_delta(snapshot("a", 1, 1, 1, "v"), Duration::ZERO);
+    let delete = || {
+        increment(
+            "a",
+            1,
+            1,
+            vec![KeyUpdate {
+                key: "k0".into(),
+                value: None,
+                version: 2,
+            }],
+        )
+    };
+    x.apply_delta(delete(), S);
+    let mut again = delete();
+    again.nodes[0].from_version = 1;
+    x.apply_delta(again, 20 * S);
+    assert_eq!(x.node_view("a").unwrap().tombstones, 1);
+    x.tick(S + cfg().tombstone_grace);
+    assert_eq!(x.node_view("a").unwrap().tombstones, 0);
+}
+
+#[test]
+fn an_unchanged_heartbeat_is_no_proof_of_life() {
+    let mut x = node("x", 1);
+    x.apply_delta(snapshot("a", 1, 1, 0, "v"), Duration::ZERO);
+    x.apply_delta(increment("a", 2, 0, Vec::new()), S);
+    assert!(x.node_view("a").unwrap().alive);
+    x.apply_delta(increment("a", 2, 0, Vec::new()), 9 * S);
+    x.tick(S + cfg().dead_after);
+    assert!(!x.node_view("a").unwrap().alive);
+    let members = x.members();
+    let alive = |id: &str| members.iter().find(|m| m.node_id == id).unwrap().alive;
+    assert!(!alive("a"));
+    assert!(alive("x"));
+}
+
+#[test]
+fn a_tombstoned_key_counts_as_a_new_key() {
+    let limits = Limits {
+        max_keys: 2,
+        ..Limits::default()
+    };
+    let mut a = limited("a", limits);
+    a.set_local("gone", "v", Duration::ZERO).unwrap();
+    a.remove_local("gone", Duration::ZERO);
+    a.set_local("k1", "v", Duration::ZERO).unwrap();
+    a.set_local("k2", "v", Duration::ZERO).unwrap();
+    assert_eq!(
+        a.set_local("gone", "back", Duration::ZERO),
+        Err(GossipError::TooManyKeys { max: 2 })
+    );
+    // Overwriting a live key is always possible.
+    assert!(a.set_local("k1", "w", Duration::ZERO).unwrap());
+}
+
+/// Records the probabilities it is asked about; never draws.
+#[derive(Default)]
+struct Recorder(Vec<f64>);
+impl TargetRng for Recorder {
+    fn index(&mut self, _: usize) -> usize {
+        0
+    }
+    fn chance(&mut self, p: f64) -> bool {
+        self.0.push(p);
+        false
+    }
+}
+
+#[test]
+fn select_targets_counts() {
+    let live: Vec<String> = (0..3).map(|i| format!("l{i}")).collect();
+    let dead = vec!["d0".to_string()];
+    let mut rng = Recorder::default();
+    let t = select_targets(&live, &dead, &[], "me", 1, 0.0, &mut rng);
+    assert_eq!(t.len(), 1);
+    // The dead node is tried with probability dead / (live + 1).
+    assert_eq!(rng.0, [0.0, 0.25]);
+    let t = select_targets(&live[..2], &[], &[], "me", 5, 0.0, &mut rng);
+    assert_eq!(t.len(), 2);
+}

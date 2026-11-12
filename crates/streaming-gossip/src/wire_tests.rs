@@ -216,3 +216,15 @@ fn async_framing_over_a_byte_stream() {
         assert_eq!(r.position(), FRAME_HEADER_LEN as u64);
     });
 }
+
+#[test]
+fn a_frame_of_exactly_the_limit_is_accepted() {
+    let mut header = [0u8; FRAME_HEADER_LEN];
+    header[..4].copy_from_slice(&100u32.to_be_bytes());
+    header[4..].copy_from_slice(&7u32.to_be_bytes());
+    assert_eq!(decode_header(header, 100).unwrap(), (100, 7));
+    assert!(matches!(
+        decode_header(header, 99),
+        Err(WireError::FrameTooLarge { len: 100, max: 99 })
+    ));
+}

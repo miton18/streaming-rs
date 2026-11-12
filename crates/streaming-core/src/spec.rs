@@ -794,6 +794,68 @@ mod tests {
     }
 
     #[test]
+    fn settings_defaults_are_pinned() {
+        let defaults = GraphSettings {
+            max_out_of_orderness: Duration::from_millis(500),
+            idle_timeout: Duration::from_secs(30),
+            max_batch: 1_000,
+            linger: Duration::from_millis(200),
+            mailbox_capacity: 8,
+            chunk_size: 256,
+            flush_interval: Duration::from_secs(1),
+            max_in_flight_epochs: 2,
+            gc_grace: Duration::from_secs(30),
+            max_pending_windows: 16,
+        };
+        assert_eq!(GraphSettings::default(), defaults);
+        assert_eq!(serde_json::from_str::<GraphSettings>("{}").unwrap(), defaults);
+    }
+
+    #[test]
+    fn a_window_feeds_aggregates_only() {
+        let mut spec = spec(
+            &[
+                ("s", "test/source@1"),
+                ("d", "test/decode@1"),
+                ("by", "test/key@1"),
+                ("w", "std/tumbling@1"),
+                ("m", "std/identity@1"),
+                ("k", "test/sink@1"),
+            ],
+            &[("s", "d"), ("d", "by"), ("by", "w"), ("w", "m"), ("m", "k")],
+        );
+        spec.nodes[3].config = serde_json::json!({"size": "5m"});
+        assert_eq!(wiring_error_on(&spec, &catalog()), id("w"));
+    }
+
+    #[test]
+    fn an_aggregate_takes_a_single_window() {
+        let mut spec = spec(
+            &[
+                ("s", "test/source@1"),
+                ("d", "test/decode@1"),
+                ("by", "test/key@1"),
+                ("w1", "std/tumbling@1"),
+                ("w2", "std/tumbling@1"),
+                ("c", "std/count@1"),
+                ("k", "test/sink@1"),
+            ],
+            &[
+                ("s", "d"),
+                ("d", "by"),
+                ("by", "w1"),
+                ("by", "w2"),
+                ("w1", "c"),
+                ("w2", "c"),
+                ("c", "k"),
+            ],
+        );
+        spec.nodes[3].config = serde_json::json!({"size": "5m"});
+        spec.nodes[4].config = serde_json::json!({"size": "1m"});
+        assert_eq!(wiring_error_on(&spec, &catalog()), id("c"));
+    }
+
+    #[test]
     fn nodes_are_looked_up_by_id() {
         let spec = count_per_key();
         assert_eq!(spec.node(&id("win")).unwrap().id, id("win"));

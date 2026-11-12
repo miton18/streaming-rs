@@ -2,6 +2,7 @@
 //! time, and require the scenarios to notice each of them.
 //!
 //! `cargo test -p streaming-sim --features mutants --test mutants -- --nocapture`
+//! (`SIM_MUTANT=<name>` plants a single one)
 
 use moonpool_sim::{Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport};
 use parking_lot::Mutex;
@@ -90,8 +91,13 @@ fn every_planted_bug_is_noticed() {
             ..Scenario::default()
         },
     ];
+    // `SIM_MUTANT=<name>` plants that one only.
+    let only = std::env::var("SIM_MUTANT").ok();
     let mut survivors = Vec::new();
     for mutant in Mutant::ALL {
+        if only.as_ref().is_some_and(|only| *only != format!("{mutant:?}")) {
+            continue;
+        }
         plant(Some(mutant));
         let mut noticed = 0;
         let mut runs = 0;

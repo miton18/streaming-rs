@@ -262,4 +262,90 @@ mod tests {
         assert!(l.max_node_state_bytes() < 90 * 1024);
         assert!(l.max_digest_entry_bytes() <= 170);
     }
+
+    #[test]
+    fn size_bounds_are_tight() {
+        let l = Limits::default();
+        let key = "k".repeat(l.max_key_len);
+        let value = "v".repeat(l.max_value_len);
+        assert_eq!(
+            wire::key_update_size(&key, Some(&value), u64::MAX),
+            l.max_update_bytes()
+        );
+        let nd = wire::NodeDelta {
+            node_id: "n".repeat(l.max_node_id_len),
+            generation: u64::MAX,
+            addr: "a".repeat(l.max_addr_len),
+            heartbeat: u64::MAX,
+            reset: true,
+            from_version: u64::MAX,
+            to_version: u64::MAX,
+            last_gc_version: u64::MAX,
+            updates: Vec::new(),
+        };
+        assert_eq!(wire::node_header_size(&nd, usize::MAX), l.max_node_header_bytes());
+    }
+
+    fn rejected(c: &GossipConfig) -> bool {
+        matches!(c.validate(), Err(GossipError::InvalidConfig(_)))
+    }
+
+    #[test]
+    fn identity_lengths_are_inclusive() {
+        let base = GossipConfig::new("c", "n", 1, "127.0.0.1:7000");
+        let l = base.limits.clone();
+        let mut c = base.clone();
+        c.node_id = "n".repeat(l.max_node_id_len);
+        c.cluster_id = "c".repeat(l.max_node_id_len);
+        c.advertise_addr = "a".repeat(l.max_addr_len);
+        c.max_frame_bytes = wire::ABSOLUTE_MAX_FRAME;
+        c.validate().unwrap();
+
+        let mut long = c.clone();
+        long.node_id.push('n');
+        assert!(rejected(&long), "node id");
+        let mut long = c.clone();
+        long.cluster_id.push('c');
+        assert!(rejected(&long), "cluster id");
+        let mut long = c.clone();
+        long.advertise_addr.push('a');
+        assert!(rejected(&long), "address");
+        let mut empty = c;
+        empty.advertise_addr.clear();
+        assert!(rejected(&empty), "empty address");
+    }
+
+    #[test]
+    fn every_limit_must_be_positive() {
+        let base = GossipConfig::new("c", "n", 1, "127.0.0.1:7000");
+        for zero in [
+            |l: &mut Limits| l.max_keys = 0,
+            |l: &mut Limits| l.max_key_len = 0,
+            |l: &mut Limits| l.max_nodes = 0,
+        ] {
+            let mut c = base.clone();
+            zero(&mut c.limits);
+            assert!(rejected(&c), "{:?}", c.limits);
+        }
+    }
+
+    #[test]
+    fn budget_and_frame_minimums_are_inclusive() {
+        let mut c = GossipConfig::new("cluster", "n", 1, "127.0.0.1:7000");
+        let l = c.limits.clone();
+        // A length prefix, one maximal node header and one maximal update.
+        c.delta_budget_bytes = 10 + l.max_node_header_bytes() + l.max_update_bytes();
+        // Version byte, discriminant and cluster id length, a full digest of
+        // max_nodes, the delta and the cluster id.
+        let min_frame = 1 + 5 + 10 + l.max_digest_bytes(l.max_nodes) + c.delta_budget_bytes + "cluster".len();
+        c.max_frame_bytes = min_frame;
+        c.validate().unwrap();
+        let mut small = c.clone();
+        small.max_frame_bytes -= 1;
+        assert!(rejected(&small), "frame");
+        let mut small = c.clone();
+        small.delta_budget_bytes -= 1;
+        small.max_frame_bytes -= 1;
+        assert!(rejected(&small), "budget");
+    }
 }

@@ -6,7 +6,11 @@
 //! outcome is two workers running the same slice for a while, which the
 //! commit log arbitrates.
 
-use crate::{RuntimeEnv, state};
+use crate::{
+    RuntimeEnv,
+    mutation::{Mutant, planted},
+    state,
+};
 use moonpool_core::{Providers, TimeProvider};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -145,7 +149,9 @@ pub(crate) fn assign(
 #[derive(Debug, Default)]
 pub(crate) struct ControllerState {
     last_move: Option<Duration>,
-    deleting_since: BTreeMap<GraphKey, Duration>,
+    /// Graphs being deleted: when their logs were closed or last purged, and
+    /// how long to wait from then on before purging them again.
+    deleting_since: BTreeMap<GraphKey, (Duration, Duration)>,
     /// When each graph was last planned.
     planned: BTreeMap<GraphKey, Duration>,
     /// How often the sources are asked again for their partitions.
@@ -261,30 +267,74 @@ async fn drained(kv: &dyn Kv, topology: &Topology, slice: &SliceKey) -> Result<b
     Ok(true)
 }
 
-/// Remove everything a deleted graph left in the KV.
-async fn purge_graph(kv: &dyn Kv, graph: &GraphKey) -> Result<(), KvError> {
+/// Close the log of every slice of a graph being deleted, so that whatever
+/// it still commits is void. Returns how long writes issued before may still
+/// take to land: two `gc_grace`.
+async fn close_graph(kv: &dyn Kv, graph: &GraphKey) -> Result<Duration, KvError> {
     let spec: Option<GraphSpec> = read_doc(kv, &keys::graph_spec(graph)).await?;
-    let plan: Option<GraphPlan> = read_doc(kv, &keys::graph_plan(graph)).await?;
-    let nodes = spec.map(|spec| spec.nodes).unwrap_or_default();
-    let plan = plan.unwrap_or_default();
-    for slice in &plan.closed {
-        // What is left of the slices purged earlier.
+    let plan: GraphPlan = read_doc(kv, &keys::graph_plan(graph)).await?.unwrap_or_default();
+    for slice in plan.slices.iter().chain(&plan.retired) {
         let slice = SliceKey {
             tenant: graph.tenant.clone(),
             graph: graph.graph.clone(),
             slice: slice.clone(),
         };
-        kv.del(vec![keys::slice_seal(&slice)]).await?;
+        state::close_log(kv, &slice, u64::MAX).await?;
     }
-    for slice in plan.slices.into_iter().chain(plan.retired) {
-        let slice = SliceKey {
-            tenant: graph.tenant.clone(),
-            graph: graph.graph.clone(),
-            slice,
-        };
+    Ok(spec.map_or(Duration::ZERO, |spec| 2 * spec.settings.gc_grace))
+}
+
+/// Remove everything a deleted graph left in the KV.
+///
+/// Any store command may fail, so the purge must not need all of them to
+/// succeed in one round: a slice whose seal is gone is purged already, and
+/// the next round only does what is left. The purge only deletes: a write
+/// issued now could land after it is over. Returns whether the graph is gone:
+/// only a round that finds every slice purged already deletes the documents
+/// that tell what to look for.
+async fn purge_graph(kv: &dyn Kv, graph: &GraphKey, catalog: &streaming_core::Catalog) -> Result<bool, KvError> {
+    let spec: Option<GraphSpec> = read_doc(kv, &keys::graph_spec(graph)).await?;
+    let plan: GraphPlan = read_doc(kv, &keys::graph_plan(graph)).await?.unwrap_or_default();
+    let all = spec.as_ref().map(|spec| spec.nodes.clone()).unwrap_or_default();
+    // Only aggregates keep window state.
+    let nodes: Vec<NodeSpec> = match spec.as_ref().map(|spec| Topology::build(spec, catalog)) {
+        Some(Ok(topology)) => all
+            .iter()
+            .filter(|node| topology.kind(&node.id) == OpKind::Aggregate)
+            .cloned()
+            .collect(),
+        _ => all.clone(),
+    };
+    let key_of = |slice: &SliceId| SliceKey {
+        tenant: graph.tenant.clone(),
+        graph: graph.graph.clone(),
+        slice: slice.clone(),
+    };
+    // What is left of the slices purged earlier.
+    let seals: Vec<String> = plan
+        .closed
+        .iter()
+        .map(|slice| keys::slice_seal(&key_of(slice)))
+        .collect();
+    for chunk in seals.chunks(64) {
+        kv.del(chunk.to_vec()).await?;
+    }
+    let mut found = false;
+    for slice in plan.slices.iter().chain(&plan.retired) {
+        let slice = key_of(slice);
+        // Every log was closed first: no seal, nothing left.
+        if kv.hgetall(&keys::slice_seal(&slice)).await?.is_empty() {
+            continue;
+        }
+        found = true;
         purge_slice(kv, &nodes, &slice).await?;
     }
-    let mut doomed: Vec<String> = nodes.iter().map(|node| keys::graph_output(graph, &node.id)).collect();
+    if found {
+        // Something was still there: look again once whatever was written
+        // meanwhile has landed.
+        return Ok(false);
+    }
+    let mut doomed: Vec<String> = all.iter().map(|node| keys::graph_output(graph, &node.id)).collect();
     doomed.extend([
         keys::graph_spec(graph),
         keys::graph_desired(graph),
@@ -293,7 +343,8 @@ async fn purge_graph(kv: &dyn Kv, graph: &GraphKey) -> Result<(), KvError> {
     for chunk in doomed.chunks(64) {
         kv.del(chunk.to_vec()).await?;
     }
-    kv.hdel(keys::CLUSTER_GRAPHS, vec![graph.to_string()]).await
+    kv.hdel(keys::CLUSTER_GRAPHS, vec![graph.to_string()]).await?;
+    Ok(true)
 }
 
 /// One controller round: plan what needs planning, purge what is being
@@ -321,11 +372,24 @@ pub(crate) async fn run_once<P: Providers>(
     for (_, entry) in index {
         let graph = GraphKey::new(entry.tenant.clone(), entry.graph.clone());
         if entry.deleting {
-            // Leave workers the time to notice and stop the graph's slices.
-            let since = *state.deleting_since.entry(graph.clone()).or_insert(now);
-            if now.saturating_sub(since) >= grace {
-                purge_graph(kv, &graph).await?;
-                state.deleting_since.remove(&graph);
+            // Close every log first, so that an instance still running
+            // commits nothing more; then leave workers the time to notice,
+            // and the store commands in flight the time to land.
+            if !state.deleting_since.contains_key(&graph) {
+                let linger = if planted(Mutant::DeleteWithoutClosing) {
+                    Duration::ZERO
+                } else {
+                    close_graph(kv, &graph).await?
+                };
+                state.deleting_since.insert(graph.clone(), (now, linger));
+            }
+            let (since, linger) = state.deleting_since[&graph];
+            if now.saturating_sub(since) >= grace.max(linger) {
+                if purge_graph(kv, &graph, &env.registry.catalog()).await? {
+                    state.deleting_since.remove(&graph);
+                } else {
+                    state.deleting_since.insert(graph.clone(), (now, linger));
+                }
                 changed = true;
             }
             continue;
@@ -588,5 +652,133 @@ mod tests {
     fn no_worker_means_no_assignment() {
         let (assignments, moved) = assign(&slices("a", 2), &[], &BTreeMap::new(), true);
         assert!(assignments.is_empty() && !moved);
+    }
+
+    #[test]
+    fn a_saturated_worker_keeps_its_only_slice() {
+        let all = slices("a", 0);
+        let workers = [worker("w1", 0.95), worker("w2", 0.1)];
+        let current = BTreeMap::from([(all[0].clone(), WorkerId::new("w1").unwrap())]);
+        let (kept, moved) = assign(&all, &workers, &current, true);
+        assert!(!moved);
+        assert_eq!(kept, current);
+    }
+
+    mod rounds {
+        use super::super::*;
+        use crate::memlog::MemLog;
+        use moonpool_core::TokioProviders;
+        use std::sync::Arc;
+        use streaming_core::{
+            DynKv, MemKv, NoSecrets, Registry, SystemClock, TypeTag,
+            control::{GraphIndexEntry, MemberInfo},
+        };
+
+        fn env(kv: &DynKv) -> RuntimeEnv<TokioProviders> {
+            let mut registry = Registry::<TokioProviders>::standard();
+            let log = MemLog::new(3);
+            registry.register_source::<u64>("test/log@1", "", move |context, _| {
+                Ok(log.source(context.providers.clone()))
+            });
+            registry.register_sink("test/out@1", "", TypeTag::Any, |_, _| {
+                Err(streaming_core::OpError::Config("not run here".into()))
+            });
+            RuntimeEnv {
+                providers: TokioProviders::new(),
+                kv: kv.clone(),
+                clock: Arc::new(SystemClock),
+                secrets: Arc::new(NoSecrets),
+                registry: Arc::new(registry),
+            }
+        }
+
+        async fn submit(kv: &DynKv, version: u64) -> GraphKey {
+            let spec: GraphSpec = serde_json::from_value(serde_json::json!({
+                "tenant": "acme",
+                "graph": "g",
+                "version": version,
+                "nodes": [
+                    {"id": "events", "op": "test/log@1"},
+                    {"id": "out", "op": "test/out@1"}
+                ],
+                "edges": [["events", "out"]]
+            }))
+            .unwrap();
+            let graph = spec.key();
+            kv.set_json(&keys::graph_spec(&graph), &spec).await.unwrap();
+            kv.hset_json(
+                keys::CLUSTER_GRAPHS,
+                &graph.to_string(),
+                &GraphIndexEntry {
+                    tenant: spec.tenant.clone(),
+                    graph: spec.graph.clone(),
+                    version,
+                    updated_ms: 0,
+                    deleting: false,
+                },
+            )
+            .await
+            .unwrap();
+            graph
+        }
+
+        fn member(id: &str, cpu: f64) -> MemberInfo {
+            MemberInfo {
+                worker: WorkerId::new(id).unwrap(),
+                generation: 1,
+                heartbeat_ms: 0,
+                load: Load { cpu, ..Load::default() },
+                actors: 0,
+                slices: 0,
+                api_addr: None,
+                version: String::new(),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_new_version_is_planned_at_once() {
+            let kv: DynKv = MemKv::shared();
+            let env = env(&kv);
+            let graph = submit(&kv, 1).await;
+            let me = WorkerId::new("w1").unwrap();
+            let members = [member("w1", 0.1)];
+            let mut state = ControllerState::new(Duration::from_secs(3600));
+            let hour = Duration::from_secs(3600);
+            run_once(&env, &me, &members, &mut state, hour, hour).await.unwrap();
+            let plan: GraphPlan = kv.get_json(&keys::graph_plan(&graph)).await.unwrap().unwrap();
+            assert_eq!((plan.spec_version, plan.slices.len()), (1, 3));
+            assert!(plan.planned_ms > 1_700_000_000_000);
+            submit(&kv, 2).await;
+            run_once(&env, &me, &members, &mut state, hour, hour).await.unwrap();
+            let plan: GraphPlan = kv.get_json(&keys::graph_plan(&graph)).await.unwrap().unwrap();
+            assert_eq!(plan.spec_version, 2);
+        }
+
+        #[tokio::test]
+        async fn one_move_per_cooldown() {
+            let kv: DynKv = MemKv::shared();
+            let env = env(&kv);
+            submit(&kv, 1).await;
+            let me = WorkerId::new("w1").unwrap();
+            let hour = Duration::from_secs(3600);
+            let mut state = ControllerState::new(hour);
+            // Everything lands on w1 first.
+            run_once(&env, &me, &[member("w1", 0.1)], &mut state, hour, hour)
+                .await
+                .unwrap();
+            let moved = |placement: &Placement| {
+                placement
+                    .assignments
+                    .values()
+                    .filter(|worker| worker.as_str() == "w2")
+                    .count()
+            };
+            let members = [member("w1", 0.95), member("w2", 0.1)];
+            for _ in 0..3 {
+                run_once(&env, &me, &members, &mut state, hour, hour).await.unwrap();
+                let placement: Placement = kv.get_json(keys::CLUSTER_PLACEMENT).await.unwrap().unwrap();
+                assert_eq!(moved(&placement), 1);
+            }
+        }
     }
 }

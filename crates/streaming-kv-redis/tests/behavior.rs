@@ -18,25 +18,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
-use tokio_util::sync::CancellationToken;
-
-async fn start_fake(fake: FakeRedis) -> (String, CancellationToken) {
-    let addr = format!("127.0.0.1:{}", common::free_port());
-    let token = CancellationToken::new();
-    let (a, t) = (addr.clone(), token.clone());
-    tokio::spawn(async move {
-        fake.serve(TokioProviders::new(), &a, t).await.expect("serve");
-    });
-    for _ in 0..200 {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            // Let the readiness probe's own connection be counted and closed.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            return (addr, token);
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("fake did not start");
-}
 
 fn cfg(addr: &str) -> RedisConfig {
     RedisConfig {
@@ -50,7 +31,7 @@ fn cfg(addr: &str) -> RedisConfig {
 #[tokio::test]
 async fn hset_hdel_del_are_chunked_only_above_the_threshold() {
     let fake = FakeRedis::new();
-    let (addr, _t) = start_fake(fake.clone()).await;
+    let (addr, _t) = common::start_fake(fake.clone()).await;
     let kv = RedisKv::new(
         TokioProviders::new(),
         RedisConfig {
@@ -92,7 +73,7 @@ async fn hset_hdel_del_are_chunked_only_above_the_threshold() {
 #[tokio::test]
 async fn hset_is_split_above_eight_mebibytes() {
     let fake = FakeRedis::new();
-    let (addr, _t) = start_fake(fake.clone()).await;
+    let (addr, _t) = common::start_fake(fake.clone()).await;
     let kv = RedisKv::new(
         TokioProviders::new(),
         RedisConfig {
@@ -133,7 +114,7 @@ async fn hset_is_split_above_eight_mebibytes() {
 #[tokio::test]
 async fn too_large_values_are_refused_before_sending() {
     let fake = FakeRedis::new();
-    let (addr, _t) = start_fake(fake.clone()).await;
+    let (addr, _t) = common::start_fake(fake.clone()).await;
     let base = fake.connections_accepted();
     let kv = RedisKv::new(
         TokioProviders::new(),
@@ -173,7 +154,7 @@ async fn too_large_values_are_refused_before_sending() {
 #[tokio::test]
 async fn protocol_errors_keep_the_connection() {
     let fake = FakeRedis::new();
-    let (addr, _t) = start_fake(fake.clone()).await;
+    let (addr, _t) = common::start_fake(fake.clone()).await;
     let base = fake.connections_accepted();
     let kv = RedisKv::new(
         TokioProviders::new(),
@@ -197,7 +178,7 @@ async fn protocol_errors_keep_the_connection() {
 #[tokio::test]
 async fn concurrent_commands_share_a_bounded_pool() {
     let fake = FakeRedis::new();
-    let (addr, _t) = start_fake(fake.clone()).await;
+    let (addr, _t) = common::start_fake(fake.clone()).await;
     let base = fake.connections_accepted();
     let kv = Arc::new(RedisKv::new(
         TokioProviders::new(),
@@ -351,4 +332,161 @@ async fn tls_without_the_feature_is_a_clear_configuration_error() {
         "{err:?}"
     );
     assert!(RedisConfig::from_url("rediss://:t@h:1").is_err());
+}
+
+/// A server answering each command with `reply(name, nth call of that name)`.
+async fn scripted(reply: fn(&str, usize) -> Vec<u8>) -> String {
+    use std::collections::HashMap;
+    use streaming_kv_redis::resp::{Decoder, Value};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let calls = Arc::new(parking_lot::Mutex::new(HashMap::<String, usize>::new()));
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let calls = calls.clone();
+            tokio::spawn(async move {
+                let mut decoder = Decoder::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = sock.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    decoder.feed(&buf[..n]);
+                    while let Ok(Some(Value::Array(args))) = decoder.next_value() {
+                        let Some(Value::Bulk(name)) = args.first() else {
+                            return;
+                        };
+                        let name = String::from_utf8_lossy(name).to_uppercase();
+                        let nth = {
+                            let mut calls = calls.lock();
+                            let n = calls.entry(name.clone()).or_default();
+                            *n += 1;
+                            *n
+                        };
+                        if sock.write_all(&reply(&name, nth)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn unexpected_simple_replies_are_protocol_errors() {
+    let addr = scripted(|name, _| match name {
+        "PING" => b"+PANG\r\n".to_vec(),
+        "SET" => b"+QUEUED\r\n".to_vec(),
+        _ => b":1\r\n".to_vec(),
+    })
+    .await;
+    let kv = RedisKv::new(TokioProviders::new(), cfg(&addr));
+    assert!(matches!(kv.ping().await, Err(KvError::Protocol(_))));
+    assert!(matches!(kv.set("k", b"v".to_vec()).await, Err(KvError::Protocol(_))));
+    // DEL answers an integer, so SET must not take one for its +OK.
+    let addr = scripted(|_, _| b":1\r\n".to_vec()).await;
+    let kv = RedisKv::new(TokioProviders::new(), cfg(&addr));
+    assert!(matches!(kv.set("k", b"v".to_vec()).await, Err(KvError::Protocol(_))));
+}
+
+#[tokio::test]
+async fn auth_must_answer_ok() {
+    let addr = scripted(|name, _| match name {
+        "AUTH" => b"+NOPE\r\n".to_vec(),
+        _ => b"+PONG\r\n".to_vec(),
+    })
+    .await;
+    let kv = RedisKv::new(
+        TokioProviders::new(),
+        RedisConfig {
+            password: Some("tok".into()),
+            ..cfg(&addr)
+        },
+    );
+    let err = kv.ping().await.unwrap_err();
+    assert!(matches!(&err, KvError::Protocol(m) if m.contains("AUTH")), "{err}");
+}
+
+#[tokio::test]
+async fn malformed_hscan_cursors_are_refused() {
+    // The first page carries `cursor`, the second ends the scan.
+    fn reply(cursor: &str, nth: usize) -> Vec<u8> {
+        let cursor = if nth == 1 { cursor } else { "0" };
+        format!("*2\r\n${}\r\n{cursor}\r\n*0\r\n", cursor.len()).into_bytes()
+    }
+    for addr in [
+        scripted(|_, nth| reply("", nth)).await,
+        scripted(|_, nth| reply("123456789012345678901", nth)).await,
+        scripted(|_, nth| reply("12a", nth)).await,
+    ] {
+        let kv = RedisKv::new(TokioProviders::new(), cfg(&addr));
+        let got = tokio::time::timeout(Duration::from_secs(5), kv.hgetall("h"))
+            .await
+            .expect("no endless scan");
+        assert!(matches!(got, Err(KvError::Protocol(_))), "{got:?}");
+    }
+    // Twenty digits is a valid cursor.
+    let addr = scripted(|_, nth| reply("12345678901234567890", nth)).await;
+    let kv = RedisKv::new(TokioProviders::new(), cfg(&addr));
+    assert_eq!(kv.hgetall("h").await, Ok(Vec::new()));
+}
+
+#[tokio::test]
+async fn hset_honours_the_field_limit_exactly() {
+    let fake = FakeRedis::new();
+    let (addr, _t) = common::start_fake(fake.clone()).await;
+    let kv = RedisKv::new(
+        TokioProviders::new(),
+        RedisConfig {
+            max_fields_per_command: 2,
+            ..cfg(&addr)
+        },
+    );
+    let entries = |n: usize| -> Vec<(String, Vec<u8>)> { (0..n).map(|i| (format!("f{i}"), b"v".to_vec())).collect() };
+    kv.hset("h", entries(2)).await.unwrap();
+    assert_eq!(fake.command_count("HSET"), 1);
+    kv.hset("h", entries(3)).await.unwrap();
+    assert_eq!(fake.command_count("HSET"), 3);
+}
+
+#[tokio::test]
+async fn a_single_entry_above_eight_mebibytes_is_sent_alone() {
+    const MIB: usize = 1024 * 1024;
+    let fake = FakeRedis::with_max_value_bytes(16 * MIB);
+    let (addr, _t) = common::start_fake(fake.clone()).await;
+    let kv = RedisKv::new(
+        TokioProviders::new(),
+        RedisConfig {
+            max_value_bytes: 16 * MIB,
+            command_timeout: Duration::from_secs(10),
+            ..cfg(&addr)
+        },
+    );
+    let set = kv.hset(
+        "h",
+        vec![("a".into(), vec![1; 9 * MIB]), ("b".into(), vec![2; 9 * MIB])],
+    );
+    tokio::time::timeout(Duration::from_secs(30), set)
+        .await
+        .expect("no endless split")
+        .unwrap();
+    assert_eq!(fake.command_count("HSET"), 2);
+    assert_eq!(fake.peek_field("h", "b").map(|v| v.len()), Some(9 * MIB));
+}
+
+#[test]
+fn debug_shows_the_configuration_only() {
+    let kv = RedisKv::new(
+        TokioProviders::new(),
+        RedisConfig {
+            password: Some("topsecret".into()),
+            ..RedisConfig::default()
+        },
+    );
+    let shown = format!("{kv:?}");
+    assert!(shown.starts_with("RedisKv { config: RedisConfig {"), "{shown}");
+    assert!(!shown.contains("topsecret"), "{shown}");
 }

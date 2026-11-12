@@ -84,3 +84,82 @@ pub async fn late_commit(kv: &dyn Kv, slice: &SliceKey, field: &str, value: &[u8
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        metrics::ts_key,
+        state::{CommitRecord, NodeChanges, StateEntry, WindowChanges},
+    };
+    use futures::executor::block_on;
+    use streaming_core::{Key, MemKv, NodeId, Window};
+
+    fn record(epoch: u64, plan: u64, position: Option<Position>, window: Option<Window>) -> CommitRecord {
+        CommitRecord {
+            epoch,
+            owner: "o".into(),
+            position,
+            watermark: 0,
+            plan,
+            changes: window
+                .map(|window| NodeChanges {
+                    node: NodeId::new("count").unwrap(),
+                    windows: vec![WindowChanges {
+                        window,
+                        entries: vec![StateEntry {
+                            key: Key::encode(&"k".to_owned()).unwrap(),
+                            acc: vec![1],
+                            prev_epoch: 0,
+                        }],
+                    }],
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn commits_into_emitted_windows_are_reported() {
+        block_on(async {
+            let kv = MemKv::new();
+            let source: SliceKey = "acme/g/src.events.0".parse().unwrap();
+            let emitter: SliceKey = "acme/g/agg.count".parse().unwrap();
+            let first = Window::new(0, 10_000);
+            let second = Window::new(10_000, 20_000);
+            // The emitter is done with the first window, half way through the second.
+            let done = Position(ts_key(10_000), ts_key(0), u64::MAX);
+            let half = Position(ts_key(20_000), ts_key(10_000), 5);
+            assert!(covers(Some(done), &first));
+            assert!(!covers(Some(half), &second));
+            assert!(!covers(None, &first));
+            state::try_commit(&kv, &emitter, &record(1, 0, Some(done), None))
+                .await
+                .unwrap();
+            let check = |record: CommitRecord| {
+                let kv = &kv;
+                let source = &source;
+                async move {
+                    let bytes = postcard::to_allocvec(&record).unwrap();
+                    late_commit(kv, source, &format!("c:{}", record.epoch), &bytes).await
+                }
+            };
+            let late = check(record(5, 0, None, Some(first))).await;
+            assert!(late.is_some_and(|m| m.contains("already emitted")));
+            assert_eq!(check(record(5, 0, None, Some(second))).await, None);
+            let mut empty = record(5, 0, None, Some(first));
+            empty.changes[0].windows[0].entries.clear();
+            assert_eq!(check(empty).await, None);
+            // Void writes: at or below the seal, or under an older plan.
+            state::compact(&kv, &source, 5, &[], 0).await.unwrap();
+            assert_eq!(check(record(5, 0, None, Some(first))).await, None);
+            assert!(check(record(6, 0, None, Some(first))).await.is_some());
+            state::close_log(&kv, &source, 2).await.unwrap();
+            assert_eq!(check(record(7, 1, None, Some(first))).await, None);
+            assert!(check(record(7, 3, None, Some(first))).await.is_some());
+            // Not a commit field, or not a record.
+            assert_eq!(late_commit(&kv, &source, "f:7", &[]).await, None);
+            assert_eq!(late_commit(&kv, &source, "c:7", &[0xff]).await, None);
+        });
+    }
+}

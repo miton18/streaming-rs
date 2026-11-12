@@ -124,12 +124,18 @@ exactly-once.
      then closes its log (`p:<generation>` in the seal hash, older-plan
      commits are void) and deletes its state two `gc_grace` later.
    - A graph that cannot be planned keeps the previous plan's bookkeeping.
-10. **Control plane.** Not knowing who is alive is never being alone
+10. **Deleting a graph.** The controller first closes every slice log
+    (older commits void), then waits for workers to notice and for the
+    commands in flight to land (`2 * gc_grace`), then purges with deletes
+    only, resumably. A pass that still finds something starts the
+    countdown again; spec, plan and index entry go last, after a clean
+    pass.
+11. **Control plane.** Not knowing who is alive is never being alone
     (`Membership::alive` returns `None` on a failed read). Read errors are
     never taken for absent documents.
 
-`streaming_runtime::mutation` holds ten **planted bugs**, one per precaution
-above. When you add a precaution, add its mutant and make the simulation
+`streaming_runtime::mutation` holds eleven **planted bugs**, one per precaution
+above (`SIM_MUTANT=<name>` plants a single one). When you add a precaution, add its mutant and make the simulation
 notice it.
 
 ## Verifying
@@ -205,7 +211,8 @@ flawless store calls in a row to start; index cleanup needing one emitter
 instance to live for `gc_grace`; a worker electing itself when it could not
 read the members; takeover never progressing under short-lived instances; an
 unplannable graph retiring all its slices; purging a retired slice racing
-with its live instances; a half-done purge leaving an unreadable log.
+with its live instances; a half-done purge leaving an unreadable log; a deleted graph recreated by
+writes landing after its purge (logs, seals and plan came back).
 
 ## The HTTP API and its OpenAPI document
 

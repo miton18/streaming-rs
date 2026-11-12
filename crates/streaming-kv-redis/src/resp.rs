@@ -542,4 +542,91 @@ mod tests {
         encode_value(&v, &mut wire);
         assert_eq!(one(&wire), v);
     }
+
+    #[test]
+    fn default_limits() {
+        assert_eq!(DEFAULT_MAX_BULK, 64 << 20);
+        // An array header of exactly the default limit is accepted (and
+        // incomplete), one more element is refused.
+        let mut d = Decoder::new();
+        d.feed(format!("*{}\r\n", 16 << 20).as_bytes());
+        assert_eq!(d.next_value(), Ok(None));
+        let mut d = Decoder::new();
+        d.feed(format!("*{}\r\n", (16 << 20) + 1).as_bytes());
+        assert!(d.next_value().is_err());
+    }
+
+    #[test]
+    fn limits_are_inclusive() {
+        // Arrays of exactly `max_array` elements.
+        let mut d = Decoder::with_limits(10, 3);
+        d.feed(b"*3\r\n:1\r\n:2\r\n:3\r\n");
+        assert!(d.next_value().unwrap().is_some());
+        // Nesting of exactly MAX_DEPTH arrays.
+        let mut wire = b"*1\r\n".repeat(MAX_DEPTH);
+        wire.extend_from_slice(b":7\r\n");
+        let mut expected = Value::Integer(7);
+        for _ in 0..MAX_DEPTH {
+            expected = Value::Array(vec![expected]);
+        }
+        assert_eq!(one(&wire), expected);
+        let mut wire = b"*1\r\n".repeat(MAX_DEPTH + 1);
+        wire.extend_from_slice(b":7\r\n");
+        let mut d = Decoder::new();
+        d.feed(&wire);
+        assert!(d.next_value().is_err());
+    }
+
+    #[test]
+    fn lines_of_exactly_the_limit() {
+        // 64 KiB, spelled out: the test must not follow the constant.
+        const LINE: usize = 65_536;
+        // A line of LINE bytes is accepted.
+        let mut wire = b"+".to_vec();
+        wire.extend(std::iter::repeat_n(b'a', LINE));
+        wire.extend_from_slice(b"\r\n");
+        assert_eq!(one(&wire), Value::Simple("a".repeat(LINE)));
+        // One byte more is refused, even terminated.
+        let mut wire = b"+".to_vec();
+        wire.extend(std::iter::repeat_n(b'a', LINE + 1));
+        wire.extend_from_slice(b"\r\n");
+        let mut d = Decoder::new();
+        d.feed(&wire);
+        assert!(d.next_value().is_err());
+        // LINE bytes without their CRLF yet: wait for more.
+        let mut d = Decoder::new();
+        d.feed(b"+");
+        d.feed(&vec![b'a'; LINE]);
+        assert_eq!(d.next_value(), Ok(None));
+    }
+
+    #[test]
+    fn integers_of_twenty_digits_at_most() {
+        assert_eq!(one(b":00000000000000000042\r\n"), Value::Integer(42));
+        assert_eq!(one(b":-0000000000000000042\r\n"), Value::Integer(-42));
+        let mut d = Decoder::new();
+        d.feed(b":000000000000000000042\r\n");
+        assert!(d.next_value().is_err());
+        for empty in [&b":\r\n"[..], b":-\r\n"] {
+            let mut d = Decoder::new();
+            d.feed(empty);
+            let err = d.next_value().unwrap_err();
+            assert!(err.0.starts_with("bad integer"), "{err}");
+        }
+    }
+
+    #[test]
+    fn errors_display_their_reason() {
+        assert_eq!(RespError("oops".into()).to_string(), "invalid RESP: oops");
+    }
+
+    #[test]
+    fn the_buffer_can_be_written_directly_and_advanced() {
+        let mut d = Decoder::default();
+        d.buffer_mut().extend_from_slice(b"xx:5\r\n");
+        assert_eq!(d.buffered(), 6);
+        d.advance(2);
+        assert_eq!(d.buffered(), 4);
+        assert_eq!(d.next_value(), Ok(Some(Value::Integer(5))));
+    }
 }

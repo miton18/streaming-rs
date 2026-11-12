@@ -685,4 +685,106 @@ mod tests {
         );
         assert!(context.secret_or_literal(&serde_json::json!(42)).is_err());
     }
+
+    /// Sums `u64`s; its accumulator is a `(sum, count)` pair.
+    struct Sum;
+
+    impl crate::ops::Aggregator for Sum {
+        type In = u64;
+        type Acc = (u64, u32);
+        type Out = u64;
+        fn init(&self) -> Self::Acc {
+            (0, 0)
+        }
+        fn add(&self, acc: &mut Self::Acc, item: &u64) {
+            acc.0 += item;
+            acc.1 += 1;
+        }
+        fn merge(&self, into: &mut Self::Acc, other: &Self::Acc) {
+            into.0 += other.0;
+            into.1 += other.1;
+        }
+        fn finish(&self, acc: &Self::Acc) -> u64 {
+            acc.0
+        }
+    }
+
+    #[test]
+    fn typed_aggregators_add_merge_and_round_trip() {
+        let mut registry = Registry::<TokioProviders>::empty();
+        let returned: *const Registry<TokioProviders> =
+            registry.register_aggregator("test/sum@1", "Sums.", |_: Value| Ok(Sum));
+        assert!(std::ptr::eq(returned, &raw const registry));
+        let op = OpRef::new("test/sum@1").unwrap();
+        let descriptor = registry.catalog().get(&op).unwrap().clone();
+        assert_eq!(descriptor.kind, OpKind::Aggregate);
+        assert_eq!(descriptor.input, TypeTag::of::<u64>());
+        let Some((_, OpFactory::Aggregate(factory))) = registry.get(&op) else {
+            panic!("not an aggregate");
+        };
+        let sum = factory(&Value::Null).unwrap();
+        let mut a = sum.init();
+        let mut b = sum.init();
+        sum.add(&mut a, &datum(3_u64)).unwrap();
+        sum.add(&mut a, &datum(4_u64)).unwrap();
+        sum.add(&mut b, &datum(10_u64)).unwrap();
+        assert!(sum.add(&mut b, &datum("not a u64")).is_err());
+        sum.merge(&mut a, &b).unwrap();
+        let bytes = sum.encode(&a).unwrap();
+        assert_eq!(bytes, postcard::to_allocvec(&(17_u64, 3_u32)).unwrap());
+        let decoded = sum.decode(&bytes).unwrap();
+        let key = crate::data::Key::encode(&"k".to_owned()).unwrap();
+        let window = crate::time::Window::new(0, 10);
+        let out = sum.finish(&decoded, window, &key).unwrap();
+        let out = out.downcast_ref::<crate::data::Windowed<u64>>().unwrap();
+        assert_eq!((out.value, out.window, &out.key), (17, window, &key));
+    }
+
+    #[test]
+    fn registries_clone_merge_and_describe_parameters() {
+        let mut base = Registry::<TokioProviders>::empty();
+        base.register_map("test/a@1", "first", |x: &u8| Some(*x));
+        let mut other = Registry::<TokioProviders>::empty();
+        other.register_map("test/a@1", "replaced", |x: &u8| Some(*x));
+        other.register_map("test/b@1", "second", |x: &u8| Some(*x));
+        let copy = base.clone();
+        assert_eq!(copy.catalog(), base.catalog());
+        let mut merged = base.with(other);
+        let catalog = merged.catalog();
+        assert_eq!(catalog.ops.len(), 2);
+        let a = OpRef::new("test/a@1").unwrap();
+        assert_eq!(catalog.get(&a).unwrap().description, "replaced");
+
+        let returned: *const Registry<TokioProviders> = merged
+            .with_params("test/b@1", [ParamSpec::new("size", "duration", "How long.")])
+            .with_params("nope/x@1", [ParamSpec::new("ignored", "text", "")]);
+        assert!(std::ptr::eq(returned, &raw const merged));
+        let b = OpRef::new("test/b@1").unwrap();
+        assert_eq!(merged.catalog().get(&b).unwrap().params[0].name, "size");
+
+        let mut catalog = Catalog::default();
+        catalog.insert(merged.catalog().get(&b).unwrap().clone());
+        assert_eq!(catalog.ops.keys().collect::<Vec<_>>(), [&b]);
+    }
+
+    #[test]
+    fn kinds_and_type_tags_print_and_parse() {
+        let kinds = [
+            (OpKind::Source, "source"),
+            (OpKind::Map, "map"),
+            (OpKind::KeyBy, "key_by"),
+            (OpKind::Window, "window"),
+            (OpKind::Aggregate, "aggregate"),
+            (OpKind::Sink, "sink"),
+        ];
+        for (kind, text) in kinds {
+            assert_eq!(kind.to_string(), text);
+        }
+        assert_eq!(TypeTag::Any.to_string(), "*");
+        assert_eq!(TypeTag::Named("a::B".into()).to_string(), "a::B");
+        for tag in [TypeTag::Any, TypeTag::Named("a::B".into())] {
+            let json = serde_json::to_string(&tag).unwrap();
+            assert_eq!(serde_json::from_str::<TypeTag>(&json).unwrap(), tag);
+        }
+    }
 }
