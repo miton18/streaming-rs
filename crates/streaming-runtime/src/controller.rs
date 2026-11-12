@@ -439,7 +439,15 @@ pub(crate) async fn run_once<P: Providers>(
                     // committed is emitted its log is closed; its state is
                     // deleted two `gc_grace` later, when no write issued
                     // before the closing can still land.
-                    let nodes: Vec<_> = spec.nodes.iter().map(|node| node.id.clone()).collect();
+                    // Only aggregates keep window state: a purge that also
+                    // asked every other node would need dozens of flawless
+                    // store calls in a row, and never finish under faults.
+                    let nodes: Vec<_> = spec
+                        .nodes
+                        .iter()
+                        .map(|node| node.id.clone())
+                        .filter(|node| topology.kind(node) == OpKind::Aggregate)
+                        .collect();
                     let now_ms = env.clock.now_ms();
                     let grace_ms = 2 * spec.settings.gc_grace.as_millis() as i64;
                     let mut rewritten = false;

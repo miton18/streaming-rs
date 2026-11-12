@@ -231,7 +231,9 @@ instance to live for `gc_grace`; a worker electing itself when it could not
 read the members; takeover never progressing under short-lived instances; an
 unplannable graph retiring all its slices; purging a retired slice racing
 with its live instances; a half-done purge leaving an unreadable log; a deleted graph recreated by
-writes landing after its purge (logs, seals and plan came back).
+writes landing after its purge (logs, seals and plan came back); a retired
+slice never purged under faults (the purge asked every node, not only the
+aggregates, and needed some twenty flawless store calls in a row).
 
 ## The HTTP API and its OpenAPI document
 
