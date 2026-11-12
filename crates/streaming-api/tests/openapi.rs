@@ -117,12 +117,16 @@ fn derives_bodies_and_responses_from_the_signatures() {
         "#/components/schemas/DeletingReply"
     );
     assert_eq!(
-        json(&graph["get"]["responses"]["4XX"]),
+        json(&graph["get"]["responses"]["default"]),
         "#/components/schemas/ErrorBody"
     );
     assert_eq!(
-        json(&graph["get"]["responses"]["5XX"]),
-        "#/components/schemas/ErrorBody"
+        graph["get"]["responses"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["200", "default"]
     );
     let cluster = &document["paths"]["/api/v1/cluster"]["get"];
     assert_eq!(json(&cluster["responses"]["200"]), "#/components/schemas/ClusterView");

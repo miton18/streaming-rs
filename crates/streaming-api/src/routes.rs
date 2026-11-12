@@ -88,15 +88,12 @@ impl OperationOutput for ApiError {
     fn describe(operation: &mut OperationContext<'_>) {
         let schema = operation.response_schema::<ErrorBody>();
         operation.add_response(
-            "4XX",
+            "default",
             streaming_openapi::Response::json(
-                "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404).",
-                schema.clone(),
+                "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a \
+                 store that did not answer (503).",
+                schema,
             ),
-        );
-        operation.add_response(
-            "5XX",
-            streaming_openapi::Response::json("The store did not answer (503).", schema),
         );
     }
 }

@@ -139,7 +139,7 @@ export class OpenApiView {
 
     out.push(h('div', { class: 'sub' }, 'Réponses'));
     for (const [code, resp] of Object.entries(op.responses || {})) {
-      const tone = code.startsWith('2') ? 'success' : code.startsWith('4') || code.startsWith('5') ? 'danger' : 'neutral';
+      const tone = code.startsWith('2') ? 'success' : code === 'default' || code.startsWith('4') || code.startsWith('5') ? 'danger' : 'neutral';
       out.push(h('div', { class: 'oa-resp' },
         h('div', { class: 'oa-resp-head' }, h('span', { class: `tag tag-${tone} tag-mono` }, code), h('span', { class: 'soft' }, resp.description || '')),
         Object.entries(resp.content || {}).map(([type, media]) => this.media(type, media.schema))));

@@ -402,7 +402,7 @@ impl OperationContext<'_> {
         self.operation.request_body = Some(body);
     }
 
-    /// Add (or replace) the response of a status (`"200"`, `"4XX"`, ...).
+    /// Add (or replace) the response of a status (`"200"`, `"default"`, ...).
     pub fn add_response(&mut self, status: &str, response: Response) {
         self.operation.responses.insert(status.to_owned(), response);
     }

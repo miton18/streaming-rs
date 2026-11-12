@@ -1975,7 +1975,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1983,17 +1983,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "The operators the cluster can run, sorted by reference.",
@@ -2017,7 +2007,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2025,17 +2015,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "The workers, the placement and the store.",
@@ -2080,7 +2060,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2088,17 +2068,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "The tenants that have graphs, with their consumption on alive workers.",
@@ -2131,7 +2101,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2139,17 +2109,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "The graphs of a tenant, summarized.",
@@ -2191,7 +2151,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2199,17 +2159,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "Delete a graph.",
@@ -2248,7 +2198,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2256,17 +2206,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "A graph: its description, plan, nodes with their metrics, edges, slices and bottleneck.",
@@ -2316,7 +2256,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2324,17 +2264,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "Create or replace a graph.",
@@ -2375,7 +2305,7 @@
             },
             "description": "The graph in Graphviz's DOT language."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2383,17 +2313,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "A graph's description in Graphviz's DOT language.",
@@ -2454,7 +2374,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2462,17 +2382,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "Change some keys of a node's configuration.",
@@ -2521,7 +2431,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2529,17 +2439,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "Pause a node: its instances stop reading and hold their state.",
@@ -2588,7 +2488,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2596,17 +2496,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "Resume a paused node.",
@@ -2665,7 +2555,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2673,17 +2563,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "The latest rows written by a `std/kv-sink@1` node.",
@@ -2734,7 +2614,7 @@
             },
             "description": "Success."
           },
-          "4XX": {
+          "default": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2742,17 +2622,7 @@
                 }
               }
             },
-            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
-          },
-          "5XX": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The store did not answer (503)."
+            "description": "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a store that did not answer (503)."
           }
         },
         "summary": "Run or stop a graph.",

@@ -68,10 +68,14 @@ fn check_against_openapi(method: &str, uri: &str, status: StatusCode, body: &[u8
     };
     let responses = &operation["responses"];
     let code = status.as_str();
-    let range = format!("{}XX", &code[..1]);
+    // A success is described by its own status; an error by `default`.
     let response = responses
         .get(code)
-        .or_else(|| responses.get(&range))
+        .or_else(|| {
+            (status.is_client_error() || status.is_server_error())
+                .then(|| responses.get("default"))
+                .flatten()
+        })
         .unwrap_or_else(|| panic!("{method} {uri} answered {status}, which the OpenAPI document does not describe"));
     let Some(schema) = response["content"]["application/json"].get("schema") else {
         return;
