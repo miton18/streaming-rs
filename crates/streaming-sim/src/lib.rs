@@ -1065,6 +1065,7 @@ impl Workload for Driver {
                 version: spec.version,
                 updated_ms: EPOCH_MS,
                 deleting: false,
+                orphan: false,
             },
         )
         .await
@@ -1557,6 +1558,7 @@ impl Workload for Operator {
                             version: spec.version,
                             updated_ms: EPOCH_MS,
                             deleting: false,
+                            orphan: false,
                         },
                     )
                     .await

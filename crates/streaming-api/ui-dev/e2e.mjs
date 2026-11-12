@@ -3,7 +3,8 @@
 //   node crates/streaming-api/ui-dev/e2e.mjs [--spawn] [--base http://127.0.0.1:8099] [--out dir]
 // Exercises navigation, in-place polling (no node re-creation, hover and typed input survive),
 // node selection, config edit + apply, API validation errors, pause/resume, run-state change with
-// confirmation, results and description tabs, outage banner, commit bottleneck, dead worker, delete.
+// confirmation, results and description tabs, outage banner, commit bottleneck, dead worker,
+// no graph edition (graphs come from the code).
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -279,10 +280,26 @@ await step('dead worker shown on cluster page', async () => {
   await mock('worker', { worker: 'worker-3', alive: true });
 });
 
-await step('delete a graph with confirmation', async () => {
+await step('graphs come from the code: no deletion, only exposed fields', async () => {
   await page.click('.nav-graph[href="#/t/globex/g/legacy-export"]');
   await page.waitForSelector('.node');
-  await page.click('button:has-text("Supprimer")');
+  assert(!(await page.locator('button:has-text("Supprimer")').isVisible()), 'a delete button is shown');
+  assert(await page.locator('.nav-item[href="#/design"]').count() === 0, 'the designer is still listed');
+  await page.goto(`${BASE}/#/t/acme/g/count-per-key/n/decode`);
+  await page.waitForSelector('.panel');
+  await page.waitForFunction(() => { const el = document.querySelector('.panel .form .muted'); return el && !el.hidden; }, null, { timeout: 4000 });
+  assert(await page.locator('.panel .field').count() === 0, 'decode exposes no field');
+  await page.keyboard.press('Escape');
+});
+
+await step('a graph that left the code is stopped and can be deleted, with confirmation', async () => {
+  await mock('orphan', { graph: 'globex/legacy-export' });
+  await page.click('.nav-graph[href="#/t/globex/g/legacy-export"]');
+  await page.waitForSelector('.banner:has-text("plus déclaré par le code")', { timeout: 4000 });
+  assert(!(await page.locator('.page-head .actions .seg').isVisible()), 'run state still offered');
+  await wait(600);
+  await shot('e2e-orphan-graph');
+  await page.click('button:has-text("Supprimer le graphe et son état")');
   await page.waitForSelector('dialog[open]');
   await page.click('dialog[open] button:has-text("Supprimer définitivement")');
   await page.waitForFunction(() => location.hash === '#/', null, { timeout: 3000 });

@@ -51,7 +51,6 @@ fn describes_every_operation() {
         "put /api/v1/tenants/{tenant}".to_owned(),
         "get /api/v1/tenants/{tenant}/graphs".to_owned(),
         format!("get {graph}"),
-        format!("put {graph}"),
         format!("delete {graph}"),
         format!("post {graph}/state"),
         format!("get {graph}/dot"),
@@ -99,14 +98,13 @@ fn every_operation_is_documented_and_declares_its_path_parameters() {
 fn derives_bodies_and_responses_from_the_signatures() {
     let document = document();
     let graph = &document["paths"]["/api/v1/tenants/{tenant}/graphs/{graph}"];
-    assert_eq!(graph["put"]["operationId"], "putGraph");
+    let state = &document["paths"]["/api/v1/tenants/{tenant}/graphs/{graph}/state"];
+    assert_eq!(state["post"]["operationId"], "setState");
     let json = |value: &Value| value["content"]["application/json"]["schema"]["$ref"].clone();
+    assert_eq!(json(&state["post"]["requestBody"]), "#/components/schemas/StateBody");
+    let config = &document["paths"]["/api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/config"];
     assert_eq!(
-        json(&graph["put"]["requestBody"]),
-        "#/components/schemas/GraphSpecInput"
-    );
-    assert_eq!(
-        json(&graph["put"]["responses"]["200"]),
+        json(&config["patch"]["responses"]["200"]),
         "#/components/schemas/VersionReply"
     );
     assert_eq!(
@@ -155,11 +153,10 @@ fn derives_bodies_and_responses_from_the_signatures() {
             assert!(!field.contains('_'), "{name}.{field} is not lowerCamelCase");
         }
     }
-    assert!(!text.contains("\"operationId\":\"put_graph\""));
-    // A description read back always has its version; one sent may omit it.
+    assert!(!text.contains("\"operationId\":\"set_state\""));
+    // A description read back always has its version.
     let required = |name: &str| schemas[name]["required"].as_array().unwrap().clone();
     assert!(required("GraphSpec").contains(&"version".into()));
-    assert!(!required("GraphSpecInput").contains(&"version".into()));
 }
 
 #[test]

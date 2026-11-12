@@ -1,4 +1,4 @@
-//! Operators and graphs of the demonstration cluster.
+//! Operators and graphs of the demonstration application.
 //!
 //! | reference | kind | types | configuration |
 //! |---|---|---|---|
@@ -7,9 +7,7 @@
 //! | `demo/by-user@1` | key_by | `Event` | |
 //! | `demo/slow-sink@1` | sink | any | `{"latencyMs": 0}` |
 
-use crate::stock::{CountToGts, CountToJson};
 use async_trait::async_trait;
-use moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,12 +19,17 @@ use std::{
     },
     time::Duration,
 };
-use streaming_core::{
-    Clock, Emit, GraphBuilder, GraphSettings, GraphSpec, OpError, Operator, Registry, SinkConnector, SinkError,
-    SourceConnector, SystemClock, TenantId, TypeTag, datum,
-    stdops::{Count, Sliding, Tumbling},
+use streaming::{
+    App,
+    core::{
+        Clock, Emit, GraphBuilder, GraphSettings, OpError, Operator, Registry, SinkConnector, SinkError,
+        SourceConnector, SystemClock, TypeTag, datum,
+        stdops::{Count, Sliding, Tumbling},
+    },
+    moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider},
+    runtime::{builtin::KvSink, memlog::MemLog},
+    stock::{CountToGts, CountToJson},
 };
-use streaming_runtime::{builtin::KvSink, memlog::MemLog};
 
 /// What the generator produces, once decoded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,19 +253,10 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
     );
 }
 
-/// The tenants created when the demonstration cluster starts, with their
-/// display names. Every tenant of [`graphs`] is among them.
+/// The demonstration application: two tenants, a graph each, fed by
+/// in-process generators.
 #[must_use]
-pub fn tenants() -> Vec<(TenantId, &'static str)> {
-    [("acme", "Acme Corporation"), ("globex", "Globex")]
-        .into_iter()
-        .map(|(tenant, display_name)| (TenantId::new(tenant).expect("a valid tenant id"), display_name))
-        .collect()
-}
-
-/// The graphs submitted when the demonstration cluster starts.
-#[must_use]
-pub fn graphs() -> Vec<GraphSpec> {
+pub fn app() -> App {
     let settings = GraphSettings {
         max_out_of_orderness: Duration::from_millis(500),
         idle_timeout: Duration::from_secs(3),
@@ -276,10 +270,14 @@ pub fn graphs() -> Vec<GraphSpec> {
         max_pending_windows: 3,
         ..GraphSettings::default()
     };
-    [count_per_key(settings.clone()), clicks(settings)]
-        .into_iter()
-        .map(|graph| graph.build().unwrap_or_else(|error| panic!("demo graph: {error}")))
-        .collect()
+    // One set of topics per process, shared by the workers it runs.
+    let generators = Arc::new(Generators::default());
+    App::new()
+        .tenant("acme", "Acme Corporation")
+        .tenant("globex", "Globex")
+        .operators(move |registry| register(registry, generators.clone()))
+        .graph(count_per_key(settings.clone()))
+        .graph(clicks(settings))
 }
 
 /// Events counted per user over 10-second windows, the counts kept for the
@@ -332,38 +330,10 @@ fn clicks(settings: GraphSettings) -> GraphBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use moonpool_core::TokioProviders;
-    use streaming_core::{OpFactory, Topology};
-
     #[test]
-    fn demo_graphs_are_valid() {
-        let mut registry = Registry::<TokioProviders>::standard();
-        streaming_runtime::builtin::register(&mut registry, streaming_core::MemKv::shared());
-        streaming_warp10::register(&mut registry);
-        crate::stock::register(&mut registry);
-        register(&mut registry, Arc::new(Generators::default()));
-        let catalog = registry.catalog();
-        let tenants: Vec<TenantId> = tenants().into_iter().map(|(tenant, _)| tenant).collect();
-        for spec in graphs() {
-            assert!(tenants.contains(&spec.tenant), "{}: tenant not created", spec.key());
-            let topology = Topology::build(&spec, &catalog).unwrap_or_else(|error| panic!("{}: {error}", spec.key()));
-            assert!(!topology.nodes_of(streaming_core::OpKind::Aggregate).is_empty());
-            // What the builder stored is what the operators accept.
-            for node in &spec.nodes {
-                let accepted = match registry.get(&node.op).map(|(_, factory)| factory) {
-                    Some(OpFactory::Map(factory)) => factory(&node.config).map(drop),
-                    Some(OpFactory::Key(factory)) => factory(&node.config).map(drop),
-                    Some(OpFactory::Window(factory)) => factory(&node.config).map(drop),
-                    Some(OpFactory::Aggregate(factory)) => factory(&node.config).map(drop),
-                    Some(OpFactory::Source(_)) => serde_json::from_value::<Generator>(node.config.clone())
-                        .map(drop)
-                        .map_err(|e| OpError::Config(e.to_string())),
-                    Some(OpFactory::Sink(_)) => Ok(()),
-                    None => panic!("{}: unknown operator {}", spec.key(), node.op),
-                };
-                accepted.unwrap_or_else(|error| panic!("{}/{}: {error}", spec.key(), node.id));
-            }
-        }
+    fn the_demo_application_is_valid() {
+        let app = super::app();
+        app.check().unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(app.graphs().len(), 2);
     }
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end check of the stock `streamd` on real infrastructure:
+# End-to-end check of an application (example `pulsar-e2e`) on real
+# infrastructure:
 #
 #   Pulsar (3 partitions) -> count per key in 5 s windows -> Pulsar + API rows
 #
@@ -30,9 +31,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "== building streamd with the Pulsar connector"
-(cd "$ROOT" && cargo build -p streamd --features pulsar)
-STREAMD=${CARGO_TARGET_DIR:-$ROOT/target}/debug/streamd
+echo "== building the application with the Pulsar connector"
+(cd "$ROOT" && cargo build -p streaming --features pulsar --example pulsar-e2e)
+APP=${CARGO_TARGET_DIR:-$ROOT/target}/debug/examples/pulsar-e2e
+export E2E_TOPIC=$TOPIC E2E_OUT=$OUT
 
 echo "== starting Redis on port $REDIS_PORT"
 redis-server --port "$REDIS_PORT" --save "" --appendonly no >"$WORK/redis.log" 2>&1 &
@@ -54,7 +56,7 @@ curl -sf -X PUT "http://127.0.0.1:8080/admin/v2/${TOPIC/:\/\//\/}/partitions" \
 start_worker() { # id, gossip port, extra arguments...
   local id=$1 port=$2
   shift 2
-  "$STREAMD" worker --id "$id" --kv "redis://127.0.0.1:$REDIS_PORT" \
+  "$APP" worker --id "$id" --kv "redis://127.0.0.1:$REDIS_PORT" \
      --gossip "127.0.0.1:$port" "$@" >>"$WORK/$id.log" 2>&1 &
   echo $!
 }
@@ -65,34 +67,8 @@ sleep 1
 PIDS+=("$(start_worker worker-2 7947 --seeds 127.0.0.1:7946)")
 sleep 6
 
-cat >"$WORK/graph.json" <<JSON
-{
-  "tenant": "acme", "graph": "count-per-key",
-  "settings": {"maxOutOfOrderness": "1s", "idleTimeout": "3s",
-               "linger": "200ms", "flushInterval": "500ms"},
-  "nodes": [
-    {"id": "events", "op": "std/pulsar-source@1",
-     "config": {"serviceUrl": "pulsar://127.0.0.1:6650", "topic": "$TOPIC",
-                "subscription": "count-per-key"}},
-    {"id": "by-key", "op": "std/pulsar-key@1"},
-    {"id": "window", "op": "std/tumbling@1", "config": {"size": "5s"}},
-    {"id": "count", "op": "std/count@1"},
-    {"id": "to-json", "op": "std/count-to-json@1"},
-    {"id": "results", "op": "std/kv-sink@1", "config": {"retain": 1000}},
-    {"id": "to-pulsar", "op": "std/count-to-pulsar@1"},
-    {"id": "out", "op": "std/pulsar-sink@1",
-     "config": {"serviceUrl": "pulsar://127.0.0.1:6650", "topic": "$OUT"}}
-  ],
-  "edges": [["events", "by-key"], ["by-key", "window"], ["window", "count"],
-            ["count", "to-json"], ["to-json", "results"],
-            ["count", "to-pulsar"], ["to-pulsar", "out"]]
-}
-JSON
-echo "== creating the tenant, then submitting the graph"
-curl -sf -X PUT "http://$API/api/v1/tenants/acme" --data '{"displayName": "Acme"}'
-echo
-curl -sf -X PUT "http://$API/api/v1/tenants/acme/graphs/count-per-key" --data @"$WORK/graph.json"
-echo
+# The graph is in the code of the application: the workers published it
+# when they started.
 sleep 8
 
 produce() { # key, count

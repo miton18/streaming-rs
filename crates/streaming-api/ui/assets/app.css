@@ -524,29 +524,6 @@ a.card:hover { background: color-mix(in srgb, var(--color-text) 4%, var(--color-
 .node.bottleneck .ratios .t-busy { color: var(--tone-busy-text); }
 .node.bottleneck .ratios .t-bp { color: var(--tone-bp-text); }
 
-/* Pipeline designer */
-.design-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr); gap: var(--space-8); align-items: start; }
-@media (max-width: 1100px) { .design-grid { grid-template-columns: minmax(0, 1fr); } }
-.design-id { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
-.design-steps { display: flex; flex-direction: column; gap: var(--space-4); }
-.design-step { display: flex; flex-direction: column; gap: var(--space-4); }
-.design-step-head { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: var(--space-4); align-items: start; }
-.design-step-head .num { width: 26px; height: 26px; margin-top: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 600; background: var(--color-accent-800); color: var(--color-accent-200); }
-.design-step-head .btn-icon { margin-top: 20px; }
-.design-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.design-field .lbl { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--color-neutral-400); }
-.design-field .hint, .design-inputs .hint { font-size: 12px; color: var(--color-neutral-400); }
-.design-about { font-size: 13px; color: var(--color-neutral-300); }
-.design-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-4); }
-.design-inputs { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); align-items: center; min-height: 34px; }
-.design-inputs .chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-.design-checks { margin: var(--space-3) 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.design-checks .bad { color: var(--color-danger-200); }
-.design-checks .good { color: var(--color-success-200); }
-.design-checks .note { color: var(--color-neutral-300); }
-.design-json { margin: var(--space-3) 0 0; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; color: var(--color-neutral-200); }
-select.input { appearance: auto; }
-textarea.input.design-raw { min-height: 38px; height: 38px; }
 
 /* ---------- API (OpenAPI) ---------- */
 .oa-versions { display: inline-flex; gap: var(--space-2); }

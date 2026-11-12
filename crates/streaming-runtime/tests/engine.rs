@@ -83,6 +83,7 @@ async fn submit(kv: &DynKv, spec: &GraphSpec) {
             version: spec.version,
             updated_ms: 0,
             deleting: false,
+            orphan: false,
         },
     )
     .await

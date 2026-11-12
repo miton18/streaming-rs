@@ -80,8 +80,6 @@ codes! {
     QUERY_INVALID = BAD_REQUEST, "the query string is invalid: {detail}";
     /// The tenant was neither created nor has graphs.
     TENANT_NOT_FOUND = NOT_FOUND, "unknown tenant `{tenant}`";
-    /// A graph was submitted to a tenant that was not created.
-    TENANT_NOT_CREATED = NOT_FOUND, "tenant `{tenant}` does not exist: create it before submitting graphs to it";
     /// The tenant exists with another display name; it is never overwritten.
     TENANT_DISPLAY_NAME_CONFLICT = CONFLICT, "tenant `{tenant}` already exists with another display name";
     /// The display name of a tenant is too long.
@@ -92,14 +90,23 @@ codes! {
     GRAPH_NOT_FOUND = NOT_FOUND, "unknown graph `{tenant}/{graph}`";
     /// The graph has no such node.
     NODE_NOT_FOUND = NOT_FOUND, "unknown node `{node}` in graph `{tenant}/{graph}`";
-    /// The description sent names another graph than the path.
-    GRAPH_KEY_MISMATCH = BAD_REQUEST,
-        "the description is for `{bodyTenant}/{bodyGraph}` but the path names `{tenant}/{graph}`";
     /// The graph is being deleted.
     GRAPH_BEING_DELETED = BAD_REQUEST, "graph `{tenant}/{graph}` is being deleted";
+    /// The code of the application declares the graph, so the API cannot
+    /// delete it.
+    GRAPH_DECLARED_BY_CODE = CONFLICT,
+        "graph `{tenant}/{graph}` is declared by the code of the application: remove it from the code to delete it";
+    /// The code of the application no longer declares the graph: it is
+    /// stopped and can only be deleted.
+    GRAPH_NOT_IN_CODE = CONFLICT,
+        "graph `{tenant}/{graph}` is no longer declared by the code of the application: it can only be deleted";
     /// The configuration of the node is not an object.
     NODE_CONFIG_NOT_OBJECT = BAD_REQUEST,
         "the configuration of node `{node}` in graph `{tenant}/{graph}` is not an object and cannot be patched";
+    /// The operator of the node does not list the field among the parameters
+    /// it exposes.
+    NODE_FIELD_NOT_EXPOSED = BAD_REQUEST,
+        "node `{node}` in graph `{tenant}/{graph}` does not expose the configuration field `{field}`";
     /// The description has no node.
     GRAPH_EMPTY = BAD_REQUEST, "the graph has no node";
     /// Two nodes share an id.
@@ -484,11 +491,19 @@ impl From<ControlError> for ApiError {
                 graph_context(Self::new(&NODE_NOT_FOUND), &graph).with("node", node.as_str())
             }
             ControlError::GraphBeingDeleted(key) => graph_context(Self::new(&GRAPH_BEING_DELETED), &key),
+            ControlError::GraphDeclaredByCode(key) => graph_context(Self::new(&GRAPH_DECLARED_BY_CODE), &key),
+            ControlError::GraphNotInCode(key) => graph_context(Self::new(&GRAPH_NOT_IN_CODE), &key),
             ControlError::InvalidGraph(error) => error.into(),
             ControlError::ConfigNotAnObject { graph, node } => {
                 graph_context(Self::new(&NODE_CONFIG_NOT_OBJECT), &graph).with("node", node.as_str())
             }
-            ControlError::TenantNotCreated(tenant) => Self::new(&TENANT_NOT_CREATED).with("tenant", tenant.as_str()),
+            ControlError::FieldNotExposed { graph, node, field } => {
+                graph_context(Self::new(&NODE_FIELD_NOT_EXPOSED), &graph)
+                    .with("node", node.as_str())
+                    .with("field", field)
+            }
+            // Only a publication, never a request, meets an undeclared tenant.
+            ControlError::TenantNotCreated(tenant) => Self::new(&TENANT_NOT_FOUND).with("tenant", tenant.as_str()),
             ControlError::TenantConflict(tenant) => {
                 Self::new(&TENANT_DISPLAY_NAME_CONFLICT).with("tenant", tenant.as_str())
             }
@@ -606,9 +621,17 @@ mod tests {
             }
             .into(),
             ControlError::GraphBeingDeleted(key.clone()).into(),
+            ControlError::GraphDeclaredByCode(key.clone()).into(),
+            ControlError::GraphNotInCode(key.clone()).into(),
             ControlError::ConfigNotAnObject {
                 graph: key.clone(),
                 node: node(),
+            }
+            .into(),
+            ControlError::FieldNotExposed {
+                graph: key.clone(),
+                node: node(),
+                field: "size".into(),
             }
             .into(),
             ControlError::TenantNotCreated(key.tenant.clone()).into(),

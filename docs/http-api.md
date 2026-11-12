@@ -1,9 +1,18 @@
 # HTTP API (v1)
 
-Served by `streamd` (crate `streaming-api`). Everything is JSON. The API only
-reads and writes documents in the KV (see `streaming_core::keys` and
-`streaming_core::control`): any process holding a KV handle can serve it, and
-workers converge on what it writes.
+Served by every worker of an application started with `--listen` (crate
+`streaming-api`). Everything is JSON. The API only reads and writes documents
+in the KV (see `streaming_core::keys` and `streaming_core::control`): any
+process holding a KV handle can serve it, and workers converge on what it
+writes.
+
+Graphs are not written through the API: they are the code of the
+application, which every worker publishes into the KV when it starts
+(`streaming_api::control::publish`). What the API changes is what is not
+structure: run states, paused nodes and the configuration fields operators
+expose. A graph the code no longer declares is an *orphan* (`"orphan": true`
+in its summary and detail): it is stopped, its state kept, and every write on
+it but its deletion answers `409` (`GRAPH_NOT_IN_CODE`).
 
 ## Errors
 
@@ -210,7 +219,8 @@ The topology as Graphviz DOT (`text/vnd.graphviz`).
 Every write bumps `cluster:epoch`.
 
 ### `PUT /api/v1/tenants/{tenant}`
-Creates a tenant. Body: `{"displayName": "Acme"}` (optional, at most 100
+Creates a tenant. The tenants of an application are created by its workers
+when they start; this creates one the code does not declare. Body: `{"displayName": "Acme"}` (optional, at most 100
 characters, trimmed; `{}` for none). The record is written once with
 `HSETNX` and never overwritten. Answers the record,
 `{"tenant": "acme", "displayName": "Acme", "createdMs": 1790000000000}`, with
@@ -220,18 +230,12 @@ bumped), `409` (`TENANT_DISPLAY_NAME_CONFLICT`) when it exists with another
 one. `400` for a display name that is too long (`DISPLAY_NAME_TOO_LONG`) or
 holds a control character (`DISPLAY_NAME_INVALID_CHARACTER`).
 
-### `PUT /api/v1/tenants/{tenant}/graphs/{graph}`
-Body: a `GraphSpec`. `tenant` and `graph` in the body must match the path. The
-description is validated against the catalog (`Topology::build`); on success it
-is stored with `version = previous + 1`, the index entry is updated and the
-desired state is created as `running` if absent. Answers `{"version": 4}`.
-`404` (`TENANT_NOT_CREATED`) when the tenant was not created, `400`
-otherwise, with the code of the rule broken (`OPERATOR_UNKNOWN`,
-`TYPE_MISMATCH`, `WIRING_*`, `GRAPH_CYCLE`...).
-
 ### `DELETE /api/v1/tenants/{tenant}/graphs/{graph}`
-Sets the desired state to `stopped` and marks the index entry `deleting`. The
-controller removes the graph's state, then the entry.
+Deletes an orphan graph and its state: sets the desired state to `stopped`
+and marks the index entry `deleting`; the controller removes the graph's
+state, then the entry. Answers `{"deleting": true}`. `409`
+(`GRAPH_DECLARED_BY_CODE`) for a graph the code declares: it would come back,
+empty, with the next worker that starts.
 
 ### `POST /api/v1/tenants/{tenant}/graphs/{graph}/state`
 Body `{"state": "running" | "paused" | "draining" | "stopped"}`.
@@ -241,9 +245,16 @@ Body `{"state": "running" | "paused" | "draining" | "stopped"}`.
 Add or remove the node from `desired.pausedNodes`. `404` for an unknown node.
 
 ### `PATCH /api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/config`
-Body: a JSON object, shallow-merged into the node configuration (a `null`
-value removes the field). The resulting description is validated and stored as
-a new version, exactly like `PUT`.
+Body: a JSON object of configuration fields, each laid over the
+configuration the code gave the node; a `null` value goes back to the code's
+value. Only the fields the node's operator lists among its `params` in the
+catalogue can be set: another one is a `400` (`NODE_FIELD_NOT_EXPOSED`). The
+fields are stored apart from the description
+(`t:<tenant>:g:<graph>:overrides`), so that a new version of the code keeps
+them. The resulting description is validated against the catalogue and
+stored as a new version, on which the node's instances restart. Answers
+`{"version": 5}`; `400` with the code of the rule broken (`OPERATOR_UNKNOWN`,
+`TYPE_MISMATCH`, `WIRING_*`...) when it does not validate.
 
 ## Static UI
 

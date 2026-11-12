@@ -9,7 +9,9 @@
 //! cluster:graphs                                 hash  tenant/graph  -> GraphIndexEntry (JSON)
 //! cluster:placement                              string Placement (JSON)
 //! cluster:metrics:<worker>                       string WorkerSnapshot (JSON)
-//! t:<tenant>:g:<graph>:spec                      string GraphSpec (JSON)
+//! t:<tenant>:g:<graph>:spec                      string GraphSpec (JSON): what workers run
+//! t:<tenant>:g:<graph>:code                      string GraphSpec (JSON): as the code built it
+//! t:<tenant>:g:<graph>:overrides                 hash  node         -> config fields set through the API (JSON)
 //! t:<tenant>:g:<graph>:desired                   string DesiredState (JSON)
 //! t:<tenant>:g:<graph>:plan                      string GraphPlan (JSON)
 //! t:<tenant>:g:<graph>:out:<node>                hash  emit id       -> OutputRow (JSON)
@@ -61,6 +63,20 @@ pub fn graph_prefix(graph: &GraphKey) -> String {
 #[must_use]
 pub fn graph_spec(graph: &GraphKey) -> String {
     format!("{}:spec", graph_prefix(graph))
+}
+
+/// Description of a graph as the code of the workers built it, before the
+/// configuration changes made through the API are applied.
+#[must_use]
+pub fn graph_code(graph: &GraphKey) -> String {
+    format!("{}:code", graph_prefix(graph))
+}
+
+/// Configuration fields of a graph's nodes set through the API, laid over
+/// [`graph_code`] to make [`graph_spec`].
+#[must_use]
+pub fn graph_overrides(graph: &GraphKey) -> String {
+    format!("{}:overrides", graph_prefix(graph))
 }
 
 /// Desired run state of a graph.

@@ -71,7 +71,7 @@ export function updateGraphCard(el, g) {
   text(r.kicker, g.tenant);
   text(r.title, g.graph);
   attr(r.title, 'title', g.graph);
-  setTag(r.state, g.state, stateTone(g.state));
+  setTag(r.state, g.orphan ? 'hors du code' : g.state, g.orphan ? 'neutral' : stateTone(g.state));
   text(r.in, rate(g.inPerSec));
   text(r.out, rate(g.outPerSec));
   once(r.counts, `${g.nodes}|${g.actors}|${g.slices}|${g.version}`, () => [
@@ -111,7 +111,7 @@ export class OverviewView {
         h('div', { class: 'section-head' }, h('h2', null, 'Cluster'), h('a', { href: '#/cluster', style: { fontSize: '13px' } }, 'Détails du cluster')),
         this.stats.el),
       this.tenants = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-10)' } }),
-      this.empty = h('div', { class: 'card empty', hidden: true }, 'Aucun graphe soumis. Utilisez ', h('code', null, 'PUT /api/v1/tenants/{tenant}/graphs/{graph}'), ' pour en créer un.'));
+      this.empty = h('div', { class: 'card empty', hidden: true }, 'Aucun graphe. Les graphes sont déclarés dans le code de l’application et publiés au démarrage des workers.'));
   }
 
   update(store) {

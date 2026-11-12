@@ -337,6 +337,8 @@ async fn purge_graph(kv: &dyn Kv, graph: &GraphKey, catalog: &streaming_core::Ca
     let mut doomed: Vec<String> = all.iter().map(|node| keys::graph_output(graph, &node.id)).collect();
     doomed.extend([
         keys::graph_spec(graph),
+        keys::graph_code(graph),
+        keys::graph_overrides(graph),
         keys::graph_desired(graph),
         keys::graph_plan(graph),
     ]);
@@ -715,6 +717,7 @@ mod tests {
                     version,
                     updated_ms: 0,
                     deleting: false,
+                    orphan: false,
                 },
             )
             .await

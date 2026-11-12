@@ -11,8 +11,9 @@
 //! last writer wins.
 
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use streaming_core::{
-    Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, OpDescriptor, SpecError, TenantId, Topology,
+    Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, NodeSpec, OpDescriptor, SpecError, TenantId, Topology,
     control::{
         DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState, TenantRecord, WorkerSnapshot,
     },
@@ -36,6 +37,14 @@ pub enum ControlError {
     /// The graph is being deleted and cannot change any more (HTTP 400).
     #[error("graph `{0}` is being deleted")]
     GraphBeingDeleted(GraphKey),
+    /// The code of the workers declares the graph: it cannot be deleted
+    /// through the API (HTTP 409).
+    #[error("graph `{0}` is declared by the code of the application: remove it from the code to delete it")]
+    GraphDeclaredByCode(GraphKey),
+    /// The code of the workers no longer declares the graph: it is stopped
+    /// and can only be deleted (HTTP 409).
+    #[error("graph `{0}` is no longer declared by the code of the application: it can only be deleted")]
+    GraphNotInCode(GraphKey),
     /// The description is invalid (HTTP 400).
     #[error(transparent)]
     InvalidGraph(#[from] SpecError),
@@ -48,8 +57,19 @@ pub enum ControlError {
         /// The node.
         node: NodeId,
     },
-    /// A graph was submitted to a tenant that was not created (HTTP 404).
-    #[error("tenant `{0}` does not exist: create it before submitting graphs to it")]
+    /// The operator of the node does not expose this configuration field
+    /// (HTTP 400).
+    #[error("node `{node}` of graph `{graph}` does not expose the configuration field `{field}`")]
+    FieldNotExposed {
+        /// The graph.
+        graph: GraphKey,
+        /// The node.
+        node: NodeId,
+        /// The field.
+        field: String,
+    },
+    /// A graph belongs to a tenant that was not created (HTTP 404).
+    #[error("tenant `{0}` does not exist: declare it with the graphs of its code")]
     TenantNotCreated(TenantId),
     /// The tenant exists with another display name (HTTP 409).
     #[error("tenant `{0}` already exists with another display name")]
@@ -274,6 +294,9 @@ async fn live_entry(kv: &dyn Kv, graph: &GraphKey) -> Result<GraphIndexEntry, Co
     if entry.deleting {
         return Err(ControlError::GraphBeingDeleted(graph.clone()));
     }
+    if entry.orphan {
+        return Err(ControlError::GraphNotInCode(graph.clone()));
+    }
     Ok(entry)
 }
 
@@ -295,10 +318,14 @@ async fn save_desired(
     Ok(())
 }
 
-/// Validate `spec`, then store it as `previous version + 1`.
-async fn store_spec(kv: &dyn Kv, clock: &dyn Clock, mut spec: GraphSpec) -> Result<u64, ControlError> {
-    let catalog = load_catalog(kv).await?;
-    Topology::build(&spec, &catalog)?;
+/// Validate `spec` against `catalog`, then store it as `previous version + 1`.
+async fn store_spec(
+    kv: &dyn Kv,
+    clock: &dyn Clock,
+    catalog: &Catalog,
+    mut spec: GraphSpec,
+) -> Result<u64, ControlError> {
+    Topology::build(&spec, catalog)?;
     let key = spec.key();
     let entry = load_index_entry(kv, &key).await?;
     if entry.as_ref().is_some_and(|entry| entry.deleting) {
@@ -329,30 +356,235 @@ async fn store_spec(kv: &dyn Kv, clock: &dyn Clock, mut spec: GraphSpec) -> Resu
         version,
         updated_ms: now,
         deleting: false,
+        orphan: false,
     };
     kv.hset_json(keys::CLUSTER_GRAPHS, &key.to_string(), &entry).await?;
     bump_epoch(kv).await?;
     Ok(version)
 }
 
-/// Validate a description against the catalog and store it. Returns the new
-/// version (`previous + 1`, 1 for a new graph). Writes the spec, the index
-/// entry, the desired state (`running`) when absent, then bumps the epoch.
-///
-/// The tenant must have been created ([`create_tenant`]).
-pub async fn apply_graph(kv: &dyn Kv, clock: &dyn Clock, spec: GraphSpec) -> Result<u64, ControlError> {
-    if load_tenant(kv, &spec.tenant).await?.is_none() {
-        return Err(ControlError::TenantNotCreated(spec.tenant));
+/// Configuration fields set through the API, by node.
+type Overrides = BTreeMap<NodeId, Map<String, Value>>;
+
+async fn load_overrides(kv: &dyn Kv, graph: &GraphKey) -> Result<Overrides, ControlError> {
+    let mut overrides = Overrides::new();
+    for (node, fields) in kv
+        .hgetall_json::<Map<String, Value>>(&keys::graph_overrides(graph))
+        .await?
+    {
+        match NodeId::new(node) {
+            Ok(node) => {
+                overrides.insert(node, fields);
+            }
+            Err(error) => tracing::warn!(graph = %graph, %error, "ignoring an override of an invalid node id"),
+        }
     }
-    store_spec(kv, clock, spec).await
+    Ok(overrides)
 }
 
-/// Stop a graph and mark it for deletion: desired state `stopped`, index
-/// entry `deleting`. The controller removes the rest.
+/// The description as the code of the workers built it: the `code` document,
+/// or, for a graph stored before there was one, its stored description.
+async fn load_code(kv: &dyn Kv, graph: &GraphKey) -> Result<GraphSpec, ControlError> {
+    match kv.get_json::<GraphSpec>(&keys::graph_code(graph)).await? {
+        Some(code) => Ok(code),
+        None => load_spec(kv, graph).await?.ok_or_else(|| not_found_graph(graph)),
+    }
+}
+
+/// Whether the operator of `node` exposes `field`: whether it lists it among
+/// the parameters it describes.
+fn exposes(catalog: &Catalog, node: &NodeSpec, field: &str) -> bool {
+    catalog
+        .get(&node.op)
+        .is_some_and(|descriptor| descriptor.params.iter().any(|param| param.name == field))
+}
+
+/// `code` with `overrides` laid over the configurations of its nodes. A field
+/// its operator no longer exposes, or a node the code no longer has, is left
+/// out and returned, as `(node, field)`.
+fn lay_overrides(
+    catalog: &Catalog,
+    mut code: GraphSpec,
+    overrides: &Overrides,
+) -> Result<(GraphSpec, Vec<(NodeId, String)>), ControlError> {
+    let mut ignored = Vec::new();
+    let graph = code.key();
+    for (node_id, fields) in overrides {
+        let Some(node) = code.nodes.iter_mut().find(|node| &node.id == node_id) else {
+            ignored.extend(fields.keys().map(|field| (node_id.clone(), field.clone())));
+            continue;
+        };
+        let mut config = match std::mem::take(&mut node.config) {
+            Value::Null => Map::new(),
+            Value::Object(map) => map,
+            // Not echoed back: a configuration may hold secrets.
+            _ => {
+                return Err(ControlError::ConfigNotAnObject {
+                    graph,
+                    node: node_id.clone(),
+                });
+            }
+        };
+        for (field, value) in fields {
+            if exposes(catalog, node, field) {
+                config.insert(field.clone(), value.clone());
+            } else {
+                ignored.push((node_id.clone(), field.clone()));
+            }
+        }
+        node.config = Value::Object(config);
+    }
+    Ok((code, ignored))
+}
+
+/// Whether two descriptions are the same but for their version.
+fn same_description(a: &GraphSpec, b: &GraphSpec) -> bool {
+    let mut b = b.clone();
+    b.version = a.version;
+    *a == b
+}
+
+/// What [`publish`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Publication {
+    /// Tenants created, because no worker had declared them before.
+    pub created_tenants: Vec<TenantId>,
+    /// Tenants already stored with another display name, kept as they are.
+    pub renamed_tenants: Vec<TenantId>,
+    /// Graphs whose description changed, with their new version.
+    pub updated: Vec<(GraphKey, u64)>,
+    /// Graphs already stored as the code describes them.
+    pub unchanged: Vec<GraphKey>,
+    /// Graphs the code declares again after having left it: running again,
+    /// on the state they had, with their new version.
+    pub restored: Vec<(GraphKey, u64)>,
+    /// Graphs no longer in the code, stopped by this publication. Their
+    /// state is kept.
+    pub orphaned: Vec<GraphKey>,
+    /// Graphs that had already left the code, still stopped with their
+    /// state.
+    pub orphans: Vec<GraphKey>,
+    /// Graphs of the code whose previous instance is still being deleted:
+    /// they are published by the next start once the deletion is over.
+    pub still_deleting: Vec<GraphKey>,
+    /// Configuration fields set through the API that the code no longer
+    /// exposes, as `(graph, node, field)`: they are not applied.
+    pub ignored_overrides: Vec<(GraphKey, NodeId, String)>,
+}
+
+/// Make the store describe what the code describes: the cluster's code is
+/// the truth about tenants and graphs, the store only a copy that the
+/// controller, the workers and the API read.
+///
+/// Every tenant of `tenants` is created if missing. Every graph of `graphs`
+/// is validated against `catalog`, its description kept as the `code`
+/// document, the configuration fields set through the API laid over it, and
+/// the result stored as a new version when it differs from the stored one.
+/// A graph the store holds but `graphs` does not becomes an *orphan*: it is
+/// stopped and its state is kept, since deleting a state cannot be undone
+/// and a worker running an older code must not be able to do it by
+/// starting. An orphan is deleted through the API ([`delete_graph`]), or
+/// runs again on its state when the code declares it again.
+///
+/// Every worker publishes when it starts. All workers run the same code, so
+/// concurrent publications write the same documents.
+pub async fn publish(
+    kv: &dyn Kv,
+    clock: &dyn Clock,
+    catalog: &Catalog,
+    tenants: &[(TenantId, Option<String>)],
+    graphs: &[GraphSpec],
+) -> Result<Publication, ControlError> {
+    for spec in graphs {
+        Topology::build(spec, catalog)?;
+    }
+    let mut publication = Publication::default();
+    for (tenant, display_name) in tenants {
+        match create_tenant(kv, clock, tenant.clone(), display_name.clone()).await {
+            Ok(TenantCreation::Created(_)) => publication.created_tenants.push(tenant.clone()),
+            Ok(TenantCreation::Unchanged(_)) => {}
+            Err(ControlError::TenantConflict(tenant)) => publication.renamed_tenants.push(tenant),
+            Err(error) => return Err(error),
+        }
+    }
+    for code in graphs {
+        let key = code.key();
+        if load_tenant(kv, &key.tenant).await?.is_none() {
+            return Err(ControlError::TenantNotCreated(key.tenant));
+        }
+        let mut code = code.clone();
+        code.version = 0;
+        let stored_code = match kv.get_json::<GraphSpec>(&keys::graph_code(&key)).await {
+            Ok(stored) => stored,
+            Err(KvError::Malformed { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
+        if stored_code.as_ref() != Some(&code) {
+            kv.set_json(&keys::graph_code(&key), &code).await?;
+        }
+        let (spec, ignored) = lay_overrides(catalog, code, &load_overrides(kv, &key).await?)?;
+        publication
+            .ignored_overrides
+            .extend(ignored.into_iter().map(|(node, field)| (key.clone(), node, field)));
+        let entry = load_index_entry(kv, &key).await?;
+        if entry.as_ref().is_some_and(|entry| entry.deleting) {
+            publication.still_deleting.push(key);
+            continue;
+        }
+        let stored = match load_spec(kv, &key).await {
+            Ok(stored) => stored,
+            Err(ControlError::Kv(KvError::Malformed { .. })) => None,
+            Err(error) => return Err(error),
+        };
+        if entry.as_ref().is_some_and(|entry| entry.orphan) {
+            // Back in the code: run again. Storing the description clears
+            // the mark and bumps the epoch, after the desired state.
+            let mut desired = desired_or_default(kv, &key, clock).await?;
+            desired.state = RunState::Running;
+            save_desired(kv, &key, clock, desired).await?;
+            let version = store_spec(kv, clock, catalog, spec).await?;
+            publication.restored.push((key, version));
+            continue;
+        }
+        if entry.is_some() && stored.as_ref().is_some_and(|stored| same_description(stored, &spec)) {
+            publication.unchanged.push(key);
+            continue;
+        }
+        let version = store_spec(kv, clock, catalog, spec).await?;
+        publication.updated.push((key, version));
+    }
+    for mut entry in load_index(kv).await? {
+        let key = GraphKey::new(entry.tenant.clone(), entry.graph.clone());
+        if entry.deleting || graphs.iter().any(|spec| spec.key() == key) {
+            continue;
+        }
+        if entry.orphan {
+            publication.orphans.push(key);
+            continue;
+        }
+        let mut desired = desired_or_default(kv, &key, clock).await?;
+        desired.state = RunState::Stopped;
+        save_desired(kv, &key, clock, desired).await?;
+        entry.orphan = true;
+        entry.updated_ms = clock.now_ms();
+        kv.hset_json(keys::CLUSTER_GRAPHS, &key.to_string(), &entry).await?;
+        bump_epoch(kv).await?;
+        publication.orphaned.push(key);
+    }
+    Ok(publication)
+}
+
+/// Delete a graph the code no longer declares, and its state: desired state
+/// `stopped`, index entry `deleting`. The controller removes the rest. A
+/// graph the code declares is not deleted: it would come back, empty, with
+/// the next worker that starts.
 pub async fn delete_graph(kv: &dyn Kv, clock: &dyn Clock, graph: &GraphKey) -> Result<(), ControlError> {
     let mut entry = load_index_entry(kv, graph)
         .await?
         .ok_or_else(|| not_found_graph(graph))?;
+    if !entry.orphan {
+        return Err(ControlError::GraphDeclaredByCode(graph.clone()));
+    }
     let mut desired = desired_or_default(kv, graph, clock).await?;
     desired.state = RunState::Stopped;
     save_desired(kv, graph, clock, desired).await?;
@@ -402,9 +634,15 @@ pub async fn set_node_paused(
     bump_epoch(kv).await
 }
 
-/// Shallow-merge `patch` into the configuration of `node` (a `null` value
-/// removes the field), validate the resulting description and store it as a
-/// new version, like [`apply_graph`]. Returns the new version.
+/// Set or clear some exposed configuration fields of `node`: each field of
+/// `patch` is laid over the configuration the code gave the node, a `null`
+/// value going back to the code's. Only the fields its operator describes
+/// among its parameters can be set. The resulting description is validated
+/// and stored as a new version, which the workers restart the node's
+/// instances on. Returns the new version.
+///
+/// The fields are kept apart from the description, so that a new version of
+/// the code keeps them.
 pub async fn patch_node_config(
     kv: &dyn Kv,
     clock: &dyn Clock,
@@ -413,30 +651,38 @@ pub async fn patch_node_config(
     patch: Map<String, Value>,
 ) -> Result<u64, ControlError> {
     live_entry(kv, graph).await?;
-    let mut spec = spec_with_node(kv, graph, node).await?;
-    let target = spec
-        .nodes
-        .iter_mut()
-        .find(|candidate| &candidate.id == node)
-        .ok_or_else(|| not_found_graph(graph))?;
-    let mut config = match std::mem::take(&mut target.config) {
-        Value::Null => Map::new(),
-        Value::Object(map) => map,
-        // Not echoed back: a configuration may hold secrets.
-        _ => {
-            return Err(ControlError::ConfigNotAnObject {
-                graph: graph.clone(),
-                node: node.clone(),
-            });
-        }
+    let code = load_code(kv, graph).await?;
+    let Some(code_node) = code.node(node) else {
+        return Err(ControlError::NodeNotFound {
+            graph: graph.clone(),
+            node: node.clone(),
+        });
     };
+    let catalog = load_catalog(kv).await?;
+    if let Some(field) = patch.keys().find(|field| !exposes(&catalog, code_node, field)) {
+        return Err(ControlError::FieldNotExposed {
+            graph: graph.clone(),
+            node: node.clone(),
+            field: field.clone(),
+        });
+    }
+    let mut overrides = load_overrides(kv, graph).await?;
+    let fields = overrides.entry(node.clone()).or_default();
     for (field, value) in patch {
         if value.is_null() {
-            config.remove(&field);
+            fields.remove(&field);
         } else {
-            config.insert(field, value);
+            fields.insert(field, value);
         }
     }
-    target.config = Value::Object(config);
-    store_spec(kv, clock, spec).await
+    let fields = fields.clone();
+    let (spec, _) = lay_overrides(&catalog, code, &overrides)?;
+    Topology::build(&spec, &catalog)?;
+    let field = node.to_string();
+    if fields.is_empty() {
+        kv.hdel(&keys::graph_overrides(graph), vec![field]).await?;
+    } else {
+        kv.hset_json(&keys::graph_overrides(graph), &field, &fields).await?;
+    }
+    store_spec(kv, clock, &catalog, spec).await
 }

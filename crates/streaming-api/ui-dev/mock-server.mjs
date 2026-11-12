@@ -9,6 +9,7 @@
 //   POST /__mock/outage    {"on": true}        every /api and /healthz request is dropped
 //   POST /__mock/worker    {"worker": "worker-3", "alive": false}
 //   POST /__mock/commit    {"on": true}        KV commits of src.events.* become slow
+//   POST /__mock/orphan    {"graph": "globex/legacy-export"}  the code no longer declares the graph
 //   POST /__mock/reset                         back to the initial state
 // The same knobs accept GET with query parameters (?on=1, ?worker=..&alive=0) for curl.
 
@@ -211,12 +212,19 @@ function planErrorOf(spec) {
   return null;
 }
 
+// the parameters an operator exposes, as the catalog describes them
+const PARAM_KIND = { u32: 'integer', 'u32+': 'integer', u64: 'integer', f64: 'number', 'f64+': 'number', bool: 'boolean', duration: 'duration', string: 'string', json: 'json' };
+function paramsOf(op) {
+  return Object.entries(op.fields).map(([name, ty]) => ({ name, kind: PARAM_KIND[ty] || 'string', description: '', required: false, choices: [] }));
+}
+
 function addGraph(spec, updated) {
   const key = `${spec.tenant}/${spec.graph}`;
   const prev = S.graphs.get(key);
   const g = {
     spec: { tenant: spec.tenant, graph: spec.graph, version: spec.version, settings: { ...DEFAULT_SETTINGS, ...(spec.settings || {}) }, nodes: spec.nodes, edges: spec.edges },
     desired: prev?.desired || { state: 'running', pausedNodes: [], updatedMs: updated },
+    code: prev?.code || spec.nodes, // the nodes as the code of the application built them
     updatedMs: updated,
     planError: planErrorOf(spec),
     plannedMs: updated + 800,
@@ -536,6 +544,7 @@ function graphDetail(key, snap, now) {
   const watermark = src.length && src.every((s) => s.watermarkMs != null) ? Math.min(...src.map((s) => s.watermarkMs)) : null;
   return {
     tenant: g.spec.tenant, graph: g.spec.graph, version: g.spec.version, state: g.deleting ? 'stopped' : g.desired.state,
+    orphan: !!g.orphan,
     spec: g.spec,
     plan: { specVersion: g.spec.version, partitions: Object.fromEntries(g.spec.nodes.filter((n) => OPS[n.op]?.kind === 'source').map((n) => [n.id, n.config?.partitions ?? 1])), slices: slicePlan.map((s) => s.id), plannedMs: g.plannedMs, error: g.planError },
     desired: g.desired,
@@ -548,7 +557,7 @@ function summary(key, snap, now) {
   const d = graphDetail(key, snap, now);
   const g = S.graphs.get(key);
   return {
-    tenant: d.tenant, graph: d.graph, version: d.version, state: d.state,
+    tenant: d.tenant, graph: d.graph, version: d.version, state: d.state, orphan: d.orphan,
     nodes: d.nodes.length, slices: d.slices.length, actors: snap.get(key).actors.length,
     inPerSec: r3(d.nodes.filter((n) => n.kind === 'source').reduce((s, n) => s + n.outPerSec, 0)),
     outPerSec: r3(d.nodes.filter((n) => n.kind === 'sink').reduce((s, n) => s + n.outPerSec, 0)),
@@ -649,15 +658,16 @@ function send(res, status, body, type = 'application/json') {
 const TEMPLATES = {
   BODY_NOT_JSON: 'the request body is not valid JSON (line {line}, column {column})',
   BODY_INVALID: 'the request body is invalid: {detail} (line {line}, column {column})',
-  GRAPH_KEY_MISMATCH: 'the description is for `{bodyTenant}/{bodyGraph}` but the path names `{tenant}/{graph}`',
   GRAPH_EMPTY: 'the graph has no node',
   EDGE_UNKNOWN_NODE: 'edge `{from}` -> `{to}` references unknown node `{unknown}`',
   GRAPH_NOT_FOUND: 'unknown graph `{tenant}/{graph}`',
   TENANT_NOT_FOUND: 'unknown tenant `{tenant}`',
-  TENANT_NOT_CREATED: 'tenant `{tenant}` does not exist: create it before submitting graphs to it',
   TENANT_DISPLAY_NAME_CONFLICT: 'tenant `{tenant}` already exists with another display name',
   NODE_NOT_FOUND: 'unknown node `{node}` in graph `{tenant}/{graph}`',
+  GRAPH_DECLARED_BY_CODE: 'graph `{tenant}/{graph}` is declared by the code of the application: remove it from the code to delete it',
+  GRAPH_NOT_IN_CODE: 'graph `{tenant}/{graph}` is no longer declared by the code of the application: it can only be deleted',
   NODE_CONFIG_NOT_OBJECT: 'the configuration of node `{node}` in graph `{tenant}/{graph}` is not an object and cannot be patched',
+  NODE_FIELD_NOT_EXPOSED: 'node `{node}` in graph `{tenant}/{graph}` does not expose the configuration field `{field}`',
   ROUTE_NOT_FOUND: 'nothing is served at `{path}`',
   MOCK_CONFIG_INVALID: '{detail}',
   MOCK_FAILURE: 'the mock failed: {detail}',
@@ -712,6 +722,12 @@ async function handle(req, res) {
       if (w.alive) { w.generation = Date.now(); }
       return send(res, 200, { worker: w.worker, alive: w.alive });
     }
+    if (p === '/__mock/orphan') {
+      const g = S.graphs.get(body.graph ?? q.graph);
+      if (!g) return err(res, 404, 'ROUTE_NOT_FOUND', { path: p });
+      g.orphan = true; g.desired.state = 'stopped'; bump(g);
+      return send(res, 200, { orphan: true });
+    }
     if (p === '/__mock/reset') { reset(); return send(res, 200, { reset: true }); }
     return err(res, 404, 'ROUTE_NOT_FOUND', { path: p });
   }
@@ -727,7 +743,7 @@ async function handle(req, res) {
 
   if (m === 'GET' && p === '/api/v1/cluster') return send(res, 200, cluster(now, snap));
   if (m === 'GET' && p === '/api/v1/catalog') {
-    return send(res, 200, { ops: Object.entries(OPS).sort(([a], [b]) => a.localeCompare(b)).map(([op, d]) => ({ op, kind: d.kind, input: d.input, output: d.output, description: d.description })) });
+    return send(res, 200, { ops: Object.entries(OPS).sort(([a], [b]) => a.localeCompare(b)).map(([op, d]) => ({ op, kind: d.kind, input: d.input, output: d.output, description: d.description, params: paramsOf(d) })) });
   }
   if (m === 'GET' && p === '/api/v1/tenants') {
     const ts = new Map([...S.tenants.values()].map((t) => [t.tenant, { ...t, graphs: 0, actors: 0, inPerSec: 0 }]));
@@ -766,30 +782,16 @@ async function handle(req, res) {
   const key = `${tenant}/${graph}`;
   const g = S.graphs.get(key);
 
-  if (rest === '' && m === 'PUT') {
-    if (!S.tenants.has(tenant)) return err(res, 404, 'TENANT_NOT_CREATED', { tenant });
-    const b = await readBody(req);
-    if (!b.ok) return err(res, 400, b.code, b.context);
-    const spec = b.value;
-    if (!spec || typeof spec !== 'object') return err(res, 400, 'BODY_INVALID', { detail: 'expected a graph description', line: 1, column: 0 });
-    if (spec.tenant !== tenant || spec.graph !== graph) return err(res, 400, 'GRAPH_KEY_MISMATCH', { tenant, graph, bodyTenant: String(spec.tenant), bodyGraph: String(spec.graph) });
-    if (!Array.isArray(spec.nodes) || !spec.nodes.length) return err(res, 400, 'GRAPH_EMPTY');
-    for (const n of spec.nodes) { const e = validateConfig(n, n.config ?? {}); if (e) return err(res, 400, 'MOCK_CONFIG_INVALID', { detail: e }); }
-    const ids = new Set(spec.nodes.map((n) => n.id));
-    for (const [a, b2] of spec.edges || []) if (!ids.has(a) || !ids.has(b2)) return err(res, 400, 'EDGE_UNKNOWN_NODE', { from: a, to: b2, unknown: ids.has(a) ? b2 : a });
-    const version = (g?.spec.version || 0) + 1;
-    addGraph({ ...spec, version }, now);
-    S.epoch += 1; place(now);
-    return send(res, 200, { version });
-  }
   if (!g || g.gone) return err(res, 404, 'GRAPH_NOT_FOUND', { tenant, graph });
 
   if (rest === '' && m === 'GET') return send(res, 200, graphDetail(key, snap, now));
   if (rest === '' && m === 'DELETE') {
+    if (!g.orphan) return err(res, 409, 'GRAPH_DECLARED_BY_CODE', { tenant, graph });
     g.desired.state = 'stopped'; g.deleting = true; bump(g);
     setTimeout(() => { S.graphs.delete(key); S.epoch += 1; place(Date.now()); }, 3000);
     return send(res, 200, { deleting: true });
   }
+  if (g.orphan && m !== 'GET') return err(res, 409, 'GRAPH_NOT_IN_CODE', { tenant, graph });
   if (rest === '/dot' && m === 'GET') return send(res, 200, dot(key), 'text/vnd.graphviz');
   mm = /^\/outputs\/([^/]+)$/.exec(rest);
   if (mm && m === 'GET') {
@@ -830,8 +832,16 @@ async function handle(req, res) {
       const b = await readBody(req);
       if (!b.ok) return err(res, 400, b.code, b.context);
       if (!b.value || typeof b.value !== 'object' || Array.isArray(b.value)) return err(res, 400, 'BODY_INVALID', { detail: 'invalid type, expected a map', line: 1, column: 0 });
+      const exposed = Object.keys(OPS[n.op]?.fields || {});
+      const hidden = Object.keys(b.value).find((k) => !exposed.includes(k));
+      if (hidden) return err(res, 400, 'NODE_FIELD_NOT_EXPOSED', { tenant, graph, node, field: hidden });
+      const code = g.code.find((x) => x.id === node)?.config || {};
       const merged = { ...(n.config || {}) };
-      for (const [k, v] of Object.entries(b.value)) { if (v === null) delete merged[k]; else merged[k] = v; }
+      for (const [k, v] of Object.entries(b.value)) {
+        if (v !== null) merged[k] = v;
+        else if (k in code) merged[k] = code[k];
+        else delete merged[k];
+      }
       const e = validateConfig(n, merged);
       if (e) return err(res, 400, 'MOCK_CONFIG_INVALID', { detail: e });
       const spec = { ...g.spec, version: g.spec.version + 1, nodes: g.spec.nodes.map((x) => (x.id === node ? { ...x, config: merged } : x)) };

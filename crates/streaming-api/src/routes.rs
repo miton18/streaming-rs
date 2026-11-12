@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 use streaming_core::{
-    Catalog, GraphId, GraphKey, GraphSpec, NodeId, TenantId,
+    Catalog, GraphId, GraphKey, NodeId, TenantId,
     control::{GraphIndexEntry, OutputRow, RunState, TenantRecord},
     keys,
 };
@@ -322,7 +322,8 @@ async fn tenant_graphs(State(state): State<ApiState>, Path(tenant): Path<String>
     let mut graphs = Vec::new();
     for entry in entries {
         let key = GraphKey::new(entry.tenant.clone(), entry.graph.clone());
-        if let Some(detail) = detail(&state, &context, &key).await? {
+        if let Some(mut detail) = detail(&state, &context, &key).await? {
+            detail.orphan = entry.orphan;
             graphs.push(status::graph_summary(&detail, entry.updated_ms));
         }
     }
@@ -332,9 +333,11 @@ async fn tenant_graphs(State(state): State<ApiState>, Path(tenant): Path<String>
 /// The detail of a graph, or 404 when it is not in the index.
 async fn existing_detail(state: &ApiState, key: &GraphKey) -> Result<GraphDetail, ApiError> {
     let unknown = || ApiError::from(ControlError::GraphNotFound(key.clone()));
-    control::load_index_entry(&*state.kv, key).await?.ok_or_else(unknown)?;
+    let entry = control::load_index_entry(&*state.kv, key).await?.ok_or_else(unknown)?;
     let context = Context::load(state).await?;
-    detail(state, &context, key).await?.ok_or_else(unknown)
+    let mut detail = detail(state, &context, key).await?.ok_or_else(unknown)?;
+    detail.orphan = entry.orphan;
+    Ok(detail)
 }
 
 /// A graph: its description, plan, nodes with their metrics, edges, slices
@@ -458,41 +461,20 @@ struct VersionReply {
     version: u64,
 }
 
-/// Create or replace a graph.
-///
-/// The description must name the graph of the path. It is validated against
-/// the catalogue (operators, types, edges) before being stored; the version
-/// and the cluster epoch are bumped, and workers converge on it.
-#[route(PUT, "/api/v1/tenants/{tenant}/graphs/{graph}", tag = "graphs")]
-async fn put_graph(
-    State(state): State<ApiState>,
-    Path((tenant, graph)): Path<(String, String)>,
-    JsonBody(spec): JsonBody<GraphSpec>,
-) -> ApiResult<VersionReply> {
-    let key = graph_key(&tenant, &graph)?;
-    if spec.key() != key {
-        return Err(ApiError::new(&error::GRAPH_KEY_MISMATCH)
-            .with("tenant", key.tenant.as_str())
-            .with("graph", key.graph.as_str())
-            .with("bodyTenant", spec.tenant.as_str())
-            .with("bodyGraph", spec.graph.as_str()));
-    }
-    let version = control::apply_graph(&*state.kv, &*state.clock, spec).await?;
-    Ok(axum::Json(VersionReply { version }))
-}
-
 /// A graph being deleted.
 #[derive(Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct DeletingReply {
-    /// Always `true`: workers stop the graph, then its state is removed.
+    /// Always `true`: the controller removes the state of the graph.
     deleting: bool,
 }
 
-/// Delete a graph.
+/// Delete a graph the code no longer declares, and its state.
 ///
-/// The graph is marked as being deleted; workers stop it and the controller
-/// removes its state.
+/// Graphs are declared by the code of the application. One the code no
+/// longer declares is stopped with its state kept (`orphan`); this deletes
+/// it for good: the controller removes its state. A graph the code declares
+/// is refused (`GRAPH_DECLARED_BY_CODE`).
 #[route(DELETE, "/api/v1/tenants/{tenant}/graphs/{graph}", tag = "graphs")]
 async fn delete_graph(
     State(state): State<ApiState>,
@@ -556,10 +538,14 @@ async fn resume(State(state): State<ApiState>, Path(path): Path<(String, String,
     set_paused(state, path, false).await
 }
 
-/// Change some keys of a node's configuration.
+/// Change some exposed fields of a node's configuration.
 ///
-/// The body is merged into the node's configuration object, key by key; the
-/// new description is validated and stored as a new version.
+/// Graphs are built by the code of the workers; only the fields an operator
+/// lists among its parameters can be changed here. Each field of the body is
+/// laid over the configuration the code gave the node, `null` going back to
+/// the code's value. The new description is validated and stored as a new
+/// version, on which the node's instances restart. The fields are kept apart
+/// from the description, so that a new version of the code keeps them.
 #[route(PATCH, "/api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/config", tag = "nodes")]
 async fn patch_config(
     State(state): State<ApiState>,
@@ -584,7 +570,6 @@ fn api() -> ApiRouter<ApiState> {
         .route(put_tenant::route())
         .route(tenant_graphs::route())
         .route(graph::route())
-        .route(put_graph::route())
         .route(delete_graph::route())
         .route(set_state::route())
         .route(dot::route())

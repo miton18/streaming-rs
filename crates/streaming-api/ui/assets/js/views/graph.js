@@ -83,10 +83,11 @@ export class GraphView {
             r.stateTag = h('span'),
             r.version = h('span', { class: 'tag tag-neutral tag-mono' }),
             r.transition = h('span', { class: 'muted', style: { fontSize: '13px' } }))),
-        h('div', { class: 'actions' },
-          r.seg,
-          h('button', { class: 'btn btn-ghost danger', type: 'button', onclick: () => this.deleteGraph(), title: 'Supprimer le graphe' }, icon('trash'), 'Supprimer'))),
+        h('div', { class: 'actions' }, r.seg)),
       r.missing = h('div', { class: 'card empty', hidden: true }),
+      r.orphan = h('div', { class: 'banner banner-info', role: 'status', hidden: true }, icon('warn'),
+        h('div', { class: 'grow' }, h('strong', null, 'Ce graphe n’est plus déclaré par le code de l’application. '), 'Il est arrêté et son état est conservé. Il repartira sur cet état si le code le déclare à nouveau.'),
+        h('button', { class: 'btn btn-ghost danger', type: 'button', onclick: () => this.deleteGraph() }, icon('trash'), 'Supprimer le graphe et son état')),
       r.planErr = h('div', { class: 'banner banner-danger', role: 'alert', hidden: true }, icon('warn'), h('div', { class: 'grow' }, h('strong', null, 'Le graphe ne peut pas être planifié. '), r.planErrText = h('span'))),
       r.bneck = h('div', { class: 'banner banner-danger bneck', role: 'status', hidden: true },
         icon('warn'),
@@ -185,7 +186,8 @@ export class GraphView {
   }
 
   needs() {
-    const n = { graph: [this.t, this.g] };
+    // the catalog says which configuration fields each operator exposes
+    const n = { graph: [this.t, this.g], catalog: true };
     if (this.tab === 'results' && this.data) {
       n.outputs = (this.data.nodes || []).filter((x) => x.op === KV_SINK).map((x) => [this.t, this.g, x.id]);
     }
@@ -222,7 +224,7 @@ export class GraphView {
   async deleteGraph() {
     const ok = await this.ctx.confirm({
       title: `Supprimer ${this.t}/${this.g} ?`,
-      body: [h('p', { style: { margin: 0 } }, 'Le graphe passe à l’état ', h('b', null, 'stopped'), ' et son entrée d’index est marquée en suppression. Le contrôleur efface ensuite son état (positions, fenêtres, résultats) puis l’entrée elle-même.'),
+      body: [h('p', { style: { margin: 0 } }, 'Le contrôleur efface l’état du graphe (positions, fenêtres, résultats), puis le graphe lui-même.'),
         h('p', { style: { margin: '8px 0 0' } }, 'Cette action est irréversible.')],
       confirm: 'Supprimer définitivement', danger: true,
     });
@@ -269,7 +271,7 @@ export class GraphView {
       r.missing.hidden = false;
       r.missing.replaceChildren(h('div', { style: { fontSize: '15px', color: 'var(--color-text)', marginBottom: '6px' } }, `Graphe ${this.key} introuvable`),
         h('div', null, det.error || '', ' · ', h('a', { href: '#/' }, "Retour à la vue d'ensemble")));
-      for (const el of [r.dagCard, r.tabs.parentElement, r.bneck, r.planErr]) el.hidden = true;
+      for (const el of [r.dagCard, r.tabs.parentElement, r.bneck, r.planErr, r.orphan]) el.hidden = true;
       r.stats.in.parentElement.hidden = true;
       this.panel.close();
       return;
@@ -290,6 +292,9 @@ export class GraphView {
     const observed = this.observedState(nodes);
     text(r.transition, desired && observed && observed !== desired ? `observé : ${observed}` : '');
     this.updateSeg();
+    // a graph that left the code can only be deleted
+    r.orphan.hidden = !d.orphan;
+    r.seg.hidden = !!d.orphan;
 
     // stats
     const srcOut = nodes.filter((n) => n.kind === 'source').reduce((a, n) => a + (n.outPerSec || 0), 0);
@@ -620,25 +625,24 @@ class NodePanel {
 
 // ==================================================================== configuration form
 
-/** Form generated from a node's `config` object; PATCH .../nodes/<node>/config. */
+/**
+ * Form of the configuration fields a node's operator exposes (the parameters
+ * its catalog entry describes); PATCH .../nodes/<node>/config. The other
+ * fields are set by the code of the application.
+ */
 class ConfigForm {
   constructor(view) {
     this.view = view;
     this.node = null;
     this.base = null;    // JSON of the config the form was built from
-    this.fields = [];    // {key, kind, input, original, err, isNew}
+    this.fields = [];    // {key, kind, input, original, errEl}
     this.r = {};
     const r = this.r;
     this.el = h('form', { class: 'form', novalidate: true, onsubmit: (e) => { e.preventDefault(); this.apply(); } },
       r.fields = h('div', { class: 'form', style: { gap: 'var(--space-6)' } }),
-      r.none = h('div', { class: 'muted', style: { fontSize: '12.5px' }, hidden: true }, 'Ce nœud n’a pas de configuration.'),
+      r.none = h('div', { class: 'muted', style: { fontSize: '12.5px' }, hidden: true }, 'L’opérateur de ce nœud n’expose aucun paramètre modifiable.'),
+      r.fixed = h('div', { class: 'muted', style: { fontSize: '12px' }, hidden: true }),
       r.stale = h('div', { class: 'banner banner-info', hidden: true, style: { fontSize: '12.5px', padding: '8px 12px' } }, 'La configuration a changé sur le serveur pendant votre saisie. ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); this.rebuild(this.lastNode); } }, 'Recharger')),
-      h('details', { style: { fontSize: '12.5px' } },
-        h('summary', { class: 'muted', style: { cursor: 'pointer' } }, 'Ajouter un champ'),
-        h('div', { class: 'addfield', style: { marginTop: '8px' } },
-          r.newKey = h('input', { class: 'input mono', placeholder: 'nom', 'aria-label': 'Nom du nouveau champ' }),
-          r.newVal = h('input', { class: 'input mono', placeholder: 'valeur (JSON ou texte)', 'aria-label': 'Valeur du nouveau champ' }),
-          h('button', { class: 'btn btn-secondary', type: 'button', onclick: () => this.addField() }, icon('plus'), 'Ajouter'))),
       r.error = h('div', { class: 'form-error', role: 'alert', hidden: true }, icon('warn'), h('div', null, h('div', null, "L'API a refusé la configuration :"), r.errText = h('code'))),
       r.actions = h('div', { class: 'form-actions' },
         r.apply = h('button', { class: 'btn btn-primary', type: 'submit', disabled: true }, 'Appliquer'),
@@ -647,12 +651,24 @@ class ConfigForm {
     this.el._ctl = this;
   }
 
-  dirty() { return this.fields.some((f) => f.isNew || this.valueOf(f).changed); }
+  dirty() { return this.fields.some((f) => this.valueOf(f).changed); }
+
+  /** The parameters the operator of `n` exposes, or null while the catalog is not loaded. */
+  paramsOf(n) {
+    const catalog = this.view.ctx.store.catalog;
+    if (!catalog) return null;
+    return catalog.find((o) => o.op === n.op)?.params || [];
+  }
+
+  /** What the form shows of `n`: its configuration and the exposed parameters. */
+  signature(n) {
+    const cfg = n.config && typeof n.config === 'object' && !Array.isArray(n.config) ? n.config : {};
+    return JSON.stringify([cfg, (this.paramsOf(n) || []).map((p) => p.name)]);
+  }
 
   sync(n) {
     this.lastNode = n;
-    const cfg = n.config && typeof n.config === 'object' && !Array.isArray(n.config) ? n.config : {};
-    const json = JSON.stringify(cfg);
+    const json = this.signature(n);
     if (this.node !== n.id) { this.rebuild(n); return; }
     if (json !== this.base) {
       if (!this.dirty()) this.rebuild(n);
@@ -664,40 +680,56 @@ class ConfigForm {
     const r = this.r;
     this.node = n.id;
     const cfg = n.config && typeof n.config === 'object' && !Array.isArray(n.config) ? n.config : {};
-    this.base = JSON.stringify(cfg);
+    this.base = this.signature(n);
+    this.cfg = cfg;
     this.fields = [];
     r.fields.replaceChildren();
-    for (const [k, v] of Object.entries(cfg)) this.addRow(k, v, false);
-    r.none.hidden = this.fields.length > 0;
+    const params = this.paramsOf(n);
+    for (const p of params || []) this.addRow(p, cfg[p.name] !== undefined ? cfg[p.name] : p.default);
+    const fixed = Object.keys(cfg).filter((k) => !(params || []).some((p) => p.name === k));
+    r.none.hidden = params === null || this.fields.length > 0;
+    r.fixed.hidden = !fixed.length;
+    text(r.fixed, fixed.length ? `Fixé${fixed.length > 1 ? 's' : ''} par le code : ${fixed.join(', ')}` : '');
     r.stale.hidden = true;
     r.error.hidden = true;
     text(r.status, '');
     this.refreshState();
   }
 
-  addRow(key, value, isNew) {
-    const kind = typeof value === 'number' ? 'number' : typeof value === 'boolean' ? 'bool' : typeof value === 'string' ? 'string' : 'json';
-    const f = { key, kind, original: value, isNew };
+  addRow(param, value) {
+    const key = param.name;
+    const kind = param.kind === 'integer' || param.kind === 'number' ? 'number'
+      : param.kind === 'boolean' ? 'bool'
+        : param.kind === 'json' || param.kind === 'secret' || (value !== undefined && value !== null && typeof value === 'object') ? 'json'
+          : 'string';
+    const f = { key, kind, original: value };
     const id = `cfg-${this.node}-${key}`.replace(/[^a-zA-Z0-9_-]/g, '_');
     const onInput = () => { f.errEl.hidden = true; toggle(f.input, 'invalid', false); this.refreshState(); };
     if (kind === 'bool') {
-      f.input = h('input', { type: 'checkbox', id, checked: value, onchange: onInput });
+      f.input = h('input', { type: 'checkbox', id, checked: value === true, onchange: onInput });
       f.wrap = h('label', { class: 'toggle', for: id }, f.input, h('span', { class: 'track' }), f.lbl = h('span', null, value ? 'true' : 'false'));
     } else if (kind === 'number') {
-      f.input = h('input', { class: 'input mono', type: 'number', id, step: Number.isInteger(value) ? '1' : 'any', value: String(value), oninput: onInput });
+      f.input = h('input', { class: 'input mono', type: 'number', id, step: param.kind === 'integer' ? '1' : 'any', value: value === undefined ? '' : String(value), oninput: onInput });
+      f.wrap = f.input;
+    } else if (kind === 'string' && param.choices?.length) {
+      f.input = h('select', { class: 'input', id, onchange: onInput },
+        value === undefined ? h('option', { value: '' }, '–') : null,
+        ...param.choices.map((c) => h('option', { value: c, selected: c === value }, c)));
       f.wrap = f.input;
     } else if (kind === 'string') {
-      f.input = h('input', { class: 'input mono', type: 'text', id, value, oninput: onInput, spellcheck: 'false' });
+      f.input = h('input', { class: 'input mono', type: 'text', id, value: value === undefined ? '' : String(value), oninput: onInput, spellcheck: 'false' });
       f.wrap = f.input;
     } else {
-      f.input = h('textarea', { class: 'input', id, rows: String(Math.min(8, JSON.stringify(value, null, 2).split('\n').length + 1)), oninput: onInput, spellcheck: 'false' });
-      f.input.value = JSON.stringify(value, null, 2);
+      const shown = value === undefined ? '' : JSON.stringify(value, null, 2);
+      f.input = h('textarea', { class: 'input', id, rows: String(Math.min(8, shown.split('\n').length + 1)), oninput: onInput, spellcheck: 'false' });
+      f.input.value = shown;
       f.wrap = f.input;
     }
-    const tyLabel = { number: Number.isInteger(value) ? 'entier' : 'nombre', bool: 'booléen', string: 'texte', json: 'JSON' }[kind];
+    const tyLabel = { number: param.kind === 'integer' ? 'entier' : 'nombre', bool: 'booléen', string: param.kind === 'duration' ? 'durée' : 'texte', json: 'JSON' }[kind];
     f.row = h('div', { class: 'field' },
-      h('label', { class: 'fl', for: id }, h('span', null, key), h('span', { class: 'ty' }, isNew ? `${tyLabel} · nouveau` : tyLabel)),
+      h('label', { class: 'fl', for: id, title: param.description || '' }, h('span', null, key), h('span', { class: 'ty' }, param.required ? `${tyLabel} · requis` : tyLabel)),
       f.wrap,
+      param.description ? h('div', { class: 'muted', style: { fontSize: '12px' } }, param.description) : null,
       f.errEl = h('div', { class: 'ferr', hidden: true }));
     this.fields.push(f);
     this.r.fields.appendChild(f.row);
@@ -710,11 +742,16 @@ class ConfigForm {
     if (f.kind === 'bool') return { ok: true, value: f.input.checked, changed: f.input.checked !== f.original };
     if (f.kind === 'number') {
       const raw = f.input.value.trim();
+      if (raw === '' && f.original === undefined) return { ok: true, value: undefined, changed: false };
       if (raw === '' || Number.isNaN(Number(raw))) return { ok: false, error: 'nombre attendu', changed: true };
       const v = Number(raw);
       return { ok: true, value: v, changed: v !== f.original };
     }
-    if (f.kind === 'string') return { ok: true, value: f.input.value, changed: f.input.value !== f.original };
+    if (f.kind === 'string') {
+      if (f.input.value === '' && f.original === undefined) return { ok: true, value: undefined, changed: false };
+      return { ok: true, value: f.input.value, changed: f.input.value !== f.original };
+    }
+    if (f.input.value.trim() === '' && f.original === undefined) return { ok: true, value: undefined, changed: false };
     try {
       const v = JSON.parse(f.input.value);
       return { ok: true, value: v, changed: JSON.stringify(v) !== JSON.stringify(f.original) };
@@ -727,7 +764,7 @@ class ConfigForm {
     let n = 0;
     for (const f of this.fields) {
       const v = this.valueOf(f);
-      const d = f.isNew || v.changed;
+      const d = v.changed;
       if (d) n += 1;
       if (f.kind === 'bool') { toggle(f.wrap, 'dirty', d); text(f.lbl, f.input.checked ? 'true' : 'false'); } else toggle(f.input, 'dirty', d);
     }
@@ -737,19 +774,6 @@ class ConfigForm {
     text(this.r.status, n ? `${n} champ${n > 1 ? 's' : ''} modifié${n > 1 ? 's' : ''}` : '');
   }
 
-  addField() {
-    const r = this.r;
-    const key = r.newKey.value.trim();
-    if (!key) { r.newKey.focus(); return; }
-    if (this.fields.some((f) => f.key === key)) { this.view.ctx.toast(`Le champ ${key} existe déjà`, { error: true }); return; }
-    let v = r.newVal.value;
-    try { v = JSON.parse(v); } catch { /* plain text */ }
-    const f = this.addRow(key, v, true);
-    r.newKey.value = ''; r.newVal.value = '';
-    this.refreshState();
-    f.input.focus();
-  }
-
   async apply() {
     const r = this.r;
     const body = {};
@@ -757,7 +781,7 @@ class ConfigForm {
     for (const f of this.fields) {
       const v = this.valueOf(f);
       if (!v.ok) { bad = true; f.errEl.hidden = false; text(f.errEl, v.error); toggle(f.input, 'invalid', true); continue; }
-      if (f.isNew || v.changed) body[f.key] = v.value;
+      if (v.changed) body[f.key] = v.value;
     }
     if (bad || !Object.keys(body).length) return;
     const v = this.view;
@@ -769,8 +793,8 @@ class ConfigForm {
       const res = await patch(paths.config(v.t, v.g, node), body);
       this.busy = false;
       // the next poll carries the merged config; until then keep the sent values as the baseline
-      const merged = { ...JSON.parse(this.base), ...body };
-      this.rebuild({ id: node, config: merged });
+      const merged = { ...this.cfg, ...body };
+      this.rebuild({ ...this.lastNode, id: node, config: merged });
       v.ctx.toast(`Configuration de ${node} appliquée${res && res.version != null ? ` · version ${res.version}` : ''}`);
       v.ctx.refresh();
     } catch (e) {

@@ -14,12 +14,14 @@ It is multi-tenant, keeps its state in a Redis-protocol key-value store
 ## Try it
 
 ```sh
-cargo run --release -p streamd -- standalone
+cargo run --release -p streaming --example demo -- standalone
 ```
 
-This starts a whole cluster in one process (in-memory KV, three workers
-gossiping over loopback, two demonstration graphs fed by a generator) and
-opens the web UI on <http://127.0.0.1:8080/>.
+This runs the demonstration application
+([`crates/streaming/examples/demo`](crates/streaming/examples/demo)) as a
+whole cluster in one process (in-memory KV, three workers gossiping over
+loopback, two graphs fed by a generator) and opens the web UI on
+<http://127.0.0.1:8080/>.
 
 Things to try in the UI:
 
@@ -32,18 +34,40 @@ Things to try in the UI:
   source stops reading too;
 - raise `ratePerSec` on `events`, or change its `partitions`: slices join
   and leave the running pipeline;
-- open *Concevoir*: build a pipeline step by step, each operator chosen from
-  the catalogue with a form for its parameters, and deploy it;
 - pause a node, pause or drain the graph;
 - watch the per-key counts arrive in the *Résultats* tab every ten seconds.
 
 ## Concepts
 
-**A graph is a description, not code.** It is a JSON document stored in the
-KV: nodes referencing operators by name (`std/count@1`, `acme/decode@1`) and
-edges. The operators themselves are Rust code compiled into the workers and
-registered under the same reference. A graph is validated when submitted:
-acyclic, every operator known to the cluster, types matching along each edge.
+**The code is the truth.** streaming-rs is an SDK: an application declares
+its tenants, its operators and its graphs in Rust, and its binary is the
+worker. Every worker of a cluster runs the same binary and, when it starts,
+publishes the graphs of its code into the KV, where the controller, the other
+workers and the HTTP API read them. A graph the code no longer has is
+stopped and keeps its state (it is an *orphan*): it runs again on that state
+if the code declares it again, and is deleted, state included, only when
+someone asks for it through the API or the UI. A graph is validated before it is published: acyclic, every operator
+known, types matching along each edge, the configuration of every map, key,
+window and aggregate accepted by its operator.
+
+```rust
+App::new()
+    .tenant("acme", "Acme Corporation")
+    .operators(|registry| { /* registry.register_map(...) */ })
+    .graph(count_per_key())                 // a GraphBuilder, see below
+    .main()                                 // `standalone` or `worker`
+```
+
+What the API changes at run time is what is not structure: the run state of
+a graph (running, paused, draining, stopped), paused nodes, and the
+configuration fields an operator *exposes* (the parameters it describes in
+the catalogue, such as a window's size or a sink's latency). Those are kept
+apart in the KV, so a new version of the code keeps them; changing one
+restarts the node's instances on a new version of the graph.
+
+What the store holds of a graph is a JSON description: nodes referencing
+operators by name (`std/count@1`, `acme/decode@1`) with their configuration,
+and edges. The API and the UI show it as is:
 
 ```json
 {
@@ -154,27 +178,28 @@ light gossip for membership: each worker gossips a couple of hundred bytes
 | `streaming-api` | HTTP API and embedded web UI ([docs/http-api.md](docs/http-api.md), [OpenAPI](docs/openapi.json)) |
 | `streaming-openapi` | `#[route]` attribute: registers an axum handler and derives its OpenAPI description from its signature (macro in `streaming-openapi-macros`) |
 | `streaming-sim` | simulation harness and the exactly-once tests |
-| `streamd` | the daemon: `standalone` and `worker` |
+| `streaming` | the SDK: `App` (tenants, operators, graphs, the `standalone` and `worker` commands), the stock operators, the demonstration application (`examples/demo`) |
 
 ## Running a real cluster
 
-```sh
-cargo build --release -p streamd --features pulsar,tls
+Build your application (a crate depending on `streaming`, features
+`pulsar` and `tls` as needed) and run the same binary on every machine:
 
-streamd worker --id worker-1 --kv redis://:TOKEN@kv-host:6379 \
+```sh
+my-app worker --id worker-1 --kv redis://:TOKEN@kv-host:6379 \
     --listen 0.0.0.0:8080 --gossip 0.0.0.0:7946 --gossip-advertise 10.0.0.1:7946
-streamd worker --id worker-2 --kv redis://:TOKEN@kv-host:6379 \
-    --gossip 0.0.0.0:7946 --gossip-advertise 10.0.0.2:7946 --seeds 10.0.0.1:7946
+my-app worker --id worker-2 --kv redis://:TOKEN@kv-host:6379 \
+    --listen 0.0.0.0:8080 --gossip 0.0.0.0:7946 --gossip-advertise 10.0.0.2:7946 --seeds 10.0.0.1:7946
 ```
 
-Use `rediss://` for TLS (Materia KV). Create the tenant, then submit a graph
-to it with the API:
-
-```sh
-curl -X PUT http://10.0.0.1:8080/api/v1/tenants/acme --data '{"displayName": "Acme"}'
-curl -X PUT http://10.0.0.1:8080/api/v1/tenants/acme/graphs/count-per-key \
-     --data @count-per-key.json
-```
+Use `rediss://` for TLS (Materia KV). Each worker publishes the tenants and
+graphs of the code when it starts and prints what changed; every worker
+started with `--listen` serves the HTTP API and the web UI. Changing a graph
+means deploying a new version of the binary. While a deployment replaces the
+workers, old and new binaries run side by side: an old worker that restarts
+then would publish the old graphs again, and stop the graphs only the new
+code has, until a new worker starts (a topology fingerprint that makes it
+step aside is the next step). No state is deleted by a deployment.
 
 Secrets referenced as `{"secret": "name"}` are read from the environment
 variable `STREAMING_SECRET__<TENANT>__<NAME>`.
@@ -183,34 +208,30 @@ The API has no authentication: do not expose it publicly.
 
 ## Writing operators
 
-The stock `streamd` only knows the `std/*` operators. Your own operators live
-in your own worker binary, which is a few lines around `streaming-runtime`:
+Every application has the `std/*` operators and the connectors. Its own
+operators are registered by `App::operators`, called once per worker:
 
 ```rust
-let mut registry = Registry::<TokioProviders>::standard();
-streaming_runtime::builtin::register(&mut registry, kv.clone());
-
-registry.register_map("acme/decode@1", "Decodes an event.", |bytes: &Vec<u8>| {
-    serde_json::from_slice::<Event>(bytes).ok()          // None filters the record out
-});
-registry.register_key("acme/by-user@1", "Groups by user.", |event: &Event| event.user.clone());
-registry.register_aggregator("acme/revenue@1", "Sums amounts.", |_: IgnoredAny| Ok(Revenue));
-
-Worker::new(RuntimeEnv { providers, kv, clock, secrets, registry: Arc::new(registry) },
-            WorkerConfig::new(WorkerId::new("worker-1")?))
-    .run(shutdown)
-    .await;
+App::new().operators(|registry| {
+    registry.register_map("acme/decode@1", "Decodes an event.", |bytes: &Vec<u8>| {
+        serde_json::from_slice::<Event>(bytes).ok()      // None filters the record out
+    });
+    registry.register_key("acme/by-user@1", "Groups by user.", |event: &Event| event.user.clone());
+    registry.register_aggregator("acme/revenue@1", "Sums amounts.", |_: IgnoredAny| Ok(Revenue));
+    // The fields the API may change at run time.
+    registry.with_params("acme/revenue@1", [ParamSpec::new("currency", "string", "Currency.")]);
+})
 ```
 
 An aggregator implements `init`, `add`, `merge` and `finish`; `merge` is
 required because the state of one key may be spread over several partitions.
-Sources and sinks implement `SourceConnector` and `SinkConnector`. A graph
-referencing an operator no worker knows is refused at submission.
+Sources and sinks implement `SourceConnector` and `SinkConnector`. An
+application whose graph references an operator it does not register refuses
+to start.
 
 ## Building graphs in Rust
 
-The JSON above is the wire and storage form. From Rust, a graph is built with
-`GraphBuilder`, each node holding a typed operator: a type implementing
+A graph is built with `GraphBuilder`, each node holding a typed operator: a type implementing
 `Operator`, whose `OP` names the registered operator and whose fields are its
 configuration. The factory deserializes the node configuration into the same
 type, so what the builder stores is what the worker runs.
@@ -240,11 +261,13 @@ graph.edge(decode, archive);                            // any DAG
 let spec: GraphSpec = graph.build()?;                   // ids checked here
 ```
 
-`build` checks identifiers and duplicate nodes; `Topology::build` checks the
-graph against the operators of a cluster (kinds, wiring, types). The `std/*`
-operators have their types (`Tumbling`, `Sliding`, `Count`, `Identity`,
-`KvSink`); `crates/streamd/src/demo.rs` builds the demonstration graphs this
-way.
+`build` checks identifiers and duplicate nodes; the application checks the
+graph against its operators when it starts (kinds, wiring, types,
+configurations). The `std/*` operators have their types (`Tumbling`,
+`Sliding`, `Count`, `Identity`, `KvSink`, and in `streaming::stock`
+`CountToJson`, `CountToGts` and the Pulsar nodes);
+`crates/streaming/examples/demo/graphs.rs` builds the demonstration graphs
+this way.
 
 ## Simulation
 
@@ -307,8 +330,8 @@ The gossip, the KV client and the Warp 10 sink have their own simulation
 tests. The Pulsar connector is tested against a real broker instead
 (`PULSAR_E2E_URL=pulsar://localhost:6650 cargo test -p streaming-pulsar`).
 
-`scripts/e2e-pulsar-redis.sh` runs the stock `streamd` on real
-infrastructure: a Pulsar topic with three partitions, a real Redis for the
+`scripts/e2e-pulsar-redis.sh` runs an application (example `pulsar-e2e`) on
+real infrastructure: a Pulsar topic with three partitions, a real Redis for the
 state, two workers found through gossip, the one running the pipeline killed
 with `SIGKILL` halfway through, and a check that the counts per key equal
 what was produced.
@@ -345,5 +368,8 @@ what was produced.
   A partition removed and later added again under the same index resumes
   from the state of the old one (Pulsar only ever adds partitions).
 - Changing a node's configuration restarts the graph's slices (state is
-  kept).
+  kept). A change that makes the state meaningless, such as a window's size,
+  is not told apart yet: the state already accumulated is kept as it is.
+- A graph changes only with a new version of the application. During a
+  deployment, an old worker that restarts publishes its graphs again.
 - Not yet run against a real Materia KV or a real Warp 10.

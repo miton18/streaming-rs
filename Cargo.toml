@@ -11,7 +11,7 @@ members = [
     "crates/streaming-openapi",
     "crates/streaming-openapi-macros",
     "crates/streaming-api",
-    "crates/streamd",
+    "crates/streaming",
 ]
 
 [workspace.package]

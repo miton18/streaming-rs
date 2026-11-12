@@ -101,6 +101,11 @@ pub struct GraphIndexEntry {
     /// then this entry.
     #[serde(default)]
     pub deleting: bool,
+    /// Set when the code of the workers no longer declares the graph: it is
+    /// stopped and its state is kept, until it is deleted or the code
+    /// declares it again.
+    #[serde(default)]
+    pub orphan: bool,
 }
 
 /// Run state requested for a graph.

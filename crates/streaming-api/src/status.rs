@@ -383,6 +383,9 @@ pub struct GraphDetail {
     pub edges: Vec<EdgeView>,
     /// Slices.
     pub slices: Vec<SliceView>,
+    /// Whether the code of the workers no longer declares the graph: it is
+    /// stopped, and can only be deleted.
+    pub orphan: bool,
     /// Every actor of the graph on alive workers, commit actors included.
     #[serde(skip)]
     pub total_actors: usize,
@@ -400,6 +403,8 @@ pub struct GraphSummary {
     pub version: u64,
     /// Desired run state.
     pub state: RunState,
+    /// Whether the code of the workers no longer declares the graph.
+    pub orphan: bool,
     /// Node count.
     pub nodes: usize,
     /// Slice count (see [`GraphDetail::slices`]).
@@ -444,6 +449,7 @@ pub fn graph_summary(detail: &GraphDetail, updated_ms: Timestamp) -> GraphSummar
         graph: detail.graph.clone(),
         version: detail.version,
         state: detail.state,
+        orphan: detail.orphan,
         nodes: detail.nodes.len(),
         slices: detail.slices.len(),
         actors: detail.total_actors,
@@ -831,6 +837,7 @@ pub fn graph_detail(
         nodes,
         edges,
         slices,
+        orphan: false,
         total_actors,
     }
 }
@@ -1624,6 +1631,7 @@ mod tests {
             version: 1,
             updated_ms: 0,
             deleting: false,
+            orphan: false,
         };
         let index = [entry("acme", "a"), entry("acme", "b"), entry("globex", "c")];
         let usage = |actors, rate| TenantUsage {

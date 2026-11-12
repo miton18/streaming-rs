@@ -743,6 +743,7 @@ mod tests {
                 version: spec_version,
                 updated_ms: 0,
                 deleting: false,
+                orphan: false,
             },
         )
         .await
@@ -965,6 +966,7 @@ mod tests {
                 version: 1,
                 updated_ms: 0,
                 deleting: false,
+                orphan: false,
             },
         )
         .await

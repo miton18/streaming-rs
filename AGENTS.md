@@ -10,7 +10,8 @@ the HTTP contract. This file holds what they do not: the decisions, the
 invariants, how to verify, and what is still open.
 
 **Status.** `main` builds, lints and passes every test. A standalone
-demonstrator (`streamd standalone`) runs on the owner's workstation. Nothing
+demonstrator (`cargo run -p streaming --example demo -- standalone`) runs on
+the owner's workstation. Nothing
 is deployed in production; the on-disk formats may still change freely.
 
 ## Working with the owner
@@ -25,7 +26,7 @@ is deployed in production; the on-disk formats may still change freely.
   young, it is not severe enough"*. A green run is not an argument. Measure
   the harness (mutation test), then trust it.
 - Error messages are for people: never the `Debug` form of a value in a log or
-  on stderr (`streamd` reports fatal errors as `error: <Display>`).
+  on stderr (`App::main` reports fatal errors as `error: <Display>`).
 - Never write a model identifier in commits, code or documents.
 
 ## What the owner asked for, in order
@@ -48,6 +49,24 @@ last session: backpressure must reach the source across an aggregate;
 simulate Pulsar partitions being added and removed; tell a sink slowed by
 its destination from one that lacks CPU; a UI to design a pipeline.
 
+**Then the owner reversed the graph model (2026-11-12): the code is the
+truth.** streaming-rs is an SDK, not a daemon: an application declares its
+tenants, operators and graphs in Rust (`streaming::App`), one binary holds
+every graph of a cluster and every worker runs the same one (modulo the time
+a Clever Cloud deployment takes). Each worker publishes the graphs of its code
+into the store when it starts; the store keeps state, run states, paused
+nodes and the configuration fields operators *expose* (their `ParamSpec`s),
+which the API and the UI may change, a change restarting the node. Creating
+and editing graphs through the API or the UI is gone (the designer too);
+deleting only applies to a graph the code no longer declares. The API and the UI are served by every worker started with `--listen`.
+Agreed next steps: a **topology fingerprint** carried by instances and
+commits, so that an old binary still running during a deployment steps aside
+instead of writing (it is a protocol precaution: it comes with its mutant);
+later, telling apart exposed parameters that break the state (a window's
+size) from those a restart absorbs. The comparison with Flink, Beam, Kafka
+Streams, Temporal and others that led there is a Claude Doc of the project,
+"Graphes : représentation stockée ou code ?".
+
 ## Layout
 
 | Crate | Role |
@@ -61,7 +80,7 @@ its destination from one that lacks CPU; a UI to design a pipeline.
 | `streaming-pulsar` | `std/pulsar-source@1`, `std/pulsar-sink@1` on Magnetar |
 | `streaming-api` | axum API, status aggregation, embedded UI in `ui/` (vanilla JS) |
 | `streaming-openapi` (+ `-macros`) | `#[route(GET, "/path")]` on a handler: registers it and derives its OpenAPI 3.2 operation from the signature |
-| `streamd` | The binary: `standalone` (demo cluster in one process) and `worker` |
+| `streaming` | The SDK: `App` (tenants, operators, graphs; publication at start; the `standalone` and `worker` commands), stock operators (`stock`), examples `demo` (the two demonstration graphs) and `pulsar-e2e` |
 
 Rust 1.95 minimum, edition 2024. Everything that does I/O is generic over
 `moonpool_core::Providers`: use `moonpool_core::select!`, never
@@ -174,7 +193,7 @@ simulations make a run last days, and test the engine with the simulation:
 cargo mutants --profile mutants -p streaming-gossip -p streaming-kv-redis
 cargo mutants --profile mutants -f 'crates/streaming-runtime/**' \
     --test-package streaming-runtime,streaming-sim --timeout 180
-cargo mutants -p streaming-core -p streaming-api -p streaming-warp10 -p streaming-pulsar -p streamd
+cargo mutants -p streaming-core -p streaming-api -p streaming-warp10 -p streaming-pulsar -p streaming
 ```
 `scripts/e2e-pulsar-redis.sh` runs real Pulsar + Redis + two workers with a
 `kill -9`; `PULSAR_E2E_URL=pulsar://... cargo test -p streaming-pulsar`.
@@ -247,14 +266,14 @@ log them. A new error case gets a new code, never a reworded old one.
 
 ## Running and the UI
 
-`cargo run --release -p streamd -- standalone` starts three in-memory
-workers, two demo graphs (`acme/count-per-key`, `globex/clicks`) and the UI
-on `http://127.0.0.1:8080`. Views: overview, cluster, catalogue, graph
-(topology, metrics, bottleneck, results), and **Concevoir** (`#/design`), the
-pipeline designer built from the catalogue's `ParamSpec`s (a `choices` list
-becomes a drop-down, the `json` kind a JSON field), and **API** (`#/api`), a
-viewer of `/api/v1/openapi.json` (operations by tag, schema trees, a form to
-try GET operations). Every connector describes
+`cargo run --release -p streaming --example demo -- standalone` starts
+three in-memory workers, two demo graphs (`acme/count-per-key`,
+`globex/clicks`) and the UI on `http://127.0.0.1:8080`. Views: overview,
+cluster, catalogue, graph (topology, metrics, bottleneck, results; the side
+panel of a node edits the fields its operator exposes, built from the
+catalogue's `ParamSpec`s, a `choices` list becoming a drop-down), and **API**
+(`#/api`), a viewer of `/api/v1/openapi.json` (operations by tag, schema
+trees, a form to try GET operations). Every connector describes
 its parameters; a test per connector checks the descriptions against the
 parser (names accepted, required flags, defaults, choices).
 
@@ -263,8 +282,8 @@ Observability vocabulary: an actor is *busy*, *idle* or *backpressured*;
 worst busy and the worst backpressure over its instances. The bottleneck
 says `limitedBy`: `destination`, `work` or `store`.
 
-After changing anything under `crates/streaming-api/ui/`, rebuild `streamd`
-(the UI is embedded) and check it in a real browser.
+After changing anything under `crates/streaming-api/ui/`, rebuild the
+application (the UI is embedded) and check it in a real browser.
 
 ## Known limits and open questions
 
@@ -291,12 +310,26 @@ After changing anything under `crates/streaming-api/ui/`, rebuild `streamd`
   encoding and puts the HTTP client behind a feature.
 - The Pulsar sink is at-least-once (emit id in a property); messages it
   writes carry a wrong publish time (Magnetar's moonpool engine clock).
-- **Tenants are created explicitly** (`PUT /api/v1/tenants/{tenant}`, one
-  `HSETNX` on `cluster:tenants`, never overwritten; a retry with the same
-  display name answers 200). Submitting a graph to a tenant that was not
-  created is a 404; only the API checks it, the runtime never reads
-  `cluster:tenants`. The designer creates a missing tenant before deploying.
-  There is no tenant deletion or renaming yet.
+- **Tenants are declared by the code** and created by the first worker that
+  publishes them (one `HSETNX` on `cluster:tenants`, never overwritten: a
+  display name changed in the code keeps the stored one, which the worker
+  says). `PUT /api/v1/tenants/{tenant}` still creates one the code does not
+  declare. Only publication checks a graph's tenant; the runtime never
+  reads `cluster:tenants`. There is no tenant deletion or renaming yet.
+- **Publication** (`streaming_api::control::publish`) keeps the code's
+  description in `t:..:g:..:code`, lays the API's fields
+  (`t:..:g:..:overrides`, per node) over it, and stores the result as a new
+  version only when it differs. A field the operator no longer exposes is
+  not applied (the worker says so). A graph in the store but not in the code
+  becomes an *orphan* (`GraphIndexEntry.orphan`): stopped, state kept, every
+  write refused but `DELETE`, which is refused for the others. This was
+  chosen over deleting it at once, and stated to the owner, not explicitly
+  confirmed: deleting a state cannot be undone, and a worker running an
+  older binary must not be able to do it by starting. An orphan the code
+  declares again runs again on its state; a graph being deleted when the
+  code brings it back waits for the next start. Until the fingerprint
+  exists, an old binary restarting during a deployment publishes its old
+  graphs again and stops the graphs only the new code has.
 - Never run against a real Materia KV or a real Warp 10. No quotas, fair
   scheduling or API authentication.
 - The owner asked how to design interfaces with comments on components: a

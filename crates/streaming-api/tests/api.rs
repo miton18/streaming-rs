@@ -8,12 +8,16 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicI64, Ordering},
 };
-use streaming_api::{ApiConfig, ApiState, router};
+use streaming_api::{
+    ApiConfig, ApiState,
+    control::{self, ControlError, Publication},
+    router,
+};
 use streaming_core::{
-    DynKv, GraphKey, MemKv, OpDescriptor, OpKind, OpRef, Registry, TypeTag,
+    Clock, DynKv, GraphKey, GraphSpec, MemKv, OpDescriptor, OpKind, OpRef, ParamSpec, Registry, TypeTag,
     control::{
         ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, GraphPlan, Load, MemberInfo, OutputRow,
         Placement, RunState, SliceSnapshot, TenantRecord, TenantUsage, WorkerSnapshot,
@@ -136,16 +140,27 @@ struct Env {
     mem: Arc<MemKv>,
     clock: Arc<AtomicI64>,
     app: Router,
+    /// The graphs of the code, as the workers would publish them.
+    code: Mutex<Vec<GraphSpec>>,
 }
 
 fn descriptor(op: &str, kind: OpKind) -> OpDescriptor {
+    // The parameters the fake operators expose.
+    let params = match op {
+        "t/src@1" => vec![
+            ParamSpec::new("topic", "string", "Topic."),
+            ParamSpec::new("rate", "integer", "Records per second."),
+        ],
+        "t/key@1" => vec![ParamSpec::new("by", "string", "Field.")],
+        _ => Vec::new(),
+    };
     OpDescriptor {
         op: OpRef::new(op).unwrap(),
         kind,
         input: TypeTag::Any,
         output: TypeTag::Any,
         description: format!("fake {op}"),
-        params: Vec::new(),
+        params,
     }
 }
 
@@ -191,7 +206,30 @@ impl Env {
             mem,
             clock,
             app: router(state),
+            code: Mutex::new(Vec::new()),
         }
+    }
+
+    fn now(&self) -> i64 {
+        self.clock.load(Ordering::SeqCst)
+    }
+
+    /// Publish `graphs` as the code of the workers, the way a starting worker
+    /// does.
+    async fn publish(&self, graphs: Vec<GraphSpec>) -> Result<Publication, ControlError> {
+        let catalog = control::load_catalog(self.kv.as_ref()).await?;
+        let clock = self.clock.clone();
+        let clock = move || clock.load(Ordering::SeqCst);
+        *self.code.lock().unwrap() = graphs.clone();
+        control::publish(self.kv.as_ref(), &clock as &dyn Clock, &catalog, &[], &graphs).await
+    }
+
+    /// Add a graph to the code and publish it; returns its version.
+    async fn put_spec(&self, spec: GraphSpec) -> Publication {
+        let mut graphs = self.code.lock().unwrap().clone();
+        graphs.retain(|known| known.key() != spec.key());
+        graphs.push(spec);
+        self.publish(graphs).await.unwrap()
     }
 
     async fn call(&self, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -235,14 +273,14 @@ impl Env {
             .map_or(0, |b| String::from_utf8(b).unwrap().parse().unwrap())
     }
 
-    async fn put_graph(&self, name: &str) -> (StatusCode, Value) {
-        self.call(
-            Method::PUT,
-            &format!("/api/v1/tenants/acme/graphs/{name}"),
-            Some(graph_body(name)),
-        )
-        .await
+    /// Add the graph `acme/<name>` of [`graph_body`] to the code.
+    async fn put_graph(&self, name: &str) -> Publication {
+        self.put_spec(spec(graph_body(name))).await
     }
+}
+
+fn spec(body: Value) -> GraphSpec {
+    serde_json::from_value(body).unwrap()
 }
 
 fn graph_body(name: &str) -> Value {
@@ -461,23 +499,32 @@ async fn catalog_is_sorted_by_reference() {
 }
 
 #[tokio::test]
-async fn put_creates_then_bumps_the_version_and_the_epoch() {
+async fn publishing_stores_what_changed_and_bumps_the_epoch() {
     let env = Env::new().await;
     assert_eq!(env.epoch().await, 0);
-    let (status, body) = env.put_graph("g").await;
-    assert_eq!((status, body), (StatusCode::OK, json!({"version": 1})));
+    let publication = env.put_graph("g").await;
+    assert_eq!(publication.updated, [(gk("g"), 1)]);
     assert_eq!(env.epoch().await, 1);
 
     // Everything the contract says was written.
-    let spec: Value = serde_json::from_slice(&env.kv.get(&keys::graph_spec(&gk("g"))).await.unwrap().unwrap()).unwrap();
-    assert_eq!(spec["version"], 1);
+    let stored: Value =
+        serde_json::from_slice(&env.kv.get(&keys::graph_spec(&gk("g"))).await.unwrap().unwrap()).unwrap();
+    assert_eq!(stored["version"], 1);
+    let code: Value = serde_json::from_slice(&env.kv.get(&keys::graph_code(&gk("g"))).await.unwrap().unwrap()).unwrap();
+    assert_eq!(code["nodes"], stored["nodes"]);
     let desired: DesiredState = env.kv.get_json(&keys::graph_desired(&gk("g"))).await.unwrap().unwrap();
     assert_eq!(desired.state, RunState::Running);
     assert_eq!(desired.updated_ms, NOW);
     let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
     assert_eq!((entry.version, entry.deleting), (1, false));
 
-    // An existing desired state is kept.
+    // A worker starting with the same code changes nothing.
+    let publication = env.put_graph("g").await;
+    assert_eq!(publication.unchanged, [gk("g")]);
+    assert!(publication.updated.is_empty());
+    assert_eq!(env.epoch().await, 1);
+
+    // An existing desired state is kept by a new version of the code.
     env.call(
         Method::POST,
         "/api/v1/tenants/acme/graphs/g/state",
@@ -485,8 +532,10 @@ async fn put_creates_then_bumps_the_version_and_the_epoch() {
     )
     .await;
     env.clock.store(NOW + 10, Ordering::SeqCst);
-    let (_, body) = env.put_graph("g").await;
-    assert_eq!(body, json!({"version": 2}));
+    let mut changed = graph_body("g");
+    changed["nodes"][0]["config"]["rate"] = json!(20);
+    let publication = env.put_spec(spec(changed)).await;
+    assert_eq!(publication.updated, [(gk("g"), 2)]);
     let desired: DesiredState = env.kv.get_json(&keys::graph_desired(&gk("g"))).await.unwrap().unwrap();
     assert_eq!(desired.state, RunState::Paused);
     let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
@@ -495,69 +544,45 @@ async fn put_creates_then_bumps_the_version_and_the_epoch() {
 }
 
 #[tokio::test]
-async fn put_rejects_invalid_input_with_a_message() {
+async fn graphs_cannot_be_written_through_the_api() {
+    let env = Env::new().await;
+    env.put_graph("g").await;
+    let uri = "/api/v1/tenants/acme/graphs/g";
+    let (status, answer) = env.call(Method::PUT, uri, Some(graph_body("g"))).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(answer["code"], "METHOD_NOT_ALLOWED");
+    // A graph of the code is not deleted: it would come back empty.
+    let (status, answer) = env.call(Method::DELETE, uri, None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(answer["code"], "GRAPH_DECLARED_BY_CODE");
+    assert_eq!(answer["context"], json!({"tenant": "acme", "graph": "g"}));
+    let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
+    assert!(!entry.deleting);
+    assert_eq!(env.epoch().await, 1);
+}
+
+#[tokio::test]
+async fn publishing_refuses_a_graph_its_operators_do_not_fit() {
     let env = Env::new().await;
     // Unknown operator.
     let mut body = graph_body("g");
     body["nodes"][0]["op"] = json!("t/nope@1");
-    let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(answer["code"], "OPERATOR_UNKNOWN");
-    assert_eq!(answer["context"], json!({"node": "events", "op": "t/nope@1"}));
+    let error = env.publish(vec![spec(body)]).await.unwrap_err();
     assert_eq!(
-        answer["message"],
+        error.to_string(),
         "node `events` references unknown operator `t/nope@1`"
     );
 
     // Wiring error.
     let mut body = graph_body("g");
     body["edges"] = json!([["events", "key"]]);
-    let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(answer["message"].as_str().unwrap().contains("key"), "{answer}");
-    assert!(answer["code"].as_str().unwrap().starts_with("WIRING_"), "{answer}");
+    let error = env.publish(vec![spec(body)]).await.unwrap_err();
+    assert!(matches!(error, ControlError::InvalidGraph(_)), "{error}");
 
-    // Body for another graph, another tenant.
-    let (status, answer) = env
-        .call(Method::PUT, "/api/v1/tenants/acme/graphs/other", Some(graph_body("g")))
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(answer["code"], "GRAPH_KEY_MISMATCH");
-    assert_eq!(
-        answer["context"],
-        json!({"tenant": "acme", "graph": "other", "bodyTenant": "acme", "bodyGraph": "g"})
-    );
-    let (status, _) = env
-        .call(Method::PUT, "/api/v1/tenants/globex/graphs/g", Some(graph_body("g")))
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    // Not a description at all / invalid id inside it.
-    let (status, answer) = env
-        .call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(json!({"x": 1})))
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(answer["code"], "BODY_UNKNOWN_FIELD");
-    assert_eq!(answer["context"]["field"], "x");
-    let mut body = graph_body("g");
-    body["nodes"][0]["id"] = json!("bad id");
-    let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(answer["code"], "BODY_INVALID");
-    let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", None).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(answer["code"], "BODY_NOT_JSON");
-    assert_eq!(answer["context"], json!({"line": 1, "column": 0}));
-
-    // Invalid id in the path.
-    let (status, answer) = env
-        .call(Method::PUT, "/api/v1/tenants/acme/graphs/bad.id", Some(graph_body("g")))
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(answer["code"], "IDENTIFIER_INVALID_CHARACTER");
-    assert_eq!(answer["context"], json!({"parameter": "graph", "value": "bad.id"}));
-
-    // Nothing was written.
+    // Nothing was written, even for the valid graphs published with them.
+    let mut body = graph_body("h");
+    body["nodes"][0]["op"] = json!("t/nope@1");
+    env.publish(vec![spec(graph_body("g")), spec(body)]).await.unwrap_err();
     assert_eq!(env.epoch().await, 0);
     assert!(
         env.mem
@@ -565,6 +590,44 @@ async fn put_rejects_invalid_input_with_a_message() {
             .iter()
             .all(|k| k.starts_with("cluster:catalog") || k == keys::CLUSTER_TENANTS)
     );
+}
+
+#[tokio::test]
+async fn publishing_creates_the_declared_tenants() {
+    let env = Env::new().await;
+    let clock = move || NOW;
+    let catalog = control::load_catalog(env.kv.as_ref()).await.unwrap();
+    let mut body = graph_body("g");
+    body["tenant"] = json!("initech");
+    let graph = spec(body);
+    // A graph of a tenant the code does not declare.
+    let error = control::publish(env.kv.as_ref(), &clock, &catalog, &[], std::slice::from_ref(&graph))
+        .await
+        .unwrap_err();
+    assert_eq!(error, ControlError::TenantNotCreated("initech".parse().unwrap()));
+    assert!(env.kv.hget(keys::CLUSTER_GRAPHS, "initech/g").await.unwrap().is_none());
+
+    let tenants = [("initech".parse().unwrap(), Some("Initech".to_owned()))];
+    let publication = control::publish(
+        env.kv.as_ref(),
+        &clock,
+        &catalog,
+        &tenants,
+        std::slice::from_ref(&graph),
+    )
+    .await
+    .unwrap();
+    assert_eq!(publication.created_tenants, ["initech".parse().unwrap()]);
+    let (_, body) = env.get("/api/v1/tenants/initech").await;
+    assert_eq!(body["displayName"], "Initech");
+    // Another display name in the code keeps the stored one.
+    let renamed = [("initech".parse().unwrap(), Some("Initech Ltd".to_owned()))];
+    let publication = control::publish(env.kv.as_ref(), &clock, &catalog, &renamed, &[graph])
+        .await
+        .unwrap();
+    assert_eq!(publication.renamed_tenants, ["initech".parse().unwrap()]);
+    let (_, body) = env.get("/api/v1/tenants/initech").await;
+    assert_eq!(body["displayName"], "Initech");
 }
 
 #[tokio::test]
@@ -663,27 +726,6 @@ async fn tenant_creation_rejects_invalid_input() {
 }
 
 #[tokio::test]
-async fn graphs_need_a_created_tenant() {
-    let env = Env::new().await;
-    let mut body = graph_body("g");
-    body["tenant"] = json!("initech");
-    let (status, answer) = env
-        .call(Method::PUT, "/api/v1/tenants/initech/graphs/g", Some(body.clone()))
-        .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(answer["code"], "TENANT_NOT_CREATED");
-    assert_eq!(answer["context"], json!({"tenant": "initech"}));
-    assert_eq!(env.epoch().await, 0);
-    assert!(env.kv.hget(keys::CLUSTER_GRAPHS, "initech/g").await.unwrap().is_none());
-
-    env.call(Method::PUT, "/api/v1/tenants/initech", Some(json!({}))).await;
-    let (status, answer) = env
-        .call(Method::PUT, "/api/v1/tenants/initech/graphs/g", Some(body))
-        .await;
-    assert_eq!((status, answer), (StatusCode::OK, json!({"version": 1})));
-}
-
-#[tokio::test]
 async fn graph_detail_joins_snapshots_and_computes_the_bottleneck() {
     let env = Env::new().await;
     env.put_graph("g").await;
@@ -743,15 +785,11 @@ async fn graph_list_and_tenants() {
     let env = Env::new().await;
     env.put_graph("g").await;
     env.put_graph("h").await;
-    env.call(
-        Method::PUT,
-        "/api/v1/tenants/globex/graphs/x",
-        Some({
-            let mut b = graph_body("x");
-            b["tenant"] = json!("globex");
-            b
-        }),
-    )
+    env.put_spec(spec({
+        let mut b = graph_body("x");
+        b["tenant"] = json!("globex");
+        b
+    }))
     .await;
     publish_worker(&env, "worker-a", NOW, Some(worker_snapshot("worker-a", "g"))).await;
 
@@ -830,26 +868,24 @@ async fn unknown_resources_are_404_and_bad_ids_400() {
 }
 
 #[tokio::test]
-async fn patch_config_merges_removes_and_versions() {
+async fn patch_config_sets_exposed_fields_over_the_code() {
     let env = Env::new().await;
     env.put_graph("g").await;
-    let (status, body) = env
-        .call(
-            Method::PATCH,
-            "/api/v1/tenants/acme/graphs/g/nodes/events/config",
-            Some(json!({"rate": 50, "topic": null, "new": {"a": [1]}})),
-        )
-        .await;
+    let config = "/api/v1/tenants/acme/graphs/g/nodes/events/config";
+    let (status, body) = env.call(Method::PATCH, config, Some(json!({"rate": 50}))).await;
     assert_eq!((status, body), (StatusCode::OK, json!({"version": 2})));
     let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
     assert_eq!(detail["version"], 2);
     assert_eq!(
         detail["spec"]["nodes"][0]["config"],
-        json!({"rate": 50, "new": {"a": [1]}})
+        json!({"topic": "events", "rate": 50})
     );
     // Other nodes untouched.
     assert_eq!(detail["spec"]["nodes"][1]["id"], "key");
     assert_eq!(env.epoch().await, 2);
+    // The code's description is kept apart.
+    let code: GraphSpec = env.kv.get_json(&keys::graph_code(&gk("g"))).await.unwrap().unwrap();
+    assert_eq!(code.nodes[0].config, json!({"topic": "events", "rate": 10}));
 
     // A node without configuration gets an object.
     let (status, _) = env
@@ -864,6 +900,50 @@ async fn patch_config_merges_removes_and_versions() {
     assert_eq!(detail["spec"]["nodes"][1]["config"], json!({"by": "user"}));
     assert_eq!(detail["version"], 3);
 
+    // A new version of the code keeps what was set through the API, and a
+    // worker restarting with the same code changes nothing.
+    let mut changed = graph_body("g");
+    changed["nodes"][0]["config"]["topic"] = json!("other");
+    let publication = env.put_spec(spec(changed)).await;
+    assert_eq!(publication.updated, [(gk("g"), 4)]);
+    let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
+    assert_eq!(
+        detail["spec"]["nodes"][0]["config"],
+        json!({"topic": "other", "rate": 50})
+    );
+    assert_eq!(detail["spec"]["nodes"][1]["config"], json!({"by": "user"}));
+    let epoch = env.epoch().await;
+    let mut changed = graph_body("g");
+    changed["nodes"][0]["config"]["topic"] = json!("other");
+    assert_eq!(env.put_spec(spec(changed)).await.unchanged, [gk("g")]);
+    assert_eq!(env.epoch().await, epoch);
+
+    // `null` goes back to the code's value.
+    let (status, _) = env.call(Method::PATCH, config, Some(json!({"rate": null}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
+    assert_eq!(
+        detail["spec"]["nodes"][0]["config"],
+        json!({"topic": "other", "rate": 10})
+    );
+    let overrides = env
+        .kv
+        .hgetall_json::<Value>(&keys::graph_overrides(&gk("g")))
+        .await
+        .unwrap();
+    assert_eq!(overrides, [("key".to_owned(), json!({"by": "user"}))]);
+    let epoch = env.epoch().await;
+
+    // Only the fields the operator exposes.
+    let (status, body) = env
+        .call(Method::PATCH, config, Some(json!({"rate": 1, "new": 2})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "NODE_FIELD_NOT_EXPOSED");
+    assert_eq!(
+        body["context"],
+        json!({"tenant": "acme", "graph": "g", "node": "events", "field": "new"})
+    );
     // Errors.
     let (status, _) = env
         .call(
@@ -873,26 +953,52 @@ async fn patch_config_merges_removes_and_versions() {
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, body) = env
-        .call(
-            Method::PATCH,
-            "/api/v1/tenants/acme/graphs/g/nodes/events/config",
-            Some(json!([1, 2])),
-        )
-        .await;
+    let (status, body) = env.call(Method::PATCH, config, Some(json!([1, 2]))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["message"].is_string());
-    assert_eq!(env.epoch().await, 3);
+    let (status, body) = env.call(Method::PATCH, config, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "BODY_NOT_JSON");
+    assert_eq!(body["context"], json!({"line": 1, "column": 0}));
+    assert_eq!(env.epoch().await, epoch);
+}
+
+#[tokio::test]
+async fn fields_the_code_no_longer_exposes_are_not_applied() {
+    let env = Env::new().await;
+    env.put_graph("g").await;
+    env.call(
+        Method::PATCH,
+        "/api/v1/tenants/acme/graphs/g/nodes/events/config",
+        Some(json!({"rate": 50})),
+    )
+    .await;
+    // A new version of the operator stops exposing `rate`.
+    let mut src = descriptor("t/src@1", OpKind::Source);
+    src.params.retain(|param| param.name != "rate");
+    env.kv.hset_json(keys::CLUSTER_CATALOG, "t/src@1", &src).await.unwrap();
+    let mut changed = graph_body("g");
+    changed["nodes"][0]["config"]["topic"] = json!("other");
+    let publication = env.put_spec(spec(changed)).await;
+    assert_eq!(
+        publication.ignored_overrides,
+        [(gk("g"), "events".parse().unwrap(), "rate".to_owned())]
+    );
+    let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
+    assert_eq!(
+        detail["spec"]["nodes"][0]["config"],
+        json!({"topic": "other", "rate": 10})
+    );
 }
 
 #[tokio::test]
 async fn patch_revalidates_against_the_catalog() {
     let env = Env::new().await;
     env.put_graph("g").await;
-    // The operator disappeared from the catalog: the patched description is
-    // rejected like a PUT.
+    // An operator disappeared from the catalog: the patched description is
+    // rejected.
     env.kv
-        .hdel(keys::CLUSTER_CATALOG, vec!["t/src@1".to_owned()])
+        .hdel(keys::CLUSTER_CATALOG, vec!["t/win@1".to_owned()])
         .await
         .unwrap();
     let (status, body) = env
@@ -903,7 +1009,14 @@ async fn patch_revalidates_against_the_catalog() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["message"].as_str().unwrap().contains("unknown operator"));
+    assert_eq!(body["code"], "OPERATOR_UNKNOWN");
+    assert!(
+        env.kv
+            .hgetall(&keys::graph_overrides(&gk("g")))
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -962,26 +1075,84 @@ async fn state_changes() {
 }
 
 #[tokio::test]
-async fn delete_marks_the_graph_deleting() {
+async fn a_graph_the_code_no_longer_has_is_stopped_and_keeps_its_state() {
     let env = Env::new().await;
     env.put_graph("g").await;
+    env.put_graph("h").await;
+    let uri = "/api/v1/tenants/acme/graphs/g";
+    env.call(
+        Method::PATCH,
+        &format!("{uri}/nodes/events/config"),
+        Some(json!({"rate": 50})),
+    )
+    .await;
     env.clock.store(NOW + 99, Ordering::SeqCst);
-    let (status, _) = env.call(Method::DELETE, "/api/v1/tenants/acme/graphs/g", None).await;
-    assert_eq!(status, StatusCode::OK);
+    let epoch = env.epoch().await;
+    let publication = env.publish(vec![spec(graph_body("h"))]).await.unwrap();
+    assert_eq!(publication.orphaned, [gk("g")]);
+    assert_eq!(publication.unchanged, [gk("h")]);
     let desired: DesiredState = env.kv.get_json(&keys::graph_desired(&gk("g"))).await.unwrap().unwrap();
     assert_eq!(desired.state, RunState::Stopped);
     let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
+    assert!(entry.orphan && !entry.deleting);
+    assert_eq!(entry.updated_ms, env.now());
+    assert_eq!(env.epoch().await, epoch + 1);
+    let (_, detail) = env.get(uri).await;
+    assert_eq!((&detail["orphan"], &detail["state"]), (&json!(true), &json!("stopped")));
+    let (_, list) = env.get("/api/v1/tenants/acme/graphs").await;
+    assert_eq!(list["graphs"][0]["orphan"], true);
+    assert_eq!(list["graphs"][1]["orphan"], false);
+
+    // Another worker with the same code says so and writes nothing.
+    let publication = env.publish(vec![spec(graph_body("h"))]).await.unwrap();
+    assert_eq!(publication.orphans, [gk("g")]);
+    assert!(publication.orphaned.is_empty());
+    assert_eq!(env.epoch().await, epoch + 1);
+
+    // An orphan can only be deleted.
+    for (method, path, body) in [
+        (Method::POST, "/state", Some(json!({"state": "running"}))),
+        (Method::POST, "/nodes/out/pause", None),
+        (Method::PATCH, "/nodes/events/config", Some(json!({"rate": 1}))),
+    ] {
+        let (status, body) = env.call(method, &format!("{uri}{path}"), body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}");
+        assert_eq!(body["code"], "GRAPH_NOT_IN_CODE", "{path}");
+    }
+    assert_eq!(env.epoch().await, epoch + 1);
+
+    // Back in the code: it runs again, on its state and with what was set
+    // through the API.
+    let publication = env.put_graph("g").await;
+    assert_eq!(publication.restored, [(gk("g"), 3)]);
+    let (_, detail) = env.get(uri).await;
+    assert_eq!(
+        (&detail["orphan"], &detail["state"]),
+        (&json!(false), &json!("running"))
+    );
+    assert_eq!(detail["spec"]["nodes"][0]["config"]["rate"], 50);
+}
+
+#[tokio::test]
+async fn deleting_an_orphan_graph_removes_it_for_good() {
+    let env = Env::new().await;
+    env.put_graph("g").await;
+    env.publish(Vec::new()).await.unwrap();
+    env.clock.store(NOW + 99, Ordering::SeqCst);
+    let (status, body) = env.call(Method::DELETE, "/api/v1/tenants/acme/graphs/g", None).await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"deleting": true})));
+    let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
     assert!(entry.deleting);
     assert_eq!(entry.updated_ms, NOW + 99);
-    assert_eq!(env.epoch().await, 2);
+    assert_eq!(env.epoch().await, 3);
     // The spec is still there for the controller.
     assert!(env.kv.get(&keys::graph_spec(&gk("g"))).await.unwrap().is_some());
 
-    // A deleting graph cannot be reconfigured.
-    let (status, body) = env.put_graph("g").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["message"].as_str().unwrap().contains("being deleted"));
-    let (status, _) = env
+    // Back in the code before the deletion is over: published by a later
+    // start.
+    let publication = env.put_graph("g").await;
+    assert_eq!(publication.still_deleting, [gk("g")]);
+    let (status, body) = env
         .call(
             Method::POST,
             "/api/v1/tenants/acme/graphs/g/state",
@@ -989,6 +1160,7 @@ async fn delete_marks_the_graph_deleting() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["message"].as_str().unwrap().contains("being deleted"));
 }
 
 #[tokio::test]
@@ -1091,11 +1263,11 @@ async fn every_write_bumps_the_epoch() {
     env.call(Method::PUT, "/api/v1/tenants/initech", Some(json!({}))).await;
     check!("tenant");
     env.put_graph("g").await;
-    check!("put");
+    check!("publish");
     env.call(
         Method::PATCH,
         "/api/v1/tenants/acme/graphs/g/nodes/events/config",
-        Some(json!({"a": 1})),
+        Some(json!({"rate": 1})),
     )
     .await;
     check!("patch");
@@ -1112,6 +1284,8 @@ async fn every_write_bumps_the_epoch() {
     )
     .await;
     check!("state");
+    env.publish(Vec::new()).await.unwrap();
+    check!("removal from the code");
     env.call(Method::DELETE, "/api/v1/tenants/acme/graphs/g", None).await;
     check!("delete");
     // Reads do not.

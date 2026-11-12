@@ -133,6 +133,7 @@ impl Cluster {
                 version: 1,
                 updated_ms: 0,
                 deleting: false,
+                orphan: false,
             },
         )
         .await

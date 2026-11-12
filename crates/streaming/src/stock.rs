@@ -1,7 +1,6 @@
-//! Operators shipped with the stock `streamd` binary, beyond the connectors.
+//! Operators every application has, beyond the connectors.
 //!
-//! They are the glue that lets a common pipeline (read, key, window, count,
-//! write) be described in JSON without compiling a custom worker.
+//! They are the glue of a common pipeline (read, key, window, count, write).
 //!
 //! | reference | kind | types | configuration |
 //! |---|---|---|---|
@@ -65,6 +64,63 @@ impl Operator for CountToGts {
     const OP: &'static str = "std/count-to-gts@1";
 }
 
+/// `std/pulsar-source@1`: reads a Pulsar topic, one slice per partition.
+/// Only the main settings: the connector takes more (authentication, event
+/// time, deduplication), see `streaming-pulsar`.
+#[cfg(feature = "pulsar")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PulsarSource {
+    /// `pulsar://host:port` or `pulsar+ssl://host:port`.
+    pub service_url: String,
+    /// Topic, partitioned or not.
+    pub topic: String,
+    /// Subscription the cluster reads through.
+    pub subscription: String,
+}
+
+#[cfg(feature = "pulsar")]
+impl Operator for PulsarSource {
+    const OP: &'static str = "std/pulsar-source@1";
+}
+
+/// `std/pulsar-sink@1`: writes to a Pulsar topic (at least once).
+#[cfg(feature = "pulsar")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PulsarSink {
+    /// `pulsar://host:port` or `pulsar+ssl://host:port`.
+    pub service_url: String,
+    /// Topic.
+    pub topic: String,
+}
+
+#[cfg(feature = "pulsar")]
+impl Operator for PulsarSink {
+    const OP: &'static str = "std/pulsar-sink@1";
+}
+
+/// `std/pulsar-key@1`: groups Pulsar messages by their message key.
+#[cfg(feature = "pulsar")]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct PulsarKey;
+
+#[cfg(feature = "pulsar")]
+impl Operator for PulsarKey {
+    const OP: &'static str = "std/pulsar-key@1";
+}
+
+/// `std/count-to-pulsar@1`: turns a windowed count into a keyed Pulsar
+/// message with a JSON payload.
+#[cfg(feature = "pulsar")]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct CountToPulsar;
+
+#[cfg(feature = "pulsar")]
+impl Operator for CountToPulsar {
+    const OP: &'static str = "std/count-to-pulsar@1";
+}
+
 fn count_as_json(count: &Windowed<u64>) -> Value {
     json!({
         "key": count.key.display_lossy(),
@@ -98,12 +154,12 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
     #[cfg(feature = "pulsar")]
     {
         registry.register_key(
-            "std/pulsar-key@1",
+            PulsarKey::OP,
             "Groups Pulsar messages by their message key (empty when absent).",
             |message: &PulsarMessage| message.key.clone().unwrap_or_default(),
         );
         registry.register_map(
-            "std/count-to-pulsar@1",
+            CountToPulsar::OP,
             "Turns a windowed count into a keyed Pulsar message with a JSON payload.",
             |count: &Windowed<u64>| {
                 Some(PulsarOutput {
