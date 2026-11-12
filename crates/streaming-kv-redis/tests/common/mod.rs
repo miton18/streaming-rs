@@ -55,52 +55,64 @@ pub async fn start_redis(extra: &[&str]) -> Option<RealRedis> {
         eprintln!("NOTICE: redis-server binary not found, skipping real-redis test");
         return None;
     }
-    let port = free_port();
-    let child = Command::new("redis-server")
-        .args(["--port", &port.to_string(), "--bind", "127.0.0.1"])
-        .args(["--save", "", "--appendonly", "no"])
-        .args(extra)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn redis-server");
-    let addr = format!("127.0.0.1:{port}");
-    let guard = RealRedis {
-        child,
-        addr: addr.clone(),
-    };
-    for _ in 0..200 {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return Some(guard);
+    // Another process may take the port between [`free_port`] and the
+    // server's bind: the server then exits, and starts again on another port.
+    for _ in 0..20 {
+        let port = free_port();
+        let child = Command::new("redis-server")
+            .args(["--port", &port.to_string(), "--bind", "127.0.0.1"])
+            .args(["--save", "", "--appendonly", "no"])
+            .args(extra)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn redis-server");
+        let addr = format!("127.0.0.1:{port}");
+        let mut guard = RealRedis {
+            child,
+            addr: addr.clone(),
+        };
+        for _ in 0..200 {
+            if guard.child.try_wait().expect("poll redis-server").is_some() {
+                break;
+            }
+            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                return Some(guard);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("redis-server did not start listening on {addr}");
+    panic!("redis-server did not start listening");
 }
 
-/// Serve a `FakeRedis` on a free local port through the tokio providers.
+/// Serve a `FakeRedis` on a local port the system picks.
 ///
-/// Another process may take the port between [`free_port`] and the bind:
-/// a failed bind is retried on another port.
+/// The listener is bound before its port is known, so no other process can
+/// take the port in between, as it could with [`free_port`]. Cancelling the
+/// token closes the listener and every connection.
 pub async fn start_fake(fake: streaming_kv_redis::FakeRedis) -> (String, tokio_util::sync::CancellationToken) {
-    for _ in 0..20 {
-        let addr = format!("127.0.0.1:{}", free_port());
-        let token = tokio_util::sync::CancellationToken::new();
-        let (a, t, f) = (addr.clone(), token.clone(), fake.clone());
-        let server = tokio::spawn(async move { f.serve(moonpool_core::TokioProviders::new(), &a, t).await });
-        // The bind happens on the first poll of the task.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        if server.is_finished() {
-            continue;
-        }
-        for _ in 0..200 {
-            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-                // Let the readiness probe's own connection be counted and closed.
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                return (addr, token);
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a local port");
+    let addr = listener.local_addr().expect("local addr").to_string();
+    let token = tokio_util::sync::CancellationToken::new();
+    let stop = token.clone();
+    tokio::spawn(async move {
+        // Dropping the set aborts the connections it drives.
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return,
+                accepted = listener.accept() => {
+                    if let Ok((stream, _peer)) = accepted {
+                        let fake = fake.clone();
+                        connections.spawn(async move { fake.serve_stream(stream.compat()).await });
+                    }
+                }
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }
-    panic!("fake did not start");
+    });
+    (addr, token)
 }
