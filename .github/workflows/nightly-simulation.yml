@@ -5,8 +5,10 @@
 name: Nightly simulation
 
 on:
-  schedule:
-    - cron: "17 2 * * *" # 02:17 UTC, every day
+  # Paused while the account has no Actions minutes left: uncomment to resume.
+  # Meanwhile run `scripts/sim-sweep.sh` locally.
+  # schedule:
+  #   - cron: "17 2 * * *" # 02:17 UTC, every day
   workflow_dispatch:
     inputs:
       budget_minutes:
