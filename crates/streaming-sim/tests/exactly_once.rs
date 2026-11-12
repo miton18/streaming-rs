@@ -356,3 +356,20 @@ fn exactly_once_in_random_configurations() {
         "failing configurations (SIM_CONFIG_SEED, seeds): {failed:?}"
     );
 }
+
+#[test]
+fn exactly_once_with_rare_keys() {
+    // Each key is seen once or twice in a long window, so the accumulator of
+    // an epoch is rarely superseded by a later one: a record an instance
+    // inherits and fails to copy out is lost instead of being masked.
+    let scenario = Scenario {
+        duel: true,
+        keys: 1_000,
+        events: 1_500,
+        window: Duration::from_secs(6),
+        slide: Duration::from_secs(6),
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 30);
+    assert_clean(&report);
+}

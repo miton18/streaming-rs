@@ -1799,3 +1799,7 @@ fn start_actors<P: Providers>(
     shared.metrics.set_state(ActorState::Running);
     handles
 }
+
+#[cfg(test)]
+#[path = "slice_tests.rs"]
+mod tests;

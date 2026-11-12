@@ -30,6 +30,7 @@ struct Event {
 struct Gate {
     blocked: AtomicBool,
     written: AtomicU64,
+    batches: parking_lot::Mutex<Vec<usize>>,
 }
 
 #[async_trait]
@@ -39,6 +40,7 @@ impl SinkConnector for Gate {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         self.written.fetch_add(batch.len() as u64, Ordering::Relaxed);
+        self.batches.lock().push(batch.len());
         Ok(())
     }
 }
@@ -55,6 +57,28 @@ struct Cluster {
 
 impl Cluster {
     async fn start(settings: serde_json::Value) -> Self {
+        Self::with_graph(
+            settings,
+            serde_json::json!([
+                {"id": "events", "op": "test/log@1"},
+                {"id": "by-key", "op": "test/key@1"},
+                {"id": "win", "op": "std/tumbling@1", "config": {"size": "100ms"}},
+                {"id": "count", "op": "std/count@1"},
+                {"id": "counts", "op": "test/counts@1"},
+                {"id": "raw", "op": "test/raw@1"}
+            ]),
+            serde_json::json!([
+                ["events", "by-key"],
+                ["by-key", "win"],
+                ["win", "count"],
+                ["count", "counts"],
+                ["events", "raw"]
+            ]),
+        )
+        .await
+    }
+
+    async fn with_graph(settings: serde_json::Value, nodes: serde_json::Value, edges: serde_json::Value) -> Self {
         let kv: DynKv = MemKv::shared();
         let log = MemLog::with_retention(1, true);
         let counts = Arc::new(Gate::default());
@@ -94,18 +118,8 @@ impl Cluster {
             "graph": "g",
             "version": 1,
             "settings": settings,
-            "nodes": [
-                {"id": "events", "op": "test/log@1"},
-                {"id": "by-key", "op": "test/key@1"},
-                {"id": "win", "op": "std/tumbling@1", "config": {"size": "100ms"}},
-                {"id": "count", "op": "std/count@1"},
-                {"id": "counts", "op": "test/counts@1"},
-                {"id": "raw", "op": "test/raw@1"}
-            ],
-            "edges": [
-                ["events", "by-key"], ["by-key", "win"], ["win", "count"], ["count", "counts"],
-                ["events", "raw"]
-            ]
+            "nodes": nodes,
+            "edges": edges
         }))
         .unwrap();
         let graph = spec.key();
@@ -288,5 +302,35 @@ async fn a_drained_graph_stops_reading() {
     cluster.produce(10, 1);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(cluster.committed().await, Some(first));
+    cluster.stop().await;
+}
+
+/// One epoch costs one commit: once a first event is in, the source keeps
+/// reading for `linger` to fill its batch.
+#[tokio::test(flavor = "current_thread")]
+async fn an_epoch_lingers_to_fill_its_batch() {
+    let cluster = Cluster::start(serde_json::json!({"linger": "400ms"})).await;
+    cluster.produce(3, 1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cluster.produce(3, 1);
+    eventually("every event is written", async || {
+        cluster.raw.written.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    assert_eq!(*cluster.raw.batches.lock(), [6]);
+    cluster.stop().await;
+}
+
+/// No epoch holds more than `max_batch` events.
+#[tokio::test(flavor = "current_thread")]
+async fn an_epoch_holds_at_most_max_batch_events() {
+    let cluster = Cluster::start(serde_json::json!({"linger": "50ms", "max_batch": 4})).await;
+    cluster.produce(10, 1);
+    eventually("every event is written", async || {
+        cluster.raw.written.load(Ordering::Relaxed) == 10
+    })
+    .await;
+    let batches = cluster.raw.batches.lock().clone();
+    assert!(batches.iter().all(|&n| n <= 4), "{batches:?}");
     cluster.stop().await;
 }
