@@ -6,12 +6,12 @@ use moonpool_core::TokioProviders;
 use parking_lot::Mutex;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use streaming_core::{
-    Clock, DynKv, Emit, GraphSpec, MemKv, NoSecrets, Registry, SinkConnector, SinkError, SystemClock, TypeTag, Window,
-    Windowed, WorkerId,
+    Clock, DynKv, Emit, GraphSpec, Kv, KvError, MemKv, NoSecrets, Position, Registry, SinkConnector, SinkError,
+    SliceKey, SystemClock, TypeTag, Window, Windowed, WorkerId,
     control::{GraphIndexEntry, SliceSnapshot, WorkerSnapshot},
     datum, keys,
 };
-use streaming_runtime::{NoLoad, RuntimeEnv, Worker, WorkerConfig, builtin, memlog::MemLog};
+use streaming_runtime::{NoLoad, RuntimeEnv, Worker, WorkerConfig, builtin, inspect::slice_head, memlog::MemLog};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
@@ -42,13 +42,17 @@ impl SinkConnector for Collect {
 }
 
 fn spec() -> GraphSpec {
+    spec_idle_after("200ms")
+}
+
+fn spec_idle_after(idle_timeout: &str) -> GraphSpec {
     serde_json::from_value(serde_json::json!({
         "tenant": "acme",
         "graph": "count-per-key",
         "version": 1,
         "settings": {
             "maxOutOfOrderness": "50ms",
-            "idleTimeout": "200ms",
+            "idleTimeout": idle_timeout,
             "linger": "20ms",
             "flushInterval": "50ms",
             "gcGrace": "200ms",
@@ -210,6 +214,193 @@ async fn counts_every_record_exactly_once() {
     }
     assert!(leftovers().is_empty(), "window state left behind: {:?}", leftovers());
 
+    shutdown.cancel();
+    running.await.unwrap();
+}
+
+/// A store that answers, for the hashes it was given, with what they held
+/// earlier, until told to stop: what an instance sees when it reads a commit
+/// log just before another instance writes its last commit to it.
+struct Behind {
+    store: Arc<MemKv>,
+    earlier: Mutex<BTreeMap<String, Fields>>,
+}
+
+/// The fields of a hash.
+type Fields = Vec<(String, Vec<u8>)>;
+
+#[async_trait]
+impl Kv for Behind {
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, KvError> {
+        self.store.get(key).await
+    }
+    async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> {
+        self.store.set(key, value).await
+    }
+    async fn del(&self, keys: Vec<String>) -> Result<(), KvError> {
+        self.store.del(keys).await
+    }
+    async fn incr(&self, key: &str) -> Result<i64, KvError> {
+        self.store.incr(key).await
+    }
+    async fn hsetnx(&self, key: &str, field: &str, value: Vec<u8>) -> Result<bool, KvError> {
+        self.store.hsetnx(key, field, value).await
+    }
+    async fn hset(&self, key: &str, entries: Vec<(String, Vec<u8>)>) -> Result<(), KvError> {
+        self.store.hset(key, entries).await
+    }
+    async fn hget(&self, key: &str, field: &str) -> Result<Option<Vec<u8>>, KvError> {
+        self.store.hget(key, field).await
+    }
+    async fn hgetall(&self, key: &str) -> Result<Fields, KvError> {
+        if let Some(fields) = self.earlier.lock().get(key) {
+            return Ok(fields.clone());
+        }
+        self.store.hgetall(key).await
+    }
+    async fn hdel(&self, key: &str, fields: Vec<String>) -> Result<(), KvError> {
+        self.store.hdel(key, fields).await
+    }
+}
+
+fn registry(kv: &DynKv, log: &Arc<MemLog>, counts: &Arc<Collect>, raw: &Arc<Collect>) -> Registry<TokioProviders> {
+    let mut registry = Registry::<TokioProviders>::standard();
+    builtin::register(&mut registry, kv.clone());
+    {
+        let log = log.clone();
+        registry.register_source::<Event>("test/log@1", "", move |context, _| {
+            Ok(log.source(context.providers.clone()))
+        });
+    }
+    registry.register_key("test/key@1", "", |event: &Event| event.key.clone());
+    for (op, sink) in [("test/collect@1", counts.clone()), ("test/raw@1", raw.clone())] {
+        registry.register_sink(op, "", TypeTag::Any, move |_, _| {
+            Ok(sink.clone() as Arc<dyn SinkConnector>)
+        });
+    }
+    registry
+}
+
+fn start(kv: DynKv, registry: Registry<TokioProviders>) -> (CancellationToken, tokio::task::JoinHandle<()>) {
+    let mut config = WorkerConfig::new(WorkerId::new("worker-a").unwrap());
+    config.tick = Duration::from_millis(50);
+    config.controller_grace = Duration::ZERO;
+    config.restart_backoff = Duration::from_millis(100);
+    let worker = Worker::new(
+        RuntimeEnv {
+            providers: TokioProviders::new(),
+            kv,
+            clock: Arc::new(SystemClock),
+            secrets: Arc::new(NoSecrets),
+            registry: Arc::new(registry),
+        },
+        config,
+    )
+    .with_load_probe(Arc::new(NoLoad));
+    let shutdown = CancellationToken::new();
+    let running = tokio::spawn(worker.run(shutdown.clone()));
+    (shutdown, running)
+}
+
+/// An instance reads the commit log of its slice; the instance it replaces
+/// then commits and acknowledges the last records of the partition, which
+/// says nothing more. The new instance waits for records that will never
+/// come to it, behind a watermark that holds every window back: it must find
+/// out from the log that the slice went on without it, and start again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_slice_behind_what_another_instance_acknowledged_starts_again() {
+    let store = MemKv::shared();
+    let kv: DynKv = store.clone();
+    let log = MemLog::with_retention(1, true);
+    let counts = Arc::new(Collect::default());
+    let raw = Arc::new(Collect::default());
+    let slice: SliceKey = "acme/count-per-key/src.events.0".parse().unwrap();
+    let counted = || -> u64 {
+        counts
+            .seen
+            .lock()
+            .values()
+            .filter_map(|(_, value)| value.as_ref().map(|windowed| windowed.value))
+            .sum()
+    };
+    let committed = |upto: Position| {
+        let store = store.clone();
+        let slice = slice.clone();
+        async move {
+            for _ in 0..200 {
+                let head = slice_head(store.as_ref(), &slice).await.unwrap();
+                if head.and_then(|head| head.position) == Some(upto) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the slice did not commit up to {upto:?}");
+        }
+    };
+
+    // Long enough an idle timeout for the first instance to be stopped
+    // before it closes the window itself.
+    let (shutdown, running) = start(kv.clone(), registry(&kv, &log, &counts, &raw));
+    submit(&kv, &spec_idle_after("3s")).await;
+    let ts = SystemClock.now_ms();
+    let mut last = None;
+    for _ in 0..5 {
+        last = Some(log.append(0, ts, datum(Event { key: "user".into() })));
+    }
+    let first = last.unwrap();
+    committed(first).await;
+    let mut earlier = BTreeMap::new();
+    for key in [keys::slice_log(&slice), keys::slice_seal(&slice)] {
+        earlier.insert(key.clone(), store.hgetall(&key).await.unwrap());
+    }
+    for _ in 0..5 {
+        last = Some(log.append(0, ts, datum(Event { key: "user".into() })));
+    }
+    committed(last.unwrap()).await;
+    for _ in 0..200 {
+        if log.retained(0) == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(log.retained(0), 0, "the last records were not acknowledged");
+    shutdown.cancel();
+    running.await.unwrap();
+    assert_eq!(counted(), 0, "the first instance closed the window itself");
+
+    // The next instance reads the log as it was after the first records.
+    let behind = Arc::new(Behind {
+        store: store.clone(),
+        earlier: Mutex::new(earlier),
+    });
+    let (shutdown, running) = start(behind.clone(), registry(&kv, &log, &counts, &raw));
+    let worker = WorkerId::new("worker-a").unwrap();
+    let mut started = false;
+    for _ in 0..300 {
+        let snapshot: Option<WorkerSnapshot> = kv.get_json(&keys::worker_metrics(&worker)).await.unwrap();
+        started = snapshot.is_some_and(|snapshot| {
+            snapshot
+                .slices
+                .iter()
+                .any(|running| running.slice == slice.slice && running.position == Some(first))
+        });
+        if started {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(started, "the second instance did not start behind the first");
+    behind.earlier.lock().clear();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while counted() != 10 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the slice stayed behind what was acknowledged: {} of 10 counted",
+            counted()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     shutdown.cancel();
     running.await.unwrap();
 }

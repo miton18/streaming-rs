@@ -527,6 +527,15 @@ impl<P: Providers> Root<P> {
         position
     }
 
+    /// Whether the slice is still this instance's, `head` being the last
+    /// commit of its log: its own, or the one it started from.
+    fn owns(&self, head: Option<&CommitRecord>) -> bool {
+        match head {
+            None => self.start_epoch == 0,
+            Some(head) => head.owner == self.owner || head.epoch == self.start_epoch,
+        }
+    }
+
     async fn wait_commit(&mut self) {
         if self.committed.changed().await.is_err() {
             futures::future::pending::<()>().await;
@@ -774,6 +783,22 @@ async fn run_source<P: Providers>(
                             // Nothing left to read and nothing arrived for a while: let
                             // event time follow the wall clock so windows can close.
                             new_watermark = watermark.max(root.ctx.env.clock.now_ms().saturating_sub(out_of_orderness));
+                        } else {
+                            // Records lie beyond what this instance has read,
+                            // and none comes. If another instance read,
+                            // committed and acknowledged them after this one
+                            // read the log, none ever will, and no commit of
+                            // this instance will ever tell it that it lost
+                            // the slice: its watermark would hold every
+                            // window back until the partition speaks again.
+                            // Look at the log, and start again from it.
+                            last_idle_epoch = Some(now);
+                            let kv = root.ctx.env.kv.clone();
+                            let own = root.ctx.persist(|| state::read_log(kv.as_ref(), &root.ctx.key)).await?;
+                            if !root.owns(own.head()) {
+                                root.exit.finish(SliceExit::Fenced);
+                                return futures::future::pending().await;
+                            }
                         }
                     }
                     Err(error) => root.ctx.meter.metrics.error(error.to_string()),
@@ -977,11 +1002,7 @@ async fn run_emitter<P: Providers>(
             // window would then delete the very state we were reading. Its
             // commit comes first, so checking the log after the read settles it.
             let own = root.ctx.persist(|| state::read_log(kv.as_ref(), &root.ctx.key)).await?;
-            let ours = match own.head() {
-                None => root.start_epoch == 0,
-                Some(head) => head.owner == root.owner || head.epoch == root.start_epoch,
-            };
-            if !ours && !planted(Mutant::EmitWithoutOwnership) {
+            if !root.owns(own.head()) && !planted(Mutant::EmitWithoutOwnership) {
                 root.exit.finish(SliceExit::Fenced);
                 return futures::future::pending().await;
             }
