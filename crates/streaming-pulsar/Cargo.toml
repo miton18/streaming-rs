@@ -22,4 +22,4 @@ tracing.workspace = true
 magnetar = { package = "magnetar-driver", version = "1.8.0", default-features = false, features = ["moonpool", "crypto-ring"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "sync", "io-util"] }

@@ -1,6 +1,6 @@
 //! End-to-end tests against a real Pulsar broker.
 //!
-//! Skipped (they pass trivially, with a notice on stderr) unless
+//! Against the fake broker of `common` by default; against a real one when
 //! `PULSAR_E2E_URL` is set, e.g.
 //!
 //! ```sh
@@ -40,12 +40,15 @@ use streaming_pulsar::{
     EMIT_ID_PROPERTY, PulsarMessage, PulsarOutput, PulsarSink, SinkConfig, WriteStats, partition_topic,
 };
 
+mod common;
+
+/// The broker of `PULSAR_E2E_URL`, or else the fake one of `common`.
 fn broker() -> Option<String> {
-    let url = std::env::var("PULSAR_E2E_URL").ok();
-    if url.is_none() {
-        eprintln!("PULSAR_E2E_URL is not set: skipping the end-to-end test");
-    }
-    url
+    Some(std::env::var("PULSAR_E2E_URL").unwrap_or_else(|_| common::shared().url.clone()))
+}
+
+fn real_broker() -> bool {
+    std::env::var("PULSAR_E2E_URL").is_ok()
 }
 
 fn admin_addr() -> String {
@@ -78,6 +81,11 @@ fn unique(prefix: &str) -> String {
 
 /// Create a partitioned topic, returns its full name.
 fn partitioned_topic(namespace: &str, name: &str, partitions: u32) -> String {
+    if !real_broker() {
+        let topic = format!("persistent://{namespace}/{name}");
+        common::shared().partitioned(&topic, partitions);
+        return topic;
+    }
     let (status, response) = admin(
         "PUT",
         &format!("/admin/v2/persistent/{namespace}/{name}/partitions"),
