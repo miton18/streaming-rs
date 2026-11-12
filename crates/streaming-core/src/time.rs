@@ -10,7 +10,7 @@ pub type Timestamp = i64;
 /// A half-open event-time interval `[start, end)`.
 ///
 /// Windows order by `(end, start)`: the order in which they close.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Window {
     /// Inclusive start.
     pub start: Timestamp,
@@ -97,6 +97,27 @@ pub fn format_duration(duration: Duration) -> String {
         }
     }
     format!("{ms}ms")
+}
+
+/// JSON Schema of a duration in the [`duration_str`] form, for
+/// `#[schemars(with = "DurationText")]`: a text such as `"5m"`, or a number of
+/// milliseconds on input.
+pub struct DurationText;
+
+impl schemars::JsonSchema for DurationText {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Duration".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "A duration: a number followed by `ms`, `s`, `m`, `h` or `d` (`\"5m\"`), or a number of milliseconds.",
+            "anyOf": [
+                {"type": "string", "pattern": "^[0-9]+(ms|s|m|h|d)$"},
+                {"type": "integer", "minimum": 0}
+            ]
+        })
+    }
 }
 
 /// `#[serde(with = "streaming_core::time::duration_str")]` for config structs.

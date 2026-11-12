@@ -40,6 +40,24 @@ fn check(kind: &'static str, value: &str, extra: &[char]) -> Result<(), IdError>
     Ok(())
 }
 
+/// The JSON Schema of an identifier checked by [`check`].
+fn id_schema(kind: &str, extra: &[char]) -> schemars::Schema {
+    // Inside a character class, `.`, `/` and `@` need no escape; `-` last is
+    // literal.
+    let extra_class: String = extra.iter().collect();
+    schemars::json_schema!({
+        "type": "string",
+        "description": format!("A {kind}: 1 to 128 letters, digits, `-` or `_`{}.", extra_text(extra)),
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": format!("^[A-Za-z0-9_{extra_class}-]+$"),
+    })
+}
+
+fn extra_text(extra: &[char]) -> String {
+    extra.iter().map(|c| format!(", `{c}`")).collect()
+}
+
 macro_rules! string_id {
     ($(#[$m:meta])* $name:ident, $kind:literal, [$($extra:literal),*]) => {
         $(#[$m])*
@@ -59,6 +77,16 @@ macro_rules! string_id {
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                id_schema($kind, &[$($extra),*])
             }
         }
 
@@ -243,6 +271,20 @@ impl Serialize for SliceId {
     }
 }
 
+impl schemars::JsonSchema for SliceId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SliceId".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A slice: `src.<node>.<partition>` (one source partition) or `agg.<node>` (the emitter of an aggregate).",
+            "pattern": "^(src\\.[A-Za-z0-9_-]+\\.[0-9]+|agg\\.[A-Za-z0-9_-]+)$",
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for SliceId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
@@ -297,6 +339,19 @@ impl FromStr for SliceKey {
 impl Serialize for SliceKey {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
+    }
+}
+
+impl schemars::JsonSchema for SliceKey {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SliceKey".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A slice of a graph of a tenant: `<tenant>/<graph>/<slice>`.",
+        })
     }
 }
 

@@ -26,6 +26,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 pub mod control;
 mod routes;
+pub use routes::openapi;
 pub mod status;
 mod ui;
 

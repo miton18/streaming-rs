@@ -60,6 +60,7 @@ its destination from one that lacks CPU; a UI to design a pipeline.
 | `streaming-warp10` | `std/warp10-sink@1` |
 | `streaming-pulsar` | `std/pulsar-source@1`, `std/pulsar-sink@1` on Magnetar |
 | `streaming-api` | axum API, status aggregation, embedded UI in `ui/` (vanilla JS) |
+| `streaming-openapi` (+ `-macros`) | `#[route(GET, "/path")]` on a handler: registers it and derives its OpenAPI 3.2 operation from the signature |
 | `streamd` | The binary: `standalone` (demo cluster in one process) and `worker` |
 
 Rust 1.95 minimum, edition 2024. Everything that does I/O is generic over
@@ -205,6 +206,29 @@ instance to live for `gc_grace`; a worker electing itself when it could not
 read the members; takeover never progressing under short-lived instances; an
 unplannable graph retiring all its slices; purging a retired slice racing
 with its live instances; a half-done purge leaving an unreadable log.
+
+## The HTTP API and its OpenAPI document
+
+Every handler of `streaming-api/src/routes.rs` carries
+`#[route(METHOD, "/path", tag = "...")]` and is listed once in `api()`; the
+router and `GET /api/v1/openapi.json` both come from that list, so they
+cannot diverge. The attribute generates, next to the function, a module of
+the same name whose `route()` returns the handler with its description
+(`use super::*` inside, hence handlers live at module level). Descriptions
+are type-driven: each argument implements `OperationInput`, the return type
+`OperationOutput` (`ApiResult<T>` resolves through the alias). A handler must
+therefore say what it reads and returns in its prototype: no `Bytes`,
+`RawQuery`, `serde_json::Value` or opaque `Response` (the owner agreed to
+this). `JsonBody<T>` and `QueryParams<T>` replace axum's `Json` and `Query`
+on input to keep `{"error": ...}` answers and to accept bodies without a
+`Content-Type`. Schemas come from `schemars` 1.x: a type crossing the API
+derives `schemars::JsonSchema`; hand-serialized types (ids, `SliceId`,
+`Position`, `TypeTag`, durations) have hand-written schemas that must follow
+their `Serialize` impl. `tests/api.rs` validates every answer against the
+document, so a drift fails there. After changing the API, regenerate the
+committed copy: `UPDATE_OPENAPI=1 cargo test -p streaming-api --test openapi`.
+The version is 3.2.0; the document uses nothing 3.2-specific and validates
+as 3.1 too.
 
 ## Running and the UI
 

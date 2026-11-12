@@ -44,6 +44,20 @@ impl Serialize for Position {
     }
 }
 
+impl schemars::JsonSchema for Position {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Position".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A position inside a source partition, `a.b.c`: three 64-bit integers, as text so that JavaScript does not round them.",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for Position {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         if deserializer.is_human_readable() {

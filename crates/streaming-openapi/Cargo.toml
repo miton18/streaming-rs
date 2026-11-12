@@ -1,0 +1,19 @@
+[package]
+name = "streaming-openapi"
+description = "OpenAPI documents derived from axum handler signatures, with the `#[route]` attribute."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+streaming-openapi-macros.workspace = true
+axum = { version = "0.8", default-features = false, features = ["json", "query"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

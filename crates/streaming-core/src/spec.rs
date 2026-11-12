@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// One node of a graph.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NodeSpec {
     /// Unique id inside the graph. Names the node in metrics, control and state keys.
     pub id: NodeId,
@@ -63,19 +63,22 @@ fn default_max_pending_windows() -> usize {
 }
 
 /// Engine settings of a graph. Every field has a default.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphSettings {
     /// Watermark = highest event time seen minus this bound.
+    #[schemars(with = "crate::time::DurationText")]
     #[serde(with = "duration_str", default = "default_out_of_orderness")]
     pub max_out_of_orderness: Duration,
     /// After this long without any record on a fully-read partition, its
     /// watermark follows the wall clock so that downstream windows can close.
+    #[schemars(with = "crate::time::DurationText")]
     #[serde(with = "duration_str", default = "default_idle_timeout")]
     pub idle_timeout: Duration,
     /// Maximum number of source records per epoch (one KV commit per epoch).
     #[serde(default = "default_max_batch")]
     pub max_batch: usize,
     /// Maximum time a source waits to fill a batch.
+    #[schemars(with = "crate::time::DurationText")]
     #[serde(with = "duration_str", default = "default_linger")]
     pub linger: Duration,
     /// Capacity of every edge, in chunks. A full edge blocks its producer:
@@ -86,6 +89,7 @@ pub struct GraphSettings {
     #[serde(default = "default_chunk_size")]
     pub chunk_size: usize,
     /// How often closed windows are looked for.
+    #[schemars(with = "crate::time::DurationText")]
     #[serde(with = "duration_str", default = "default_flush_interval")]
     pub flush_interval: Duration,
     /// How many epochs a slice may have read but not yet committed.
@@ -96,6 +100,7 @@ pub struct GraphSettings {
     /// still land: the entry is what lets such a write be found and deleted.
     /// Must exceed three times the command timeout of the store, plus the
     /// clock difference between workers.
+    #[schemars(with = "crate::time::DurationText")]
     #[serde(with = "duration_str", default = "default_gc_grace")]
     pub gc_grace: Duration,
     /// How many windows a slice may have closed, per aggregate, without their
@@ -125,7 +130,7 @@ impl Default for GraphSettings {
 }
 
 /// The description of a graph: nodes referencing operators, and edges.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphSpec {
     /// Owning tenant.
     pub tenant: TenantId,

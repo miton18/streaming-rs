@@ -25,6 +25,71 @@ use tower::ServiceExt;
 
 const NOW: i64 = 1_790_000_000_000;
 
+/// The OpenAPI template of a concrete path (`/a/{b}` for `/a/x`).
+fn template_of<'a>(document: &'a Value, path: &str) -> Option<&'a str> {
+    let segments: Vec<&str> = path.split('/').collect();
+    document["paths"]
+        .as_object()?
+        .keys()
+        .map(String::as_str)
+        .find(|template| {
+            let parts: Vec<&str> = template.split('/').collect();
+            parts.len() == segments.len()
+                && parts
+                    .iter()
+                    .zip(&segments)
+                    .all(|(part, segment)| part.starts_with('{') || part == segment)
+        })
+}
+
+/// Every answer of the API matches the OpenAPI document: the operation
+/// exists, the status is described, and a JSON body validates against its
+/// schema.
+fn check_against_openapi(method: &str, uri: &str, status: StatusCode, body: &[u8]) {
+    static DOCUMENT: std::sync::LazyLock<Value> =
+        std::sync::LazyLock::new(|| serde_json::to_value(streaming_api::openapi()).unwrap());
+    let document = &*DOCUMENT;
+    let path = uri.split('?').next().unwrap();
+    let Some(template) = template_of(document, path) else {
+        // Served by the UI fallback, which answers 404 under `/api/`.
+        assert!(
+            !path.starts_with("/api/") || status == StatusCode::NOT_FOUND,
+            "{method} {uri} answered {status} but is not in the OpenAPI document"
+        );
+        return;
+    };
+    let Some(operation) = document["paths"][template].get(method) else {
+        assert_eq!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {uri} is not in the OpenAPI document"
+        );
+        return;
+    };
+    let responses = &operation["responses"];
+    let code = status.as_str();
+    let range = format!("{}XX", &code[..1]);
+    let response = responses
+        .get(code)
+        .or_else(|| responses.get(&range))
+        .unwrap_or_else(|| panic!("{method} {uri} answered {status}, which the OpenAPI document does not describe"));
+    let Some(schema) = response["content"]["application/json"].get("schema") else {
+        return;
+    };
+    let root = json!({"allOf": [schema], "components": document["components"]});
+    let validator = jsonschema::draft202012::new(&root).expect("the OpenAPI schemas compile");
+    let body: Value = serde_json::from_slice(body)
+        .unwrap_or_else(|e| panic!("{method} {uri} answered {status} with a body that is not JSON: {e}"));
+    let errors: Vec<String> = validator
+        .iter_errors(&body)
+        .map(|error| format!("{} at {}", error, error.instance_path()))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{method} {uri} answered {status} with a body that does not match the OpenAPI document: {errors:#?}\n{body:#}"
+    );
+}
+
 struct Env {
     kv: DynKv,
     mem: Arc<MemKv>,
@@ -92,6 +157,7 @@ impl Env {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let method_name = method.as_str().to_lowercase();
         let mut request = Request::builder().method(method).uri(uri);
         let body = match body {
             Some(value) => {
@@ -103,6 +169,7 @@ impl Env {
         let response = self.app.clone().oneshot(request.body(body).unwrap()).await.unwrap();
         let (parts, body) = response.into_parts();
         let bytes = body.collect().await.unwrap().to_bytes().to_vec();
+        check_against_openapi(&method_name, uri, parts.status, &bytes);
         (parts.status, parts.headers, bytes)
     }
 

@@ -1,0 +1,15 @@
+[package]
+name = "streaming-openapi-macros"
+description = "The `#[route]` attribute of streaming-openapi: registers an axum handler and describes it in OpenAPI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

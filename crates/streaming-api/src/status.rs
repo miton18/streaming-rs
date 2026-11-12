@@ -24,7 +24,7 @@ pub const BUSY_THRESHOLD: f64 = 0.5;
 pub const BACKPRESSURE_THRESHOLD: f64 = 0.3;
 
 /// One worker of `GET /api/v1/cluster`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct WorkerView {
     /// Worker id.
     pub worker: WorkerId,
@@ -49,7 +49,7 @@ pub struct WorkerView {
 }
 
 /// `GET /api/v1/cluster`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct ClusterView {
     /// Value of `cluster:epoch`.
     pub epoch: i64,
@@ -60,6 +60,7 @@ pub struct ClusterView {
     /// Current placement (empty, version 0, when none was published).
     pub placement: Placement,
     /// KV statistics, when the embedding process provides them.
+    #[schemars(with = "Option<serde_json::Map<String, Value>>")]
     pub kv: Option<Value>,
 }
 
@@ -101,7 +102,7 @@ pub fn cluster_view(
 }
 
 /// `GET /api/v1/catalog`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct CatalogView {
     /// Descriptors sorted by reference.
     pub ops: Vec<OpDescriptor>,
@@ -116,7 +117,7 @@ pub fn catalog_view(catalog: &Catalog) -> CatalogView {
 }
 
 /// One tenant of `GET /api/v1/tenants`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct TenantSummary {
     /// Tenant id.
     pub tenant: TenantId,
@@ -129,7 +130,7 @@ pub struct TenantSummary {
 }
 
 /// `GET /api/v1/tenants`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct TenantsView {
     /// Tenants sorted by id.
     pub tenants: Vec<TenantSummary>,
@@ -185,7 +186,7 @@ pub fn tenants_view(
 }
 
 /// Worst-first state of a node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeState {
     /// At least one instance failed.
@@ -218,7 +219,7 @@ impl From<ActorState> for NodeState {
 }
 
 /// An actor snapshot with the worker that reported it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct InstanceView {
     /// The actor's snapshot.
     #[serde(flatten)]
@@ -228,7 +229,7 @@ pub struct InstanceView {
 }
 
 /// A slice snapshot with the reporting and the assigned worker.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct SliceView {
     /// The slice's snapshot (synthetic, `starting`, when nobody reports it).
     #[serde(flatten)]
@@ -240,7 +241,7 @@ pub struct SliceView {
 }
 
 /// A node that limits the graph.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct Bottleneck {
     /// The limiting node.
     pub node: NodeId,
@@ -261,7 +262,7 @@ pub struct Bottleneck {
 }
 
 /// A node of a graph with its aggregated metrics.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct NodeView {
     /// Node id.
     pub id: NodeId,
@@ -320,7 +321,7 @@ pub struct NodeView {
 }
 
 /// An edge of a graph.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct EdgeView {
     /// Origin.
     pub from: NodeId,
@@ -331,7 +332,7 @@ pub struct EdgeView {
 }
 
 /// `GET /api/v1/tenants/{tenant}/graphs/{graph}`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct GraphDetail {
     /// Tenant.
     pub tenant: TenantId,
@@ -363,7 +364,7 @@ pub struct GraphDetail {
 }
 
 /// One graph of `GET /api/v1/tenants/{tenant}/graphs`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct GraphSummary {
     /// Tenant.
     pub tenant: TenantId,
@@ -394,7 +395,7 @@ pub struct GraphSummary {
 }
 
 /// `GET /api/v1/tenants/{tenant}/graphs`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct GraphsView {
     /// Graphs.
     pub graphs: Vec<GraphSummary>,

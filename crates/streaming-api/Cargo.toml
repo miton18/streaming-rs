@@ -8,7 +8,10 @@ repository.workspace = true
 
 [dependencies]
 streaming-core.workspace = true
+schemars.workspace = true
 serde.workspace = true
+serde_urlencoded = "0.7"
+streaming-openapi.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 thiserror.workspace = true
@@ -23,5 +26,6 @@ mime_guess = "2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+jsonschema = { version = "0.61", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 moonpool-core.workspace = true

@@ -1,0 +1,2796 @@
+{
+  "components": {
+    "schemas": {
+      "ActorKind": {
+        "description": "Role of an actor inside a slice.",
+        "oneOf": [
+          {
+            "const": "source",
+            "description": "Reads one partition of a source.",
+            "type": "string"
+          },
+          {
+            "const": "map",
+            "description": "Stateless transformation.",
+            "type": "string"
+          },
+          {
+            "const": "key_by",
+            "description": "Key annotation.",
+            "type": "string"
+          },
+          {
+            "const": "window",
+            "description": "Window annotation.",
+            "type": "string"
+          },
+          {
+            "const": "aggregate",
+            "description": "Accumulating half of an aggregate node.",
+            "type": "string"
+          },
+          {
+            "const": "emitter",
+            "description": "Emitting half of an aggregate node: reads closed windows.",
+            "type": "string"
+          },
+          {
+            "const": "sink",
+            "description": "Writes to a sink.",
+            "type": "string"
+          },
+          {
+            "const": "commit",
+            "description": "Commits the epochs of a slice to the KV.",
+            "type": "string"
+          }
+        ]
+      },
+      "ActorState": {
+        "description": "Life-cycle state of an actor or of a slice.",
+        "oneOf": [
+          {
+            "const": "starting",
+            "description": "Restoring state from the KV.",
+            "type": "string"
+          },
+          {
+            "const": "running",
+            "description": "Processing.",
+            "type": "string"
+          },
+          {
+            "const": "paused",
+            "description": "Paused by the control plane.",
+            "type": "string"
+          },
+          {
+            "const": "draining",
+            "description": "Finishing in-flight work before stopping.",
+            "type": "string"
+          },
+          {
+            "const": "stopped",
+            "description": "Stopped cleanly.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "Failed; the slice restarts from its last commit.",
+            "type": "string"
+          }
+        ]
+      },
+      "Bottleneck": {
+        "description": "A node that limits the graph.",
+        "properties": {
+          "busy": {
+            "description": "Its busy ratio.",
+            "format": "double",
+            "type": "number"
+          },
+          "kind": {
+            "description": "Its kind (`aggregate`, ..., or `commit`).",
+            "type": "string"
+          },
+          "limited_by": {
+            "default": "",
+            "description": "What holds the node back: `\"destination\"` when most of its busy time\nis spent waiting for the system it writes to, so that neither more\nCPU nor moving it helps; `\"work\"` otherwise.",
+            "type": "string"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeId",
+            "description": "The limiting node."
+          },
+          "reason": {
+            "description": "Human-readable explanation.",
+            "type": "string"
+          },
+          "waiting": {
+            "default": 0.0,
+            "description": "Part of that ratio spent waiting for an external system to answer.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "node",
+          "kind",
+          "busy",
+          "waiting",
+          "limited_by",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "CatalogView": {
+        "description": "`GET /api/v1/catalog`.",
+        "properties": {
+          "ops": {
+            "description": "Descriptors sorted by reference.",
+            "items": {
+              "$ref": "#/components/schemas/OpDescriptor"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ops"
+        ],
+        "type": "object"
+      },
+      "ClusterView": {
+        "description": "`GET /api/v1/cluster`.",
+        "properties": {
+          "epoch": {
+            "description": "Value of `cluster:epoch`.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "kv": {
+            "additionalProperties": true,
+            "description": "KV statistics, when the embedding process provides them.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "now_ms": {
+            "description": "Server time.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "placement": {
+            "$ref": "#/components/schemas/Placement",
+            "description": "Current placement (empty, version 0, when none was published)."
+          },
+          "workers": {
+            "description": "Members.",
+            "items": {
+              "$ref": "#/components/schemas/WorkerView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "epoch",
+          "now_ms",
+          "workers",
+          "placement",
+          "kv"
+        ],
+        "type": "object"
+      },
+      "DeletingReply": {
+        "description": "A graph being deleted.",
+        "properties": {
+          "deleting": {
+            "description": "Always `true`: workers stop the graph, then its state is removed.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleting"
+        ],
+        "type": "object"
+      },
+      "DesiredState": {
+        "description": "What operators want a graph to do.",
+        "properties": {
+          "paused_nodes": {
+            "default": [],
+            "description": "Nodes paused individually. A paused node stops consuming its inputs;\nbackpressure then stalls everything upstream of it.",
+            "items": {
+              "$ref": "#/components/schemas/NodeId"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "state": {
+            "$ref": "#/components/schemas/RunState",
+            "default": "running",
+            "description": "Run state of the whole graph."
+          },
+          "updated_ms": {
+            "default": 0,
+            "description": "When this document was last changed.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "state",
+          "paused_nodes",
+          "updated_ms"
+        ],
+        "type": "object"
+      },
+      "Duration": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9]+(ms|s|m|h|d)$",
+            "type": "string"
+          },
+          {
+            "minimum": 0,
+            "type": "integer"
+          }
+        ],
+        "description": "A duration: a number followed by `ms`, `s`, `m`, `h` or `d` (`\"5m\"`), or a number of milliseconds."
+      },
+      "EdgeView": {
+        "description": "An edge of a graph.",
+        "properties": {
+          "fill": {
+            "description": "`queue_len / queue_cap` of the destination node.",
+            "format": "double",
+            "type": "number"
+          },
+          "from": {
+            "$ref": "#/components/schemas/NodeId",
+            "description": "Origin."
+          },
+          "to": {
+            "$ref": "#/components/schemas/NodeId",
+            "description": "Destination."
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "fill"
+        ],
+        "type": "object"
+      },
+      "EmittedWindow": {
+        "description": "How far the emitting half of an aggregate node got.",
+        "properties": {
+          "complete": {
+            "description": "Whether every element of the window is out.",
+            "type": "boolean"
+          },
+          "end_ms": {
+            "description": "End of the window, exclusive.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "start_ms": {
+            "description": "Start of the window, inclusive.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_ms",
+          "end_ms",
+          "complete"
+        ],
+        "type": "object"
+      },
+      "ErrorBody": {
+        "description": "The body of an error.",
+        "properties": {
+          "error": {
+            "description": "What went wrong, for a person.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "GraphDetail": {
+        "description": "`GET /api/v1/tenants/{tenant}/graphs/{graph}`.",
+        "properties": {
+          "bottleneck": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Bottleneck"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What limits the graph, if anything."
+          },
+          "desired": {
+            "$ref": "#/components/schemas/DesiredState",
+            "description": "The desired state document."
+          },
+          "edges": {
+            "description": "Edges, in description order.",
+            "items": {
+              "$ref": "#/components/schemas/EdgeView"
+            },
+            "type": "array"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/GraphId",
+            "description": "Graph."
+          },
+          "nodes": {
+            "description": "Nodes, in description order.",
+            "items": {
+              "$ref": "#/components/schemas/NodeView"
+            },
+            "type": "array"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphPlan"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The plan, if computed."
+          },
+          "slices": {
+            "description": "Slices.",
+            "items": {
+              "$ref": "#/components/schemas/SliceView"
+            },
+            "type": "array"
+          },
+          "spec": {
+            "$ref": "#/components/schemas/GraphSpec",
+            "description": "The description."
+          },
+          "state": {
+            "$ref": "#/components/schemas/RunState",
+            "description": "Desired run state."
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Tenant."
+          },
+          "version": {
+            "description": "Version of the stored description.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "watermark_ms": {
+            "description": "Minimum watermark of the source slices; null if any is unknown.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "tenant",
+          "graph",
+          "version",
+          "state",
+          "spec",
+          "plan",
+          "desired",
+          "bottleneck",
+          "watermark_ms",
+          "nodes",
+          "edges",
+          "slices"
+        ],
+        "type": "object"
+      },
+      "GraphId": {
+        "description": "A graph id: 1 to 128 letters, digits, `-` or `_`.",
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "type": "string"
+      },
+      "GraphPlan": {
+        "description": "How a graph is cut into slices, computed by the controller.",
+        "properties": {
+          "closed": {
+            "default": [],
+            "description": "Retired slices whose state has been deleted. Their log stays closed\nto the plans of that time.",
+            "items": {
+              "$ref": "#/components/schemas/SliceId"
+            },
+            "type": "array"
+          },
+          "closing": {
+            "additionalProperties": false,
+            "default": {},
+            "description": "Retired slices whose log has been closed, everything they committed\nbeing emitted, with the instant it was: their state is deleted once\nno write issued before that can still land.",
+            "patternProperties": {
+              "^(src\\.[A-Za-z0-9_-]+\\.[0-9]+|agg\\.[A-Za-z0-9_-]+)$": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "error": {
+            "default": null,
+            "description": "Why the graph cannot be planned (unknown operator, unreachable source, ...).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "generation": {
+            "default": 0,
+            "description": "Incremented every time the set of slices changes, as when a source\ngains or loses partitions. Slice instances and commit records carry\nit: nothing is written under a plan older than what the log holds.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "joined": {
+            "additionalProperties": false,
+            "default": {},
+            "description": "Slices that entered the plan after the graph had started, with the\ngeneration at which they did: the pipeline may have emitted windows\nwithout them, which they must then take for closed.",
+            "patternProperties": {
+              "^(src\\.[A-Za-z0-9_-]+\\.[0-9]+|agg\\.[A-Za-z0-9_-]+)$": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "partitions": {
+            "additionalProperties": false,
+            "default": {},
+            "description": "Partition count of every source node.",
+            "patternProperties": {
+              "^[A-Za-z0-9_-]+$": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "planned_ms": {
+            "default": 0,
+            "description": "When the plan was computed.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "retired": {
+            "default": [],
+            "description": "Slices that are no longer run, their partition being gone, but whose\ncommitted state still has to be emitted.",
+            "items": {
+              "$ref": "#/components/schemas/SliceId"
+            },
+            "type": "array"
+          },
+          "slices": {
+            "default": [],
+            "description": "Every slice to run.",
+            "items": {
+              "$ref": "#/components/schemas/SliceId"
+            },
+            "type": "array"
+          },
+          "spec_version": {
+            "description": "Version of the description this plan was computed from.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "spec_version",
+          "partitions",
+          "slices",
+          "planned_ms",
+          "error",
+          "generation",
+          "retired",
+          "joined",
+          "closed",
+          "closing"
+        ],
+        "type": "object"
+      },
+      "GraphSettings": {
+        "description": "Engine settings of a graph. Every field has a default.",
+        "properties": {
+          "chunk_size": {
+            "default": 256,
+            "description": "Number of records per chunk on an edge.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "flush_interval": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "1s",
+            "description": "How often closed windows are looked for."
+          },
+          "gc_grace": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "30s",
+            "description": "How long the index entry of an emitted window outlives its state. A\nstore command issued by a worker that has since lost its slice may\nstill land: the entry is what lets such a write be found and deleted.\nMust exceed three times the command timeout of the store, plus the\nclock difference between workers."
+          },
+          "idle_timeout": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "30s",
+            "description": "After this long without any record on a fully-read partition, its\nwatermark follows the wall clock so that downstream windows can close."
+          },
+          "linger": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "200ms",
+            "description": "Maximum time a source waits to fill a batch."
+          },
+          "mailbox_capacity": {
+            "default": 8,
+            "description": "Capacity of every edge, in chunks. A full edge blocks its producer:\nthis is what propagates backpressure up to the source.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_batch": {
+            "default": 1000,
+            "description": "Maximum number of source records per epoch (one KV commit per epoch).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_in_flight_epochs": {
+            "default": 2,
+            "description": "How many epochs a slice may have read but not yet committed.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_out_of_orderness": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "500ms",
+            "description": "Watermark = highest event time seen minus this bound."
+          },
+          "max_pending_windows": {
+            "default": 16,
+            "description": "How many windows a slice may have closed, per aggregate, without their\nresults being emitted yet. Past that number the slice stops reading\nuntil emission catches up: this is how a slow sink behind an aggregate\nslows the sources down, and what bounds the state waiting in the store.\n`0` removes the limit.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_out_of_orderness",
+          "idle_timeout",
+          "max_batch",
+          "linger",
+          "mailbox_capacity",
+          "chunk_size",
+          "flush_interval",
+          "max_in_flight_epochs",
+          "gc_grace",
+          "max_pending_windows"
+        ],
+        "type": "object"
+      },
+      "GraphSettingsInput": {
+        "description": "Engine settings of a graph. Every field has a default.",
+        "properties": {
+          "chunk_size": {
+            "default": 256,
+            "description": "Number of records per chunk on an edge.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "flush_interval": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "1s",
+            "description": "How often closed windows are looked for."
+          },
+          "gc_grace": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "30s",
+            "description": "How long the index entry of an emitted window outlives its state. A\nstore command issued by a worker that has since lost its slice may\nstill land: the entry is what lets such a write be found and deleted.\nMust exceed three times the command timeout of the store, plus the\nclock difference between workers."
+          },
+          "idle_timeout": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "30s",
+            "description": "After this long without any record on a fully-read partition, its\nwatermark follows the wall clock so that downstream windows can close."
+          },
+          "linger": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "200ms",
+            "description": "Maximum time a source waits to fill a batch."
+          },
+          "mailbox_capacity": {
+            "default": 8,
+            "description": "Capacity of every edge, in chunks. A full edge blocks its producer:\nthis is what propagates backpressure up to the source.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_batch": {
+            "default": 1000,
+            "description": "Maximum number of source records per epoch (one KV commit per epoch).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_in_flight_epochs": {
+            "default": 2,
+            "description": "How many epochs a slice may have read but not yet committed.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_out_of_orderness": {
+            "$ref": "#/components/schemas/Duration",
+            "default": "500ms",
+            "description": "Watermark = highest event time seen minus this bound."
+          },
+          "max_pending_windows": {
+            "default": 16,
+            "description": "How many windows a slice may have closed, per aggregate, without their\nresults being emitted yet. Past that number the slice stops reading\nuntil emission catches up: this is how a slow sink behind an aggregate\nslows the sources down, and what bounds the state waiting in the store.\n`0` removes the limit.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "GraphSpec": {
+        "description": "The description of a graph: nodes referencing operators, and edges.",
+        "properties": {
+          "edges": {
+            "description": "Directed edges `[from, to]`.",
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "$ref": "#/components/schemas/NodeId"
+                },
+                {
+                  "$ref": "#/components/schemas/NodeId"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/GraphId",
+            "description": "Graph id, unique inside the tenant."
+          },
+          "nodes": {
+            "description": "The nodes.",
+            "items": {
+              "$ref": "#/components/schemas/NodeSpec"
+            },
+            "type": "array"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/GraphSettings",
+            "default": {
+              "chunk_size": 256,
+              "flush_interval": "1s",
+              "gc_grace": "30s",
+              "idle_timeout": "30s",
+              "linger": "200ms",
+              "mailbox_capacity": 8,
+              "max_batch": 1000,
+              "max_in_flight_epochs": 2,
+              "max_out_of_orderness": "500ms",
+              "max_pending_windows": 16
+            },
+            "description": "Engine settings."
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Owning tenant."
+          },
+          "version": {
+            "default": 0,
+            "description": "Incremented by the control plane on every accepted change.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tenant",
+          "graph",
+          "version",
+          "settings",
+          "nodes",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "GraphSpecInput": {
+        "description": "The description of a graph: nodes referencing operators, and edges.",
+        "properties": {
+          "edges": {
+            "description": "Directed edges `[from, to]`.",
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "$ref": "#/components/schemas/NodeId"
+                },
+                {
+                  "$ref": "#/components/schemas/NodeId"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/GraphId",
+            "description": "Graph id, unique inside the tenant."
+          },
+          "nodes": {
+            "description": "The nodes.",
+            "items": {
+              "$ref": "#/components/schemas/NodeSpec"
+            },
+            "type": "array"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/GraphSettingsInput",
+            "default": {
+              "chunk_size": 256,
+              "flush_interval": "1s",
+              "gc_grace": "30s",
+              "idle_timeout": "30s",
+              "linger": "200ms",
+              "mailbox_capacity": 8,
+              "max_batch": 1000,
+              "max_in_flight_epochs": 2,
+              "max_out_of_orderness": "500ms",
+              "max_pending_windows": 16
+            },
+            "description": "Engine settings."
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Owning tenant."
+          },
+          "version": {
+            "default": 0,
+            "description": "Incremented by the control plane on every accepted change.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tenant",
+          "graph",
+          "nodes",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "GraphSummary": {
+        "description": "One graph of `GET /api/v1/tenants/{tenant}/graphs`.",
+        "properties": {
+          "actors": {
+            "description": "Actors on alive workers, commit actors included.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "bottleneck": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Bottleneck"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What limits the graph."
+          },
+          "error": {
+            "description": "Plan error.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "graph": {
+            "$ref": "#/components/schemas/GraphId",
+            "description": "Graph."
+          },
+          "in_per_sec": {
+            "description": "Sum of the output rates of the source nodes.",
+            "format": "double",
+            "type": "number"
+          },
+          "nodes": {
+            "description": "Node count.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "out_per_sec": {
+            "description": "Sum of the output rates of the sink nodes.",
+            "format": "double",
+            "type": "number"
+          },
+          "slices": {
+            "description": "Slice count (see [`GraphDetail::slices`]).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RunState",
+            "description": "Desired run state."
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Tenant."
+          },
+          "updated_ms": {
+            "description": "Last change of the description (from the index).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "version": {
+            "description": "Version.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "watermark_ms": {
+            "description": "Minimum watermark of the source slices.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "tenant",
+          "graph",
+          "version",
+          "state",
+          "nodes",
+          "slices",
+          "actors",
+          "in_per_sec",
+          "out_per_sec",
+          "bottleneck",
+          "watermark_ms",
+          "updated_ms",
+          "error"
+        ],
+        "type": "object"
+      },
+      "GraphsView": {
+        "description": "`GET /api/v1/tenants/{tenant}/graphs`.",
+        "properties": {
+          "graphs": {
+            "description": "Graphs.",
+            "items": {
+              "$ref": "#/components/schemas/GraphSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "graphs"
+        ],
+        "type": "object"
+      },
+      "InstanceView": {
+        "description": "An actor snapshot with the worker that reported it.",
+        "properties": {
+          "backpressured": {
+            "default": 0.0,
+            "description": "Share of the last interval spent waiting for room downstream.",
+            "format": "double",
+            "type": "number"
+          },
+          "busy": {
+            "default": 0.0,
+            "description": "Share of the last interval spent working.",
+            "format": "double",
+            "type": "number"
+          },
+          "errors": {
+            "default": 0,
+            "description": "Errors since the actor started.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/GraphId",
+            "description": "Graph."
+          },
+          "idle": {
+            "default": 0.0,
+            "description": "Share of the last interval spent waiting for input.",
+            "format": "double",
+            "type": "number"
+          },
+          "in_per_sec": {
+            "default": 0.0,
+            "description": "Input rate over the last interval, in records per second.",
+            "format": "double",
+            "type": "number"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ActorKind",
+            "description": "Role of the actor."
+          },
+          "last_error": {
+            "default": null,
+            "description": "Most recent error, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "late_dropped": {
+            "default": 0,
+            "description": "Records dropped because their window was already closed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeId",
+            "description": "Graph node the actor runs. For [`ActorKind::Commit`], the root node of the slice."
+          },
+          "op": {
+            "$ref": "#/components/schemas/OpRef",
+            "description": "Operator reference of the node."
+          },
+          "out_per_sec": {
+            "default": 0.0,
+            "description": "Output rate over the last interval, in records per second.",
+            "format": "double",
+            "type": "number"
+          },
+          "queue_cap": {
+            "default": 0,
+            "description": "Total capacity of the actor's input edges, in chunks.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "queue_len": {
+            "default": 0,
+            "description": "Chunks waiting in the actor's input edges.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "records_in": {
+            "default": 0,
+            "description": "Records received since the actor started.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "records_out": {
+            "default": 0,
+            "description": "Records sent downstream (or written, for a sink) since the actor started.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "slice": {
+            "$ref": "#/components/schemas/SliceId",
+            "description": "Slice the actor belongs to."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ActorState",
+            "default": "starting",
+            "description": "Life-cycle state."
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Owning tenant."
+          },
+          "waiting": {
+            "default": 0.0,
+            "description": "Part of `busy` spent waiting for an external system to answer (a\nsink's destination), as opposed to computing. An actor that is busy\nmostly waiting is limited by that system, not by this worker: more\nCPU does not help it.",
+            "format": "double",
+            "type": "number"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/WorkerId",
+            "description": "Reporting worker."
+          }
+        },
+        "required": [
+          "tenant",
+          "graph",
+          "slice",
+          "node",
+          "kind",
+          "op",
+          "state",
+          "records_in",
+          "records_out",
+          "in_per_sec",
+          "out_per_sec",
+          "busy",
+          "idle",
+          "backpressured",
+          "waiting",
+          "queue_len",
+          "queue_cap",
+          "late_dropped",
+          "errors",
+          "last_error",
+          "worker"
+        ],
+        "type": "object"
+      },
+      "Limit": {
+        "default": 200,
+        "description": "Rows to return at most (200 by default); above 2000, 2000.",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "Load": {
+        "description": "Resource usage of a worker process. Ratios are in `0.0..=1.0`.",
+        "properties": {
+          "cpu": {
+            "description": "CPU usage of the process, relative to the cores it may use.",
+            "format": "double",
+            "type": "number"
+          },
+          "memory": {
+            "description": "Memory usage of the process, relative to its limit.",
+            "format": "double",
+            "type": "number"
+          },
+          "memory_bytes": {
+            "description": "Resident memory, in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cpu",
+          "memory",
+          "memory_bytes"
+        ],
+        "type": "object"
+      },
+      "NodeId": {
+        "description": "A node id: 1 to 128 letters, digits, `-` or `_`.",
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "type": "string"
+      },
+      "NodeSpec": {
+        "description": "One node of a graph.",
+        "properties": {
+          "config": {
+            "description": "Operator-specific configuration."
+          },
+          "id": {
+            "$ref": "#/components/schemas/NodeId",
+            "description": "Unique id inside the graph. Names the node in metrics, control and state keys."
+          },
+          "op": {
+            "$ref": "#/components/schemas/OpRef",
+            "description": "The operator to run."
+          }
+        },
+        "required": [
+          "id",
+          "op"
+        ],
+        "type": "object"
+      },
+      "NodeState": {
+        "description": "Worst-first state of a node.",
+        "oneOf": [
+          {
+            "const": "failed",
+            "description": "At least one instance failed.",
+            "type": "string"
+          },
+          {
+            "const": "starting",
+            "description": "At least one instance is starting.",
+            "type": "string"
+          },
+          {
+            "const": "paused",
+            "description": "At least one instance is paused.",
+            "type": "string"
+          },
+          {
+            "const": "draining",
+            "description": "At least one instance is draining.",
+            "type": "string"
+          },
+          {
+            "const": "running",
+            "description": "Every instance runs.",
+            "type": "string"
+          },
+          {
+            "const": "stopped",
+            "description": "Every instance stopped.",
+            "type": "string"
+          },
+          {
+            "const": "pending",
+            "description": "No instance reported.",
+            "type": "string"
+          }
+        ]
+      },
+      "NodeView": {
+        "description": "A node of a graph with its aggregated metrics.",
+        "properties": {
+          "actors": {
+            "description": "Number of instances.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "backpressured": {
+            "description": "Backpressure ratio of the hot instance.",
+            "format": "double",
+            "type": "number"
+          },
+          "bottleneck": {
+            "description": "This node is the graph's bottleneck.",
+            "type": "boolean"
+          },
+          "busy": {
+            "description": "Busy ratio of the hot instance.",
+            "format": "double",
+            "type": "number"
+          },
+          "config": {
+            "description": "Node configuration."
+          },
+          "description": {
+            "description": "Operator description.",
+            "type": "string"
+          },
+          "errors": {
+            "description": "Errors, summed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "$ref": "#/components/schemas/NodeId",
+            "description": "Node id."
+          },
+          "idle": {
+            "description": "Idle ratio of the hot instance.",
+            "format": "double",
+            "type": "number"
+          },
+          "in_per_sec": {
+            "description": "Input rate.",
+            "format": "double",
+            "type": "number"
+          },
+          "input_type": {
+            "description": "Accepted type (null when the operator is not in the catalog).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "instances": {
+            "description": "The instances.",
+            "items": {
+              "$ref": "#/components/schemas/InstanceView"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "description": "Operator kind (`unknown` when the operator is not in the catalog).",
+            "type": "string"
+          },
+          "last_error": {
+            "description": "Some instance's last error.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "late_dropped": {
+            "description": "Late records dropped, summed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "op": {
+            "description": "Operator reference.",
+            "type": "string"
+          },
+          "out_per_sec": {
+            "description": "Output rate.",
+            "format": "double",
+            "type": "number"
+          },
+          "output_type": {
+            "description": "Produced type (null when the operator is not in the catalog).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paused": {
+            "description": "Listed in `desired.paused_nodes`.",
+            "type": "boolean"
+          },
+          "queue_cap": {
+            "description": "Queue capacity, summed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "queue_len": {
+            "description": "Queued chunks, summed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "records_in": {
+            "description": "Records received.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "records_out": {
+            "description": "Records emitted.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/NodeState",
+            "description": "Worst instance state."
+          },
+          "waiting": {
+            "description": "Highest share of time an instance spent waiting for an external\nsystem to answer. Part of `busy`: a node busy mostly waiting is\nlimited by that system, not by its worker.",
+            "format": "double",
+            "type": "number"
+          },
+          "workers": {
+            "description": "Workers running instances, sorted.",
+            "items": {
+              "$ref": "#/components/schemas/WorkerId"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "op",
+          "kind",
+          "description",
+          "input_type",
+          "output_type",
+          "config",
+          "paused",
+          "bottleneck",
+          "state",
+          "actors",
+          "workers",
+          "records_in",
+          "records_out",
+          "in_per_sec",
+          "out_per_sec",
+          "busy",
+          "idle",
+          "backpressured",
+          "waiting",
+          "queue_len",
+          "queue_cap",
+          "late_dropped",
+          "errors",
+          "last_error",
+          "instances"
+        ],
+        "type": "object"
+      },
+      "OpDescriptor": {
+        "description": "Public description of a registered operator. Published in the KV so that\nthe API and the UI can list operators and validate graphs without the code.",
+        "properties": {
+          "description": {
+            "default": "",
+            "description": "One-line human description.",
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/components/schemas/TypeTag",
+            "description": "Type of the accepted values (`*` for sources and type-agnostic operators)."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/OpKind",
+            "description": "What the operator does."
+          },
+          "op": {
+            "$ref": "#/components/schemas/OpRef",
+            "description": "The reference used in graph descriptions."
+          },
+          "output": {
+            "$ref": "#/components/schemas/TypeTag",
+            "description": "Type of the produced values (`*` for sinks and pass-through operators)."
+          },
+          "params": {
+            "default": [],
+            "description": "The parameters of its configuration, for tools that build graphs.\nEmpty when the operator takes none, or does not say.",
+            "items": {
+              "$ref": "#/components/schemas/ParamSpec"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "op",
+          "kind",
+          "input",
+          "output",
+          "description",
+          "params"
+        ],
+        "type": "object"
+      },
+      "OpKind": {
+        "description": "What a node does in a graph.",
+        "oneOf": [
+          {
+            "const": "source",
+            "description": "Reads from the outside world.",
+            "type": "string"
+          },
+          {
+            "const": "map",
+            "description": "Stateless transformation (`map`, `filter`, `flat_map`).",
+            "type": "string"
+          },
+          {
+            "const": "key_by",
+            "description": "Annotates records with a grouping key.",
+            "type": "string"
+          },
+          {
+            "const": "window",
+            "description": "Annotates records with their event-time window(s).",
+            "type": "string"
+          },
+          {
+            "const": "aggregate",
+            "description": "Stateful aggregation per key and window.",
+            "type": "string"
+          },
+          {
+            "const": "sink",
+            "description": "Writes to the outside world.",
+            "type": "string"
+          }
+        ]
+      },
+      "OpRef": {
+        "description": "A operator ref: 1 to 128 letters, digits, `-` or `_`, `/`, `@`, `.`.",
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_/@.-]+$",
+        "type": "string"
+      },
+      "OutputRow": {
+        "description": "One row written by a `std/kv-sink@1` node, readable through the API.",
+        "properties": {
+          "id": {
+            "description": "Emit id of the element.",
+            "type": "string"
+          },
+          "key": {
+            "default": null,
+            "description": "Grouping key, in human-readable form.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ts": {
+            "description": "Event time of the element.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "value": {
+            "description": "The element, as JSON."
+          }
+        },
+        "required": [
+          "id",
+          "ts",
+          "key",
+          "value"
+        ],
+        "type": "object"
+      },
+      "OutputsView": {
+        "description": "The rows of a `std/kv-sink@1` node.",
+        "properties": {
+          "rows": {
+            "description": "Rows, most recent event first, then by key.",
+            "items": {
+              "$ref": "#/components/schemas/OutputRow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "rows"
+        ],
+        "type": "object"
+      },
+      "ParamSpec": {
+        "description": "One parameter of an operator's configuration, as a tool presents it.",
+        "properties": {
+          "choices": {
+            "description": "The only values accepted, when the parameter is one of a fixed set of\ntexts. Empty when any value of `kind` is.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {
+            "default": null,
+            "description": "Value used when absent."
+          },
+          "description": {
+            "default": "",
+            "description": "What it does.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`duration` (`\"5m\"`), `integer`, `number`, `text`, `boolean`,\n`secret` (a text or a `{\"secret\": \"<name>\"}` reference), or `json`\n(any JSON value, such as an object).",
+            "type": "string"
+          },
+          "name": {
+            "description": "Key in the configuration object.",
+            "type": "string"
+          },
+          "required": {
+            "default": false,
+            "description": "Whether the operator refuses a configuration without it.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "required",
+          "default",
+          "description"
+        ],
+        "type": "object"
+      },
+      "PausedReply": {
+        "description": "Whether a node is paused.",
+        "properties": {
+          "node": {
+            "$ref": "#/components/schemas/NodeId",
+            "description": "The node."
+          },
+          "paused": {
+            "description": "Whether it is listed in `desired.paused_nodes`.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "node",
+          "paused"
+        ],
+        "type": "object"
+      },
+      "Placement": {
+        "description": "Which worker runs which slice, computed by the controller.",
+        "properties": {
+          "assignments": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/WorkerId"
+            },
+            "default": {},
+            "description": "Slice -> worker.",
+            "type": "object"
+          },
+          "computed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The worker that computed this placement."
+          },
+          "computed_ms": {
+            "default": 0,
+            "description": "When it was computed.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "version": {
+            "description": "Incremented on every change.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "computed_by",
+          "computed_ms",
+          "assignments"
+        ],
+        "type": "object"
+      },
+      "Position": {
+        "description": "A position inside a source partition, `a.b.c`: three 64-bit integers, as text so that JavaScript does not round them.",
+        "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+        "type": "string"
+      },
+      "RunState": {
+        "description": "Run state requested for a graph.",
+        "oneOf": [
+          {
+            "const": "running",
+            "description": "Sources read, everything flows.",
+            "type": "string"
+          },
+          {
+            "const": "paused",
+            "description": "Sources stop reading; state and positions are kept.",
+            "type": "string"
+          },
+          {
+            "const": "draining",
+            "description": "Sources stop reading, what is in flight is committed, then slices stop.",
+            "type": "string"
+          },
+          {
+            "const": "stopped",
+            "description": "No actor runs; state and positions are kept.",
+            "type": "string"
+          }
+        ]
+      },
+      "SliceId": {
+        "description": "A slice: `src.<node>.<partition>` (one source partition) or `agg.<node>` (the emitter of an aggregate).",
+        "pattern": "^(src\\.[A-Za-z0-9_-]+\\.[0-9]+|agg\\.[A-Za-z0-9_-]+)$",
+        "type": "string"
+      },
+      "SliceView": {
+        "description": "A slice snapshot with the reporting and the assigned worker.",
+        "properties": {
+          "assigned_to": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Worker the placement assigns the slice to."
+          },
+          "commit_ms": {
+            "default": 0.0,
+            "description": "Average duration of a commit over the last interval, in milliseconds.",
+            "format": "double",
+            "type": "number"
+          },
+          "commits": {
+            "default": 0,
+            "description": "Commits since the slice started on this worker.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "epoch": {
+            "default": 0,
+            "description": "Last committed epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fenced": {
+            "default": 0,
+            "description": "Times this worker lost a commit to another worker.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/GraphId",
+            "description": "Graph."
+          },
+          "in_flight_epochs": {
+            "default": 0,
+            "description": "Epochs read but not yet committed.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_error": {
+            "default": null,
+            "description": "Most recent error, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Position"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Last committed source position."
+          },
+          "restarts": {
+            "default": 0,
+            "description": "Times the slice restarted on this worker.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "slice": {
+            "$ref": "#/components/schemas/SliceId",
+            "description": "Slice."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ActorState",
+            "default": "starting",
+            "description": "Life-cycle state."
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Owning tenant."
+          },
+          "throttled": {
+            "default": 0,
+            "description": "Times this instance held back reading because too many closed windows\nwere waiting to be emitted (see `max_pending_windows`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "watermark_ms": {
+            "default": null,
+            "description": "Last committed watermark.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmittedWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "For the emitting half of an aggregate node: the last window it\ncommitted elements of."
+          },
+          "worker": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reporting worker; null for a slice nobody reports yet."
+          }
+        },
+        "required": [
+          "tenant",
+          "graph",
+          "slice",
+          "state",
+          "epoch",
+          "position",
+          "window",
+          "watermark_ms",
+          "commits",
+          "commit_ms",
+          "in_flight_epochs",
+          "fenced",
+          "restarts",
+          "throttled",
+          "last_error",
+          "worker",
+          "assigned_to"
+        ],
+        "type": "object"
+      },
+      "StateBody": {
+        "description": "The run state of a graph.",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/RunState",
+            "description": "The desired run state."
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "TenantId": {
+        "description": "A tenant id: 1 to 128 letters, digits, `-` or `_`.",
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "type": "string"
+      },
+      "TenantSummary": {
+        "description": "One tenant of `GET /api/v1/tenants`.",
+        "properties": {
+          "actors": {
+            "description": "Actors of the tenant on alive workers.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "graphs": {
+            "description": "Graphs in the index (including those being deleted).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "in_per_sec": {
+            "description": "Input rate of the tenant on alive workers, records per second.",
+            "format": "double",
+            "type": "number"
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Tenant id."
+          }
+        },
+        "required": [
+          "tenant",
+          "graphs",
+          "actors",
+          "in_per_sec"
+        ],
+        "type": "object"
+      },
+      "TenantUsage": {
+        "description": "What one tenant consumes on one worker.",
+        "properties": {
+          "actors": {
+            "description": "Actors of the tenant running on the worker.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "busy": {
+            "description": "Sum of the busy ratios of its actors. Busy time includes waiting on\nI/O (a sink write, a KV command), so this is occupation, not CPU.",
+            "format": "double",
+            "type": "number"
+          },
+          "in_per_sec": {
+            "description": "Records its source actors read over the last interval, per second.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "actors",
+          "in_per_sec",
+          "busy"
+        ],
+        "type": "object"
+      },
+      "TenantsView": {
+        "description": "`GET /api/v1/tenants`.",
+        "properties": {
+          "tenants": {
+            "description": "Tenants sorted by id.",
+            "items": {
+              "$ref": "#/components/schemas/TenantSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tenants"
+        ],
+        "type": "object"
+      },
+      "TypeTag": {
+        "description": "A value type: `*` for any type, otherwise a Rust type name.",
+        "type": "string"
+      },
+      "VersionReply": {
+        "description": "The version of a description after a change.",
+        "properties": {
+          "version": {
+            "description": "Version of the stored description.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "type": "object"
+      },
+      "WorkerId": {
+        "description": "A worker id: 1 to 128 letters, digits, `-` or `_`, `.`.",
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_.-]+$",
+        "type": "string"
+      },
+      "WorkerView": {
+        "description": "One worker of `GET /api/v1/cluster`.",
+        "properties": {
+          "actors": {
+            "description": "Actors on the worker.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "alive": {
+            "description": "Heartbeat younger than the member timeout.",
+            "type": "boolean"
+          },
+          "api_addr": {
+            "description": "Worker HTTP address.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "generation": {
+            "description": "Process generation.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "heartbeat_ms": {
+            "description": "Last heartbeat.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "load": {
+            "$ref": "#/components/schemas/Load",
+            "description": "Resource usage."
+          },
+          "slices": {
+            "description": "Slices on the worker.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tenants": {
+            "additionalProperties": false,
+            "description": "Consumption per tenant, from the worker's snapshot (empty without one).",
+            "patternProperties": {
+              "^[A-Za-z0-9_-]+$": {
+                "$ref": "#/components/schemas/TenantUsage"
+              }
+            },
+            "type": "object"
+          },
+          "version": {
+            "description": "Worker version.",
+            "type": "string"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/WorkerId",
+            "description": "Worker id."
+          }
+        },
+        "required": [
+          "worker",
+          "alive",
+          "generation",
+          "heartbeat_ms",
+          "load",
+          "actors",
+          "slices",
+          "api_addr",
+          "version",
+          "tenants"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Control plane of streaming-rs: graphs, their state and their metrics. Errors are `{\"error\": \"<message>\"}`. There is no authentication: do not expose this API publicly.",
+    "title": "streaming-rs",
+    "version": "0.1.0"
+  },
+  "openapi": "3.2.0",
+  "paths": {
+    "/api/v1/catalog": {
+      "get": {
+        "operationId": "catalog",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "The operators the cluster can run, sorted by reference.",
+        "tags": [
+          "cluster"
+        ]
+      }
+    },
+    "/api/v1/cluster": {
+      "get": {
+        "description": "`workers` comes from `cluster:members` (a worker is `alive` when its\nheartbeat is younger than the member timeout) joined with each worker's\nmetrics snapshot. `kv` is present only when the embedding process provides\nstore statistics (standalone mode).",
+        "operationId": "cluster",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "The workers, the placement and the store.",
+        "tags": [
+          "cluster"
+        ]
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "operationId": "openapi_document",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "An OpenAPI 3.2 document.",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "This document."
+          }
+        },
+        "summary": "The OpenAPI document of this API.",
+        "tags": [
+          "cluster"
+        ]
+      }
+    },
+    "/api/v1/tenants": {
+      "get": {
+        "operationId": "tenants",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantsView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "The tenants that have graphs, with their consumption on alive workers.",
+        "tags": [
+          "tenants"
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant}/graphs": {
+      "get": {
+        "operationId": "tenant_graphs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphsView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "The graphs of a tenant, summarized.",
+        "tags": [
+          "tenants"
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant}/graphs/{graph}": {
+      "delete": {
+        "description": "The graph is marked as being deleted; workers stop it and the controller\nremoves its state.",
+        "operationId": "delete_graph",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "graph",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletingReply"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "Delete a graph.",
+        "tags": [
+          "graphs"
+        ]
+      },
+      "get": {
+        "operationId": "graph",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "graph",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphDetail"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "A graph: its description, plan, nodes with their metrics, edges, slices and bottleneck.",
+        "tags": [
+          "graphs"
+        ]
+      },
+      "put": {
+        "description": "The description must name the graph of the path. It is validated against\nthe catalogue (operators, types, edges) before being stored; the version\nand the cluster epoch are bumped, and workers converge on it.",
+        "operationId": "put_graph",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "graph",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GraphSpecInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionReply"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "Create or replace a graph.",
+        "tags": [
+          "graphs"
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant}/graphs/{graph}/dot": {
+      "get": {
+        "operationId": "dot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "graph",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/vnd.graphviz": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The graph in Graphviz's DOT language."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "A graph's description in Graphviz's DOT language.",
+        "tags": [
+          "graphs"
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/config": {
+      "patch": {
+        "description": "The body is merged into the node's configuration object, key by key; the\nnew description is validated and stored as a new version.",
+        "operationId": "patch_config",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "graph",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionReply"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "Change some keys of a node's configuration.",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/pause": {
+      "post": {
+        "operationId": "pause",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "graph",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PausedReply"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "Pause a node: its instances stop reading and hold their state.",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/resume": {
+      "post": {
+        "operationId": "resume",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "graph",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PausedReply"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "Resume a paused node.",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant}/graphs/{graph}/outputs/{node}": {
+      "get": {
+        "description": "Rows are sorted by event time, most recent first, then by key. A row the\nstore holds but cannot decode is skipped.",
+        "operationId": "outputs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "graph",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows to return at most (200 by default); above 2000, 2000.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutputsView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "The latest rows written by a `std/kv-sink@1` node.",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant}/graphs/{graph}/state": {
+      "post": {
+        "operationId": "set_state",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "graph",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StateBody"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid request: a malformed identifier or body (400), or an unknown tenant, graph or node (404)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The store did not answer (503)."
+          }
+        },
+        "summary": "Run or stop a graph.",
+        "tags": [
+          "graphs"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Answers `ok` as long as the process serves HTTP; it reads nothing from the\nstore.",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Success."
+          }
+        },
+        "summary": "Liveness check.",
+        "tags": [
+          "cluster"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "cluster"
+    },
+    {
+      "name": "graphs"
+    },
+    {
+      "name": "nodes"
+    },
+    {
+      "name": "tenants"
+    }
+  ]
+}

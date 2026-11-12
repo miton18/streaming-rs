@@ -151,7 +151,8 @@ light gossip for membership: each worker gossips a couple of hundred bytes
 | `streaming-kv-redis` | RESP client for Redis and Materia KV (`HSCAN` paging, size limits, optional TLS) |
 | `streaming-pulsar` | Apache Pulsar source and sink on the [Magnetar](https://github.com/CleverCloud/magnetar) client |
 | `streaming-warp10` | Warp 10 sink (`/api/v0/update`) |
-| `streaming-api` | HTTP API and embedded web UI ([docs/http-api.md](docs/http-api.md)) |
+| `streaming-api` | HTTP API and embedded web UI ([docs/http-api.md](docs/http-api.md), [OpenAPI](docs/openapi.json)) |
+| `streaming-openapi` | `#[route]` attribute: registers an axum handler and derives its OpenAPI description from its signature (macro in `streaming-openapi-macros`) |
 | `streaming-sim` | simulation harness and the exactly-once tests |
 | `streamd` | the daemon: `standalone` and `worker` |
 

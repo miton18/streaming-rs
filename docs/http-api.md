@@ -7,10 +7,23 @@ workers converge on what it writes.
 
 Errors are `{"error": "<message>"}` with a 4xx/5xx status.
 
+The machine-readable contract is the OpenAPI 3.2 document served at
+`GET /api/v1/openapi.json` and committed as [`openapi.json`](openapi.json).
+It is derived from the handlers themselves: each carries its method and path
+in a `#[route(METHOD, "/path")]` attribute (crate `streaming-openapi`), and
+the parameters, bodies and responses come from the types of its arguments and
+of its return value. Schemas are JSON Schema 2020-12. A type whose input form
+differs from its output form (fields with a default) is listed twice, the
+input form as `<Name>Input`. The test suite checks every answer of the API
+tests against the document, and that the committed copy is up to date.
+
 ## Read
 
 ### `GET /healthz`
 `200 ok`.
+
+### `GET /api/v1/openapi.json`
+The OpenAPI document of this API.
 
 ### `GET /api/v1/cluster`
 ```json

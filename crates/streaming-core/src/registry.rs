@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// What a node does in a graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OpKind {
     /// Reads from the outside world.
@@ -93,6 +93,19 @@ impl Serialize for TypeTag {
     }
 }
 
+impl schemars::JsonSchema for TypeTag {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "TypeTag".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A value type: `*` for any type, otherwise a Rust type name.",
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for TypeTag {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
@@ -102,7 +115,7 @@ impl<'de> Deserialize<'de> for TypeTag {
 
 /// Public description of a registered operator. Published in the KV so that
 /// the API and the UI can list operators and validate graphs without the code.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OpDescriptor {
     /// The reference used in graph descriptions.
     pub op: OpRef,
@@ -122,7 +135,7 @@ pub struct OpDescriptor {
 }
 
 /// One parameter of an operator's configuration, as a tool presents it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ParamSpec {
     /// Key in the configuration object.
     pub name: String,
@@ -182,7 +195,7 @@ impl ParamSpec {
 }
 
 /// The set of operators a cluster can run, without their code.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Catalog {
     /// Descriptors, by reference.
     pub ops: BTreeMap<OpRef, OpDescriptor>,
