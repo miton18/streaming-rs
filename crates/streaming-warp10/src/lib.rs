@@ -34,7 +34,7 @@
 //! ```json
 //! {"endpoint": "https://host/api/v0/update",
 //!  "token": "..." | {"secret": "name"},
-//!  "time_unit": "us", "timeout": "10s", "max_batch_bytes": 1048576}
+//!  "timeUnit": "us", "timeout": "10s", "maxBatchBytes": 1048576}
 //! ```
 //!
 //! `https://` needs the `tls` cargo feature (rustls over the futures-io
@@ -97,7 +97,7 @@ fn sink_params() -> Vec<ParamSpec> {
         )
         .required(),
         ParamSpec::new(
-            "time_unit",
+            "timeUnit",
             "text",
             "Time unit the platform was configured with; timestamps are converted to it.",
         )
@@ -110,7 +110,7 @@ fn sink_params() -> Vec<ParamSpec> {
         )
         .default("10s"),
         ParamSpec::new(
-            "max_batch_bytes",
+            "maxBatchBytes",
             "integer",
             "Largest body of one request, in bytes; a larger batch is split into several \
              requests.",

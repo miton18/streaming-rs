@@ -116,6 +116,7 @@ impl<'de> Deserialize<'de> for TypeTag {
 /// Public description of a registered operator. Published in the KV so that
 /// the API and the UI can list operators and validate graphs without the code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct OpDescriptor {
     /// The reference used in graph descriptions.
     pub op: OpRef,
@@ -136,6 +137,7 @@ pub struct OpDescriptor {
 
 /// One parameter of an operator's configuration, as a tool presents it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ParamSpec {
     /// Key in the configuration object.
     pub name: String,
@@ -196,6 +198,7 @@ impl ParamSpec {
 
 /// The set of operators a cluster can run, without their code.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Catalog {
     /// Descriptors, by reference.
     pub ops: BTreeMap<OpRef, OpDescriptor>,

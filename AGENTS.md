@@ -246,7 +246,7 @@ parser (names accepted, required flags, defaults, choices).
 Observability vocabulary: an actor is *busy*, *idle* or *backpressured*;
 `waiting` is the part of busy spent inside a sink's write. A node shows the
 worst busy and the worst backpressure over its instances. The bottleneck
-says `limited_by`: `destination`, `work` or `store`.
+says `limitedBy`: `destination`, `work` or `store`.
 
 After changing anything under `crates/streaming-api/ui/`, rebuild `streamd`
 (the UI is embedded) and check it in a real browser.

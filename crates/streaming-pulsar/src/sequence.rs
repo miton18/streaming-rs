@@ -106,11 +106,11 @@ impl SequenceLayout {
         let total: u32 = bits.iter().map(|b| u32::from(*b)).sum();
         if total > 63 {
             return Err(format!(
-                "broker_dedup layout uses {total} bits, Pulsar sequence ids have 63"
+                "brokerDedup layout uses {total} bits, Pulsar sequence ids have 63"
             ));
         }
         if total == 0 {
-            return Err("broker_dedup layout must use at least one bit".into());
+            return Err("brokerDedup layout must use at least one bit".into());
         }
         Ok(Self { bits })
     }
@@ -128,7 +128,7 @@ impl SequenceLayout {
         for (i, (&value, &bits)) in components.iter().zip(&self.bits).enumerate() {
             if bits < 64 && value >> bits != 0 {
                 return Err(format!(
-                    "broker_dedup: {} = {value} does not fit in {bits} bits (layout {:?}); \
+                    "brokerDedup: {} = {value} does not fit in {bits} bits (layout {:?}); \
                      widen the layout under a new producer name",
                     NAMES[i], self.bits
                 ));

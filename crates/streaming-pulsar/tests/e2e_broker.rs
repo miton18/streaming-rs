@@ -196,8 +196,8 @@ async fn source_reads_partitions_acks_and_redelivers() {
     produce(&client, &partition_topic(&topic, 0), false, vec![message(99)]).await;
 
     let config = json!({
-        "service_url": url, "topic": topic, "subscription": "it",
-        "event_time": "event", "receiver_queue_size": 5,
+        "serviceUrl": url, "topic": topic, "subscription": "it",
+        "eventTime": "event", "receiverQueueSize": 5,
     });
     let source = make_source(config.clone());
     assert_eq!(source.partitions().await.unwrap(), 3);
@@ -269,7 +269,7 @@ async fn source_reads_partitions_acks_and_redelivers() {
 
     // Event time "publish".
     let mut publish = make_source(json!({
-        "service_url": url, "topic": topic, "subscription": "it-publish",
+        "serviceUrl": url, "topic": topic, "subscription": "it-publish",
     }))
     .open(0, None)
     .await
@@ -286,7 +286,7 @@ async fn failover_delivers_to_one_consumer_and_hands_over() {
     let Some(url) = broker() else { return };
     let topic = partitioned_topic("public/streaming-it", &unique("failover"), 2);
     let client = raw_client(&url).await;
-    let config = json!({"service_url": url, "topic": topic, "subscription": "fo"});
+    let config = json!({"serviceUrl": url, "topic": topic, "subscription": "fo"});
     // Two connectors, as on two workers during a hand-over.
     let (a, b) = (make_source(config.clone()), make_source(config));
     let mut ra = a.open(0, None).await.unwrap();
@@ -336,7 +336,7 @@ async fn non_partitioned_topic_is_one_partition() {
     let topic = format!("persistent://public/streaming-it/{}", unique("plain"));
     let client = raw_client(&url).await;
     produce(&client, &topic, false, (0..2).map(message).collect()).await;
-    let source = make_source(json!({"service_url": url, "topic": topic, "subscription": "s"}));
+    let source = make_source(json!({"serviceUrl": url, "topic": topic, "subscription": "s"}));
     assert_eq!(source.partitions().await.unwrap(), 1);
     assert!(source.open(1, None).await.is_err());
     let mut reader = source.open(0, None).await.unwrap();
@@ -368,7 +368,7 @@ fn emit(partition: u32, position: Position, key: Option<&str>, payload: &str) ->
 
 /// Read everything currently in every partition of `topic`, by payload.
 async fn read_all(url: &str, topic: &str, expected: usize) -> Vec<PulsarMessage> {
-    let source = make_source(json!({"service_url": url, "topic": topic,
+    let source = make_source(json!({"serviceUrl": url, "topic": topic,
                                "subscription": unique("check")}));
     let partitions = source.partitions().await.unwrap();
     let mut out = Vec::new();
@@ -391,7 +391,7 @@ async fn read_all(url: &str, topic: &str, expected: usize) -> Vec<PulsarMessage>
 async fn sink_round_trip_with_emit_ids() {
     let Some(url) = broker() else { return };
     let topic = partitioned_topic("public/streaming-it", &unique("sink"), 2);
-    let sink = make_sink(json!({"service_url": url, "topic": topic, "producer_name": "rt"}));
+    let sink = make_sink(json!({"serviceUrl": url, "topic": topic, "producerName": "rt"}));
     let batch: Vec<Emit> = (0..10)
         .map(|i| {
             let key = if i % 2 == 0 { Some("same-key") } else { None };
@@ -459,9 +459,9 @@ fn elements(range: std::ops::RangeInclusive<u64>) -> Vec<Emit> {
 /// position 3 and goes on to 8. Returns what the topic holds and the stats of
 /// the replayed write.
 async fn replay_scenario(url: &str, topic: &str, dedup: bool) -> (Vec<PulsarMessage>, WriteStats) {
-    let mut config = json!({"service_url": url, "topic": topic, "producer_name": "dd"});
+    let mut config = json!({"serviceUrl": url, "topic": topic, "producerName": "dd"});
     if dedup {
-        config["broker_dedup"] = json!({"position_bits": [20, 30, 5], "index_bits": 8});
+        config["brokerDedup"] = json!({"positionBits": [20, 30, 5], "indexBits": 8});
     }
     let first = concrete_sink(config.clone());
     first.write(&elements(1..=2)).await.expect("first write");
@@ -510,8 +510,8 @@ async fn broker_dedup_contiguous_positions_and_broker_side_drop() {
     let Some(url) = broker() else { return };
     let topic = format!("persistent://public/streaming-dedup/{}", unique("contig"));
     // (1, i, 0) with this layout gives consecutive sequence ids.
-    let config = json!({"service_url": url, "topic": topic, "producer_name": "twice",
-                        "broker_dedup": {"position_bits": [8, 47, 0], "index_bits": 0}});
+    let config = json!({"serviceUrl": url, "topic": topic, "producerName": "twice",
+                        "brokerDedup": {"positionBits": [8, 47, 0], "indexBits": 0}});
     let one = |i: u64| emit(0, Position(1, i, 0), None, &format!("e{i}"));
     let first = concrete_sink(config.clone());
     first.write(&(1..=4).map(one).collect::<Vec<_>>()).await.unwrap();

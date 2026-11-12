@@ -2,10 +2,10 @@
 //!
 //! | reference | kind | types | configuration |
 //! |---|---|---|---|
-//! | `demo/generator@1` | source | `Vec<u8>` (JSON) | `{"partitions": 4, "rate_per_sec": 2000, "keys": 50}` |
+//! | `demo/generator@1` | source | `Vec<u8>` (JSON) | `{"partitions": 4, "ratePerSec": 2000, "keys": 50}` |
 //! | `demo/decode@1` | map | `Vec<u8>` -> `Event` | |
 //! | `demo/by-user@1` | key_by | `Event` | |
-//! | `demo/slow-sink@1` | sink | any | `{"latency_ms": 0}` |
+//! | `demo/slow-sink@1` | sink | any | `{"latencyMs": 0}` |
 
 use std::{
     collections::HashMap,
@@ -65,6 +65,7 @@ fn default_keys() -> u64 {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeneratorConfig {
     #[serde(default = "default_partitions")]
     partitions: u32,
@@ -130,6 +131,7 @@ impl<P: Providers> SinkConnector for SlowSink<P> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SlowSinkConfig {
     #[serde(default)]
     latency_ms: u64,
@@ -151,7 +153,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
                 return Err(OpError::Config("`partitions` must be between 1 and 64".into()));
             }
             if config.rate_per_sec > 200_000 {
-                return Err(OpError::Config("`rate_per_sec` must be at most 200000".into()));
+                return Err(OpError::Config("`ratePerSec` must be at most 200000".into()));
             }
             let topic = format!(
                 "{}/{}/{}/{}",
@@ -195,7 +197,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
         |context, config| {
             let config: SlowSinkConfig = parse(config)?;
             if config.latency_ms > 60_000 {
-                return Err(OpError::Config("`latency_ms` must be at most 60000".into()));
+                return Err(OpError::Config("`latencyMs` must be at most 60000".into()));
             }
             Ok(Arc::new(SlowSink {
                 providers: context.providers.clone(),
@@ -208,13 +210,13 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
         "demo/generator@1",
         [
             streaming_core::ParamSpec::new("partitions", "integer", "Number of partitions.").default(4),
-            streaming_core::ParamSpec::new("rate_per_sec", "integer", "Events per second.").default(2000),
+            streaming_core::ParamSpec::new("ratePerSec", "integer", "Events per second.").default(2000),
             streaming_core::ParamSpec::new("keys", "integer", "Number of distinct users.").default(50),
         ],
     );
     registry.with_params(
         "demo/slow-sink@1",
-        [streaming_core::ParamSpec::new("latency_ms", "integer", "Delay of each write, in milliseconds.").default(0)],
+        [streaming_core::ParamSpec::new("latencyMs", "integer", "Delay of each write, in milliseconds.").default(0)],
     );
 }
 
@@ -222,16 +224,16 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
 #[must_use]
 pub fn graphs() -> Vec<GraphSpec> {
     let settings = json!({
-        "max_out_of_orderness": "500ms",
-        "idle_timeout": "3s",
+        "maxOutOfOrderness": "500ms",
+        "idleTimeout": "3s",
         "linger": "100ms",
-        "flush_interval": "500ms",
-        "max_batch": 500,
-        "chunk_size": 100,
-        "mailbox_capacity": 4,
+        "flushInterval": "500ms",
+        "maxBatch": 500,
+        "chunkSize": 100,
+        "mailboxCapacity": 4,
         // Low enough for a slow sink behind the aggregate to hold the source
         // back within half a minute.
-        "max_pending_windows": 3
+        "maxPendingWindows": 3
     });
     let specs = [
         json!({
@@ -240,7 +242,7 @@ pub fn graphs() -> Vec<GraphSpec> {
             "settings": settings,
             "nodes": [
                 {"id": "events", "op": "demo/generator@1",
-                 "config": {"partitions": 4, "rate_per_sec": 2000, "keys": 50}},
+                 "config": {"partitions": 4, "ratePerSec": 2000, "keys": 50}},
                 {"id": "decode", "op": "demo/decode@1"},
                 {"id": "by-user", "op": "demo/by-user@1"},
                 {"id": "window", "op": "std/tumbling@1", "config": {"size": "10s"}},
@@ -249,8 +251,8 @@ pub fn graphs() -> Vec<GraphSpec> {
                 {"id": "results", "op": "std/kv-sink@1", "config": {"retain": 400}},
                 {"id": "to-gts", "op": "std/count-to-gts@1",
                  "config": {"class": "events.count", "label": "user"}},
-                {"id": "warp10", "op": "demo/slow-sink@1", "config": {"latency_ms": 0}},
-                {"id": "archive", "op": "demo/slow-sink@1", "config": {"latency_ms": 0}}
+                {"id": "warp10", "op": "demo/slow-sink@1", "config": {"latencyMs": 0}},
+                {"id": "archive", "op": "demo/slow-sink@1", "config": {"latencyMs": 0}}
             ],
             "edges": [
                 ["events", "decode"], ["decode", "by-user"], ["by-user", "window"],
@@ -265,7 +267,7 @@ pub fn graphs() -> Vec<GraphSpec> {
             "settings": settings,
             "nodes": [
                 {"id": "clicks", "op": "demo/generator@1",
-                 "config": {"partitions": 2, "rate_per_sec": 300, "keys": 12}},
+                 "config": {"partitions": 2, "ratePerSec": 300, "keys": 12}},
                 {"id": "decode", "op": "demo/decode@1"},
                 {"id": "by-user", "op": "demo/by-user@1"},
                 {"id": "sliding", "op": "std/sliding@1", "config": {"size": "20s", "slide": "5s"}},

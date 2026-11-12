@@ -292,22 +292,22 @@ export class GraphView {
     this.updateSeg();
 
     // stats
-    const srcOut = nodes.filter((n) => n.kind === 'source').reduce((a, n) => a + (n.out_per_sec || 0), 0);
-    const sinkOut = nodes.filter((n) => n.kind === 'sink').reduce((a, n) => a + (n.out_per_sec || 0), 0);
+    const srcOut = nodes.filter((n) => n.kind === 'source').reduce((a, n) => a + (n.outPerSec || 0), 0);
+    const sinkOut = nodes.filter((n) => n.kind === 'sink').reduce((a, n) => a + (n.outPerSec || 0), 0);
     setStat(r.stats.in, rate(srcOut), `${int(nodes.filter((n) => n.kind === 'source').length)} source(s)`);
     setStat(r.stats.out, rate(sinkOut), `${int(nodes.filter((n) => n.kind === 'sink').length)} sink(s)`);
-    if (d.watermark_ms != null) {
-      const lag = Math.max(0, now - d.watermark_ms);
-      setStat(r.stats.wm, time(d.watermark_ms), `retard ${dur(lag)}`, fullTime(d.watermark_ms));
+    if (d.watermarkMs != null) {
+      const lag = Math.max(0, now - d.watermarkMs);
+      setStat(r.stats.wm, time(d.watermarkMs), `retard ${dur(lag)}`, fullTime(d.watermarkMs));
       r.stats.wm._r.s.style.color = lag > 30000 ? 'var(--tone-bp-text)' : '';
     } else setStat(r.stats.wm, '–', (d.slices || []).some((x) => x.slice.startsWith('src.')) ? 'slice source muette' : 'aucune slice source');
     const actors = nodes.reduce((a, n) => a + (n.actors || 0), 0);
     setStat(r.stats.topo, `${nodes.length} nœuds`, `${int(actors)} acteurs · ${int((d.slices || []).length)} slices`);
     const plan = d.plan;
     if (!plan) setStat(r.stats.plan, 'non planifié', 'en attente du contrôleur');
-    else setStat(r.stats.plan, `v${plan.spec_version}`, plan.error ? 'en erreur' : `calculé à ${time(plan.planned_ms)}`, plan.planned_ms ? fullTime(plan.planned_ms) : null);
+    else setStat(r.stats.plan, `v${plan.specVersion}`, plan.error ? 'en erreur' : `calculé à ${time(plan.plannedMs)}`, plan.plannedMs ? fullTime(plan.plannedMs) : null);
     r.stats.plan._r.s.style.color = plan?.error ? 'var(--color-danger-300)' : '';
-    if (plan && plan.spec_version !== d.version) text(r.stats.plan._r.s, `retard sur v${d.version}`);
+    if (plan && plan.specVersion !== d.version) text(r.stats.plan._r.s, `retard sur v${d.version}`);
 
     r.planErr.hidden = !plan?.error;
     text(r.planErrText, plan?.error || '');
@@ -359,10 +359,10 @@ export class GraphView {
     const node = nodes.find((n) => n.id === b.node);
     let hint;
     if (b.kind === 'commit') {
-      hint = `Ce ne sont pas les opérateurs qui limitent le pipeline mais les commits KV de la slice partant de « ${b.node} » : chaque epoch doit être écrite dans le KV avant que la source puisse avancer, et ces écritures saturent. Pistes : espacer les commits (flush_interval), autoriser plus d'epochs en vol (max_in_flight_epochs) ou soulager le KV.`;
+      hint = `Ce ne sont pas les opérateurs qui limitent le pipeline mais les commits KV de la slice partant de « ${b.node} » : chaque epoch doit être écrite dans le KV avant que la source puisse avancer, et ces écritures saturent. Pistes : espacer les commits (flushInterval), autoriser plus d'epochs en vol (maxInFlightEpochs) ou soulager le KV.`;
     } else {
       const ups = (d.edges || []).filter((e) => e.to === b.node).map((e) => e.from);
-      hint = `« ${b.node} » travaille ${pct(b.busy)} du temps pendant que ${ups.length ? ups.map((u) => `« ${u} »`).join(', ') : "l'amont"} attend de la place : c'est lui qui fixe le débit du graphe${node ? ` (${rate(node.in_per_sec)} en entrée, ${node.actors} acteur${node.actors > 1 ? 's' : ''})` : ''}.`;
+      hint = `« ${b.node} » travaille ${pct(b.busy)} du temps pendant que ${ups.length ? ups.map((u) => `« ${u} »`).join(', ') : "l'amont"} attend de la place : c'est lui qui fixe le débit du graphe${node ? ` (${rate(node.inPerSec)} en entrée, ${node.actors} acteur${node.actors > 1 ? 's' : ''})` : ''}.`;
     }
     text(r.bnHint, hint);
   }
@@ -379,9 +379,9 @@ export class GraphView {
     (tr, s) => {
       const c = tr.children;
       text(c[0].firstChild, s.slice);
-      const moved = s.worker && s.assigned_to && s.worker !== s.assigned_to;
-      if (!s.worker) text(c[1], s.assigned_to ? `assignée à ${s.assigned_to}` : 'non assignée');
-      else text(c[1], moved ? `${s.worker} · assignée à ${s.assigned_to}` : s.worker);
+      const moved = s.worker && s.assignedTo && s.worker !== s.assignedTo;
+      if (!s.worker) text(c[1], s.assignedTo ? `assignée à ${s.assignedTo}` : 'non assignée');
+      else text(c[1], moved ? `${s.worker} · assignée à ${s.assignedTo}` : s.worker);
       c[1].style.color = !s.worker ? 'var(--color-neutral-400)' : moved ? 'var(--tone-bp-text)' : '';
       if (!s.worker) setTag(c[2].firstChild, 'non rapportée', 'outline');
       else setTag(c[2].firstChild, s.state, stateTone(s.state));
@@ -390,24 +390,24 @@ export class GraphView {
       const pos = s.position;
       const win = s.window;
       if (win) {
-        text(c[4].firstChild, `fenêtre ${time(win.start_ms)}–${time(win.end_ms).slice(-8)}${win.complete ? '' : ' (en cours)'}`);
-        attr(c[4], 'title', `dernière fenêtre émise : ${time(win.start_ms)} → ${time(win.end_ms)}${win.complete ? '' : ', émission en cours'} (position brute ${fmtPosition(pos)})`);
+        text(c[4].firstChild, `fenêtre ${time(win.startMs)}–${time(win.endMs).slice(-8)}${win.complete ? '' : ' (en cours)'}`);
+        attr(c[4], 'title', `dernière fenêtre émise : ${time(win.startMs)} → ${time(win.endMs)}${win.complete ? '' : ', émission en cours'} (position brute ${fmtPosition(pos)})`);
       } else {
         text(c[4].firstChild, fmtPosition(pos));
         attr(c[4], 'title', pos ? `position brute ${fmtPosition(pos)}` : null);
       }
-      text(c[5], s.watermark_ms != null ? time(s.watermark_ms) : '–');
-      attr(c[5], 'title', s.watermark_ms != null ? `retard ${dur(Math.max(0, now - s.watermark_ms))}` : null);
-      text(c[6], s.commit_ms != null && s.worker ? `${s.commit_ms >= 100 ? int(s.commit_ms) : (Math.round(s.commit_ms * 10) / 10).toString().replace('.', ',')}\u00a0ms` : '–');
-      c[6].style.color = s.commit_ms >= 250 ? 'var(--color-danger-300)' : '';
-      text(c[7], int(s.in_flight_epochs));
+      text(c[5], s.watermarkMs != null ? time(s.watermarkMs) : '–');
+      attr(c[5], 'title', s.watermarkMs != null ? `retard ${dur(Math.max(0, now - s.watermarkMs))}` : null);
+      text(c[6], s.commitMs != null && s.worker ? `${s.commitMs >= 100 ? int(s.commitMs) : (Math.round(s.commitMs * 10) / 10).toString().replace('.', ',')}\u00a0ms` : '–');
+      c[6].style.color = s.commitMs >= 250 ? 'var(--color-danger-300)' : '';
+      text(c[7], int(s.inFlightEpochs));
       text(c[8], int(s.fenced));
       c[8].style.color = s.fenced ? 'var(--tone-bp-text)' : '';
       text(c[9], int(s.restarts));
       c[9].style.color = s.restarts ? 'var(--tone-bp-text)' : '';
-      text(c[10], s.last_error || '–');
-      attr(c[10], 'title', s.last_error || null);
-      c[10].style.color = s.last_error ? 'var(--color-danger-200)' : 'var(--color-neutral-400)';
+      text(c[10], s.lastError || '–');
+      attr(c[10], 'title', s.lastError || null);
+      c[10].style.color = s.lastError ? 'var(--color-danger-200)' : 'var(--color-neutral-400)';
     });
   }
 
@@ -431,7 +431,7 @@ export class GraphView {
       const out = store.outputs[`${this.t}/${this.g}/${n.id}`];
       if (!out) { text(x.meta, 'Chargement…'); return; }
       const rows = out.rows || [];
-      text(x.meta, out.error ? `Erreur : ${out.error}` : `${int(rows.length)} dernières lignes · ${rate(n.out_per_sec)} · mis à jour ${time(out.at)}`);
+      text(x.meta, out.error ? `Erreur : ${out.error}` : `${int(rows.length)} dernières lignes · ${rate(n.outPerSec)} · mis à jour ${time(out.at)}`);
       x.empty.hidden = rows.length > 0;
       x.wrap.hidden = rows.length === 0;
       const first = !x.populated;
@@ -546,24 +546,24 @@ class NodePanel {
     r.paused.hidden = !n.paused;
     text(r.desc, n.description || 'Pas de description pour cet opérateur.');
     text(r.op, n.op);
-    text(r.tin, shortType(n.input_type)); attr(r.tin, 'title', n.input_type);
-    text(r.tout, shortType(n.output_type)); attr(r.tout, 'title', n.output_type);
+    text(r.tin, shortType(n.inputType)); attr(r.tin, 'title', n.inputType);
+    text(r.tout, shortType(n.outputType)); attr(r.tout, 'title', n.outputType);
     text(r.workers, n.workers?.length ? n.workers.join(', ') : '–');
     setMbar(r.bar, n.busy, n.idle, n.backpressured);
     text(r.nb, n.waiting >= 0.005 ? `busy ${pct(n.busy)} (attente destination ${pct(n.waiting)})` : `busy ${pct(n.busy)}`); text(r.ni, `idle ${pct(n.idle)}`); text(r.np, `backpressure ${pct(n.backpressured)}`);
     const m = (el, v, bad) => { text(el._r.v, v); toggle(el, 'bad', !!bad); };
-    m(r.mIn, n.kind === 'source' ? '–' : rate(n.in_per_sec));
-    m(r.mOut, rate(n.out_per_sec));
-    m(r.mQ, n.queue_cap ? `${int(n.queue_len)} / ${int(n.queue_cap)}` : '–', n.queue_cap && n.queue_len / n.queue_cap >= 0.85);
-    attr(r.mQ, 'title', n.queue_cap ? `${pct(n.queue_len / n.queue_cap)} de la capacité (en chunks)` : null);
-    m(r.mRin, compact(n.records_in)); attr(r.mRin, 'title', int(n.records_in));
-    m(r.mRout, compact(n.records_out)); attr(r.mRout, 'title', int(n.records_out));
+    m(r.mIn, n.kind === 'source' ? '–' : rate(n.inPerSec));
+    m(r.mOut, rate(n.outPerSec));
+    m(r.mQ, n.queueCap ? `${int(n.queueLen)} / ${int(n.queueCap)}` : '–', n.queueCap && n.queueLen / n.queueCap >= 0.85);
+    attr(r.mQ, 'title', n.queueCap ? `${pct(n.queueLen / n.queueCap)} de la capacité (en chunks)` : null);
+    m(r.mRin, compact(n.recordsIn)); attr(r.mRin, 'title', int(n.recordsIn));
+    m(r.mRout, compact(n.recordsOut)); attr(r.mRout, 'title', int(n.recordsOut));
     m(r.mAct, int(n.actors));
-    m(r.mLate, compact(n.late_dropped));
-    toggle(r.mLate, 'warn', n.late_dropped > 0); attr(r.mLate, 'title', 'Enregistrements arrivés après la fermeture de leur fenêtre');
+    m(r.mLate, compact(n.lateDropped));
+    toggle(r.mLate, 'warn', n.lateDropped > 0); attr(r.mLate, 'title', 'Enregistrements arrivés après la fermeture de leur fenêtre');
     m(r.mErr, compact(n.errors), n.errors > 0);
-    r.err.hidden = !n.last_error;
-    text(r.err, n.last_error ? `Dernière erreur : ${n.last_error}` : '');
+    r.err.hidden = !n.lastError;
+    text(r.err, n.lastError ? `Dernière erreur : ${n.lastError}` : '');
 
     // pause / resume
     const pend = this.pausePending && this.pausePending.node === n.id && this.pausePending.paused !== n.paused && Date.now() - this.pausePending.at < 8000;
@@ -590,10 +590,10 @@ class NodePanel {
       const bar = c[3].firstChild.firstChild; bar.style.width = '44px';
       setMbar(bar, a.busy, a.idle, a.backpressured);
       text(c[3].firstChild.lastChild, pct(a.busy));
-      text(c[4], a.kind === 'source' ? '–' : rate(a.in_per_sec));
-      text(c[5], rate(a.out_per_sec));
-      text(c[6], a.queue_cap ? `${a.queue_len}/${a.queue_cap}` : '–');
-      toggle(c[6], 't-bp', a.queue_cap && a.queue_len / a.queue_cap >= 0.85);
+      text(c[4], a.kind === 'source' ? '–' : rate(a.inPerSec));
+      text(c[5], rate(a.outPerSec));
+      text(c[6], a.queueCap ? `${a.queueLen}/${a.queueCap}` : '–');
+      toggle(c[6], 't-bp', a.queueCap && a.queueLen / a.queueCap >= 0.85);
     });
 
     r.cfg.sync(n, d);

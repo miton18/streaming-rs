@@ -25,6 +25,7 @@ pub const BACKPRESSURE_THRESHOLD: f64 = 0.3;
 
 /// One worker of `GET /api/v1/cluster`.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkerView {
     /// Worker id.
     pub worker: WorkerId,
@@ -50,6 +51,7 @@ pub struct WorkerView {
 
 /// `GET /api/v1/cluster`.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ClusterView {
     /// Value of `cluster:epoch`.
     pub epoch: i64,
@@ -103,6 +105,7 @@ pub fn cluster_view(
 
 /// `GET /api/v1/catalog`.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct CatalogView {
     /// Descriptors sorted by reference.
     pub ops: Vec<OpDescriptor>,
@@ -118,6 +121,7 @@ pub fn catalog_view(catalog: &Catalog) -> CatalogView {
 
 /// One tenant of `GET /api/v1/tenants`.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TenantSummary {
     /// Tenant id.
     pub tenant: TenantId,
@@ -131,6 +135,7 @@ pub struct TenantSummary {
 
 /// `GET /api/v1/tenants`.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TenantsView {
     /// Tenants sorted by id.
     pub tenants: Vec<TenantSummary>,
@@ -220,6 +225,7 @@ impl From<ActorState> for NodeState {
 
 /// An actor snapshot with the worker that reported it.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct InstanceView {
     /// The actor's snapshot.
     #[serde(flatten)]
@@ -230,6 +236,7 @@ pub struct InstanceView {
 
 /// A slice snapshot with the reporting and the assigned worker.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SliceView {
     /// The slice's snapshot (synthetic, `starting`, when nobody reports it).
     #[serde(flatten)]
@@ -242,6 +249,7 @@ pub struct SliceView {
 
 /// A node that limits the graph.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Bottleneck {
     /// The limiting node.
     pub node: NodeId,
@@ -263,6 +271,7 @@ pub struct Bottleneck {
 
 /// A node of a graph with its aggregated metrics.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeView {
     /// Node id.
     pub id: NodeId,
@@ -322,6 +331,7 @@ pub struct NodeView {
 
 /// An edge of a graph.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct EdgeView {
     /// Origin.
     pub from: NodeId,
@@ -333,6 +343,7 @@ pub struct EdgeView {
 
 /// `GET /api/v1/tenants/{tenant}/graphs/{graph}`.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphDetail {
     /// Tenant.
     pub tenant: TenantId,
@@ -365,6 +376,7 @@ pub struct GraphDetail {
 
 /// One graph of `GET /api/v1/tenants/{tenant}/graphs`.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphSummary {
     /// Tenant.
     pub tenant: TenantId,
@@ -396,6 +408,7 @@ pub struct GraphSummary {
 
 /// `GET /api/v1/tenants/{tenant}/graphs`.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphsView {
     /// Graphs.
     pub graphs: Vec<GraphSummary>,
@@ -1252,7 +1265,7 @@ mod tests {
         let json = serde_json::to_value(missing).unwrap();
         assert_eq!(json["worker"], Value::Null);
         assert_eq!(json["slice"], "src.events.1");
-        assert_eq!(json["assigned_to"], "w2");
+        assert_eq!(json["assignedTo"], "w2");
         let summary = graph_summary(&detail, 42);
         assert_eq!(summary.slices, 4);
         assert_eq!(summary.error.as_deref(), Some("nope"));
@@ -1587,7 +1600,7 @@ mod tests {
         assert_eq!(view.placement.version, 0);
         let json = serde_json::to_value(&view).unwrap();
         assert_eq!(json["kv"], Value::Null);
-        assert_eq!(json["workers"][0]["tenants"]["acme"]["in_per_sec"], 1200.0);
+        assert_eq!(json["workers"][0]["tenants"]["acme"]["inPerSec"], 1200.0);
     }
 
     #[test]

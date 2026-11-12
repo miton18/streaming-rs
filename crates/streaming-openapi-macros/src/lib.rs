@@ -190,6 +190,23 @@ fn check_path_extractor(path: &LitStr, params: &[String], inputs: &[&Type]) -> s
     }
 }
 
+/// `put_graph` -> `putGraph`: OpenAPI's usual spelling of operation ids.
+fn lower_camel_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut upper = false;
+    for c in name.trim_start_matches('_').chars() {
+        if c == '_' {
+            upper = !out.is_empty();
+        } else if upper {
+            out.extend(c.to_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The text of the `///` comments of the handler.
 fn doc_text(function: &ItemFn) -> String {
     let mut lines = Vec::new();
@@ -259,7 +276,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     let vis = &function.vis;
     let method = format_ident!("{}", args.method);
     let path = &args.path;
-    let operation_id = LitStr::new(&name.to_string(), Span::call_site());
+    let operation_id = LitStr::new(&lower_camel_case(&name.to_string()), Span::call_site());
     let docs = LitStr::new(&doc_text(&function), Span::call_site());
     let tag = args.tag.iter();
     let state = inputs.iter().find_map(|ty| extractor_arg(ty, "State"));
@@ -306,6 +323,14 @@ mod tests {
 
     fn error(attr: TokenStream2, item: TokenStream2) -> String {
         expand(attr, item).expect_err("expected a compile error").to_string()
+    }
+
+    #[test]
+    fn spells_operation_ids_in_lower_camel_case() {
+        assert_eq!(lower_camel_case("put_graph"), "putGraph");
+        assert_eq!(lower_camel_case("cluster"), "cluster");
+        assert_eq!(lower_camel_case("get_node__config_"), "getNodeConfig");
+        assert_eq!(lower_camel_case("_private_route"), "privateRoute");
     }
 
     #[test]

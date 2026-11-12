@@ -37,7 +37,7 @@ async fn serves_over_tcp_and_shuts_down() {
     assert_eq!(cluster["epoch"], 0);
     assert_eq!(cluster["workers"], serde_json::json!([]));
     assert_eq!(cluster["kv"], serde_json::Value::Null);
-    assert!(cluster["now_ms"].as_i64().unwrap() > 1_600_000_000_000);
+    assert!(cluster["nowMs"].as_i64().unwrap() > 1_600_000_000_000);
 
     let index = client.get(format!("http://{addr}/")).send().await.unwrap();
     assert_eq!(index.status(), 200);

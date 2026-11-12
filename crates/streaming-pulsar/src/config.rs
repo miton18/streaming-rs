@@ -28,27 +28,27 @@ impl ServiceUrl {
             (false, rest)
         } else {
             return Err(format!(
-                "service_url `{url}` must start with `pulsar://` or `pulsar+ssl://`"
+                "serviceUrl `{url}` must start with `pulsar://` or `pulsar+ssl://`"
             ));
         };
         let authority = rest.trim_end_matches('/');
         if authority.contains(',') {
             return Err(format!(
-                "service_url `{url}`: multi-host service URLs are not supported, give one host"
+                "serviceUrl `{url}`: multi-host service URLs are not supported, give one host"
             ));
         }
         if authority.is_empty() || authority.contains('/') || authority.contains('@') {
-            return Err(format!("service_url `{url}`: expected `scheme://host[:port]`"));
+            return Err(format!("serviceUrl `{url}`: expected `scheme://host[:port]`"));
         }
         let default_port = if tls { 6651 } else { 6650 };
         let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
             let (host, after) = v6
                 .split_once(']')
-                .ok_or_else(|| format!("service_url `{url}`: unterminated IPv6 address"))?;
+                .ok_or_else(|| format!("serviceUrl `{url}`: unterminated IPv6 address"))?;
             let port = match after.strip_prefix(':') {
                 Some(port) => parse_port(url, port)?,
                 None if after.is_empty() => default_port,
-                None => return Err(format!("service_url `{url}`: garbage after IPv6 address")),
+                None => return Err(format!("serviceUrl `{url}`: garbage after IPv6 address")),
             };
             (host.to_owned(), port)
         } else {
@@ -58,7 +58,7 @@ impl ServiceUrl {
             }
         };
         if host.is_empty() {
-            return Err(format!("service_url `{url}`: empty host"));
+            return Err(format!("serviceUrl `{url}`: empty host"));
         }
         Ok(Self { tls, host, port })
     }
@@ -80,7 +80,7 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 
 fn parse_port(url: &str, port: &str) -> Result<u16, String> {
     port.parse()
-        .map_err(|_| format!("service_url `{url}`: invalid port `{port}`"))
+        .map_err(|_| format!("serviceUrl `{url}`: invalid port `{port}`"))
 }
 
 /// Connection settings shared by the source and the sink.
@@ -125,6 +125,7 @@ fn default_receiver_queue_size() -> usize {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct RawSource {
     service_url: String,
     topic: String,
@@ -161,6 +162,7 @@ pub struct SourceConfig {
 /// Opt-in broker-side deduplication settings of the sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DedupConfig {
     /// Bits given to the three components of the origin position, most
     /// significant first.
@@ -173,6 +175,7 @@ pub struct DedupConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct RawSink {
     service_url: String,
     topic: String,
@@ -238,7 +241,7 @@ fn connection<P: moonpool_core::Providers>(
     };
     if tls_trust_certs_file.is_some() && !url.tls {
         return Err(OpError::Config(
-            "tls_trust_certs_file only applies to a `pulsar+ssl://` service_url".into(),
+            "tlsTrustCertsFile only applies to a `pulsar+ssl://` serviceUrl".into(),
         ));
     }
     Ok(ConnectionSettings {
@@ -257,7 +260,7 @@ impl SourceConfig {
             return Err(OpError::Config("subscription must not be empty".into()));
         }
         if raw.receiver_queue_size == 0 {
-            return Err(OpError::Config("receiver_queue_size must be positive".into()));
+            return Err(OpError::Config("receiverQueueSize must be positive".into()));
         }
         Ok(Self {
             connection: connection(context, &raw.service_url, raw.token.as_ref(), raw.tls_trust_certs_file)?,
@@ -278,14 +281,14 @@ impl SinkConfig {
         if let Some(name) = &raw.producer_name
             && name.trim().is_empty()
         {
-            return Err(OpError::Config("producer_name must not be empty".into()));
+            return Err(OpError::Config("producerName must not be empty".into()));
         }
         let dedup = match raw.broker_dedup {
             None => None,
             Some(dedup) => {
                 if raw.producer_name.is_none() {
                     return Err(OpError::Config(
-                        "broker_dedup needs a stable producer_name: the broker keys its \
+                        "brokerDedup needs a stable producerName: the broker keys its \
                          deduplication state by producer name"
                             .into(),
                     ));

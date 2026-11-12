@@ -22,10 +22,10 @@
 //! # Source
 //!
 //! ```json
-//! {"service_url": "pulsar://host:6650", "topic": "persistent://tenant/ns/name",
+//! {"serviceUrl": "pulsar://host:6650", "topic": "persistent://tenant/ns/name",
 //!  "subscription": "name", "token": "<jwt>" | {"secret": "name"},
-//!  "event_time": "publish" | "event", "receiver_queue_size": 1000,
-//!  "initial_position": "earliest" | "latest", "tls_trust_certs_file": "/ca.pem"}
+//!  "eventTime": "publish" | "event", "receiverQueueSize": 1000,
+//!  "initialPosition": "earliest" | "latest", "tlsTrustCertsFile": "/ca.pem"}
 //! ```
 //!
 //! - `partitions()` asks the broker for the partitioned-topic metadata; a
@@ -48,9 +48,9 @@
 //! # Sink
 //!
 //! ```json
-//! {"service_url": "...", "topic": "persistent://tenant/ns/name", "token": ...,
-//!  "producer_name": "orders-writer", "send_timeout_ms": 30000,
-//!  "broker_dedup": {"position_bits": [24, 24, 7], "index_bits": 8}}
+//! {"serviceUrl": "...", "topic": "persistent://tenant/ns/name", "token": ...,
+//!  "producerName": "orders-writer", "sendTimeoutMs": 30000,
+//!  "brokerDedup": {"positionBits": [24, 24, 7], "indexBits": 8}}
 //! ```
 //!
 //! Every element becomes one unbatched message carrying the element's emit id
@@ -148,7 +148,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
 fn connection_params() -> [ParamSpec; 3] {
     [
         ParamSpec::new(
-            "service_url",
+            "serviceUrl",
             "text",
             "Broker to connect to: `pulsar://host:6650`, or `pulsar+ssl://host:6651` for TLS. \
              A single host; the port defaults to 6650 (6651 with TLS).",
@@ -160,7 +160,7 @@ fn connection_params() -> [ParamSpec; 3] {
             "JWT sent to the broker for authentication. Absent: no authentication.",
         ),
         ParamSpec::new(
-            "tls_trust_certs_file",
+            "tlsTrustCertsFile",
             "text",
             "PEM file holding the certificate authorities to trust instead of the system \
              store. Only with a `pulsar+ssl://` service_url.",
@@ -190,7 +190,7 @@ fn source_params() -> Vec<ParamSpec> {
         token,
         tls,
         ParamSpec::new(
-            "event_time",
+            "eventTime",
             "text",
             "Event time of a record: `publish` takes the broker's publish time, `event` the \
              producer-set event time (the publish time when a message has none).",
@@ -198,7 +198,7 @@ fn source_params() -> Vec<ParamSpec> {
         .choices(["publish", "event"])
         .default("publish"),
         ParamSpec::new(
-            "initial_position",
+            "initialPosition",
             "text",
             "Where a subscription that does not exist yet starts: `earliest` reads the topic \
              from its oldest retained message, `latest` only what is published afterwards.",
@@ -206,7 +206,7 @@ fn source_params() -> Vec<ParamSpec> {
         .choices(["earliest", "latest"])
         .default("earliest"),
         ParamSpec::new(
-            "receiver_queue_size",
+            "receiverQueueSize",
             "integer",
             "Messages the broker may push ahead of consumption, per partition. Positive.",
         )
@@ -229,23 +229,23 @@ fn sink_params() -> Vec<ParamSpec> {
         token,
         tls,
         ParamSpec::new(
-            "producer_name",
+            "producerName",
             "text",
             "Base name of the producers; the slice id is appended to it. Required by \
              broker_dedup. Absent: the broker names them.",
         ),
         ParamSpec::new(
-            "send_timeout_ms",
+            "sendTimeoutMs",
             "integer",
             "Milliseconds to wait for the broker to acknowledge a message before the write \
              fails and is retried. 0 waits forever.",
         )
         .default(30_000),
         ParamSpec::new(
-            "broker_dedup",
+            "brokerDedup",
             "json",
             "Opt-in broker-side deduplication (effectively-once towards Pulsar), e.g. \
-             `{\"position_bits\": [24, 39, 0], \"index_bits\": 0}`: bits of the sequence id \
+             `{\"positionBits\": [24, 39, 0], \"indexBits\": 0}`: bits of the sequence id \
              given to the three components of the origin position and to the index of an \
              element within it (63 bits at most in all). Needs producer_name and deduplication \
              enabled on the namespace. Absent: at-least-once.",
@@ -299,7 +299,7 @@ mod tests {
         let Some((_, OpFactory::Source(factory))) = registry.get(&OpRef::new(SOURCE_OP).unwrap()) else {
             panic!("not a source");
         };
-        let ok = json!({"service_url": "pulsar://localhost:6650",
+        let ok = json!({"serviceUrl": "pulsar://localhost:6650",
                         "topic": "persistent://public/default/t", "subscription": "s"});
         assert!(factory(&context(), &ok).is_ok());
         assert!(matches!(
@@ -312,7 +312,7 @@ mod tests {
         assert!(
             factory(
                 &context(),
-                &json!({"service_url": "pulsar://localhost:6650",
+                &json!({"serviceUrl": "pulsar://localhost:6650",
                         "topic": "persistent://public/default/out"})
             )
             .is_ok()
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn source_config_defaults_and_options() {
         let config = source(&json!({
-            "service_url": "pulsar://broker:6650",
+            "serviceUrl": "pulsar://broker:6650",
             "topic": "persistent://public/default/orders",
             "subscription": "graph-g",
         }))
@@ -334,13 +334,13 @@ mod tests {
         assert_eq!(config.connection.url.addr(), "broker:6650");
 
         let config = source(&json!({
-            "service_url": "pulsar+ssl://broker",
+            "serviceUrl": "pulsar+ssl://broker",
             "topic": "persistent://public/default/orders",
             "subscription": "graph-g",
             "token": {"secret": "pulsar-jwt"},
-            "event_time": "event",
-            "receiver_queue_size": 50,
-            "initial_position": "latest",
+            "eventTime": "event",
+            "receiverQueueSize": 50,
+            "initialPosition": "latest",
         }))
         .unwrap();
         assert_eq!(config.connection.token.as_deref(), Some("eyJ.secret"));
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(config.initial_position, InitialPosition::Latest);
 
         let literal = source(&json!({
-            "service_url": "pulsar://b", "topic": "persistent://p/d/t",
+            "serviceUrl": "pulsar://b", "topic": "persistent://p/d/t",
             "subscription": "s", "token": "literal-jwt"}))
         .unwrap();
         assert_eq!(literal.connection.token.as_deref(), Some("literal-jwt"));
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn source_config_errors() {
-        let base = json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
+        let base = json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t",
                           "subscription": "s"});
         let with = |key: &str, value: Value| {
             let mut config = base.clone();
@@ -368,14 +368,14 @@ mod tests {
         };
         assert!(source(&base).is_ok());
         for (key, value) in [
-            ("service_url", json!("http://b")),
+            ("serviceUrl", json!("http://b")),
             ("topic", json!("t")),
             ("subscription", json!(" ")),
             ("token", json!({"secret": "missing"})),
             ("token", json!(42)),
-            ("event_time", json!("ingest")),
-            ("receiver_queue_size", json!(0)),
-            ("tls_trust_certs_file", json!("/ca.pem")), // not a TLS URL
+            ("eventTime", json!("ingest")),
+            ("receiverQueueSize", json!(0)),
+            ("tlsTrustCertsFile", json!("/ca.pem")), // not a TLS URL
             ("unknown_field", json!(1)),
         ] {
             assert!(
@@ -387,15 +387,15 @@ mod tests {
 
     #[test]
     fn sink_config() {
-        let config = sink(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t"})).unwrap();
+        let config = sink(&json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t"})).unwrap();
         assert_eq!(config.producer_name, None);
         assert_eq!(config.dedup, None);
         assert_eq!(config.send_timeout_ms, 30_000);
 
         let config = sink(&json!({
-            "service_url": "pulsar://b", "topic": "persistent://p/d/t",
-            "producer_name": "writer", "send_timeout_ms": 0,
-            "broker_dedup": {"position_bits": [24, 24, 7], "index_bits": 8},
+            "serviceUrl": "pulsar://b", "topic": "persistent://p/d/t",
+            "producerName": "writer", "sendTimeoutMs": 0,
+            "brokerDedup": {"positionBits": [24, 24, 7], "indexBits": 8},
         }))
         .unwrap();
         assert_eq!(config.dedup.unwrap().bits(), [24, 24, 7, 8]);
@@ -403,33 +403,33 @@ mod tests {
 
         // Deduplication needs a stable producer name and a layout that fits.
         assert!(matches!(
-            sink(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
-                         "broker_dedup": {"position_bits": [24, 24, 7]}})),
+            sink(&json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t",
+                         "brokerDedup": {"positionBits": [24, 24, 7]}})),
             Err(OpError::Config(_))
         ));
         assert!(matches!(
-            sink(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
-                         "producer_name": "w",
-                         "broker_dedup": {"position_bits": [32, 24, 7], "index_bits": 8}})),
+            sink(&json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t",
+                         "producerName": "w",
+                         "brokerDedup": {"positionBits": [32, 24, 7], "indexBits": 8}})),
             Err(OpError::Config(_))
         ));
         assert!(matches!(
-            sink(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
-                         "producer_name": ""})),
+            sink(&json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t",
+                         "producerName": ""})),
             Err(OpError::Config(_))
         ));
     }
 
     #[test]
     fn token_becomes_connect_auth() {
-        let config = source(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
+        let config = source(&json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t",
                                     "subscription": "s", "token": "jwt"}))
         .unwrap();
         let connection = client::connection_config(&config.connection);
         assert_eq!(connection.auth_method_name, "token");
         assert_eq!(connection.auth_data.as_deref(), Some(b"jwt".as_slice()));
         assert!(connection.supervisor.is_some());
-        let anonymous = source(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
+        let anonymous = source(&json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t",
                                        "subscription": "s"}))
         .unwrap();
         assert_eq!(client::connection_config(&anonymous.connection).auth_data, None);
@@ -491,11 +491,11 @@ mod tests {
 
     #[test]
     fn parameter_descriptions_match_the_parsers() {
-        let tls = json!({"service_url": "pulsar+ssl://broker",
+        let tls = json!({"serviceUrl": "pulsar+ssl://broker",
                          "topic": "persistent://public/default/t", "subscription": "s",
-                         "token": {"secret": "pulsar-jwt"}, "tls_trust_certs_file": "/ca.pem",
-                         "producer_name": "writer",
-                         "broker_dedup": {"position_bits": [24, 39, 0], "index_bits": 0}});
+                         "token": {"secret": "pulsar-jwt"}, "tlsTrustCertsFile": "/ca.pem",
+                         "producerName": "writer",
+                         "brokerDedup": {"positionBits": [24, 39, 0], "indexBits": 0}});
         check_descriptions(SOURCE_OP, &tls, source);
         check_descriptions(SINK_OP, &tls, sink);
     }

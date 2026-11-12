@@ -17,8 +17,8 @@ export function setStat(el, v, s, title) {
 
 /** KV read/write rates from two consecutive cluster snapshots. */
 export function kvRates(cur, prev) {
-  if (!cur?.kv || !prev?.kv || cur.now_ms <= prev.now_ms) return null;
-  const dt = (cur.now_ms - prev.now_ms) / 1000;
+  if (!cur?.kv || !prev?.kv || cur.nowMs <= prev.nowMs) return null;
+  const dt = (cur.nowMs - prev.nowMs) / 1000;
   return { reads: Math.max(0, (cur.kv.reads - prev.kv.reads) / dt), writes: Math.max(0, (cur.kv.writes - prev.kv.writes) / dt) };
 }
 
@@ -37,7 +37,7 @@ export function clusterStats() {
     s.workers._r.s.style.color = dead.length ? 'var(--color-danger-300)' : '';
     setStat(s.actors, int(alive.reduce((a, w) => a + (w.actors || 0), 0)), `sur ${alive.length} worker${alive.length > 1 ? 's' : ''}`);
     setStat(s.slices, int(alive.reduce((a, w) => a + (w.slices || 0), 0)), `placement v${c.placement?.version ?? '–'}`);
-    setStat(s.epoch, int(c.epoch), c.placement?.computed_by ? `placement par ${c.placement.computed_by}` : ' ');
+    setStat(s.epoch, int(c.epoch), c.placement?.computedBy ? `placement par ${c.placement.computedBy}` : ' ');
     s.kv.hidden = !c.kv; s.kvio.hidden = !c.kv;
     if (c.kv) {
       setStat(s.kv, `${compact(c.kv.keys)} clés`, bytes(c.kv.bytes));
@@ -72,14 +72,14 @@ export function updateGraphCard(el, g) {
   text(r.title, g.graph);
   attr(r.title, 'title', g.graph);
   setTag(r.state, g.state, stateTone(g.state));
-  text(r.in, rate(g.in_per_sec));
-  text(r.out, rate(g.out_per_sec));
+  text(r.in, rate(g.inPerSec));
+  text(r.out, rate(g.outPerSec));
   once(r.counts, `${g.nodes}|${g.actors}|${g.slices}|${g.version}`, () => [
     h('span', null, h('b', null, int(g.nodes)), ' nœuds'),
     h('span', null, h('b', null, int(g.actors)), ' acteurs'),
     h('span', null, h('b', null, int(g.slices)), ' slices'),
     h('span', null, 'version ', h('b', null, g.version))]);
-  if (g.watermark_ms != null) text(r.wm, `Watermark ${time(g.watermark_ms)} · retard ${dur(Math.max(0, conn.now() - g.watermark_ms))}`);
+  if (g.watermarkMs != null) text(r.wm, `Watermark ${time(g.watermarkMs)} · retard ${dur(Math.max(0, conn.now() - g.watermarkMs))}`);
   else text(r.wm, 'Watermark indisponible');
   if (g.bottleneck) {
     r.bn.hidden = false;
@@ -133,7 +133,7 @@ export class OverviewView {
       const r = el._r;
       const gs = store.graphs[t.tenant] || [];
       const bn = gs.filter((g) => g.bottleneck).length;
-      text(r.meta, `${gs.length} graphe${gs.length > 1 ? 's' : ''} · ${int(t.actors)} acteurs · ${rate(t.in_per_sec)} en entrée${bn ? ` · ${bn} goulot${bn > 1 ? 's' : ''}` : ''}`);
+      text(r.meta, `${gs.length} graphe${gs.length > 1 ? 's' : ''} · ${int(t.actors)} acteurs · ${rate(t.inPerSec)} en entrée${bn ? ` · ${bn} goulot${bn > 1 ? 's' : ''}` : ''}`);
       syncList(r.grid, gs, (g) => g.graph, () => graphCard(this.ctx), updateGraphCard);
     });
   }

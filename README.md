@@ -23,14 +23,14 @@ opens the web UI on <http://127.0.0.1:8080/>.
 
 Things to try in the UI:
 
-- open `acme / count-per-key`, click the `archive` node, set `latency_ms` to
+- open `acme / count-per-key`, click the `archive` node, set `latencyMs` to
   `400` and apply: the sink saturates, backpressure climbs up to the source
   and the node is flagged as the bottleneck;
 - do the same on `warp10`, the sink behind the aggregate, with `15000` (more
   than the ten-second window): the emitting half of `count` waits for it at
   once, and half a minute later, three closed windows being held up, the
   source stops reading too;
-- raise `rate_per_sec` on `events`, or change its `partitions`: slices join
+- raise `ratePerSec` on `events`, or change its `partitions`: slices join
   and leave the running pipeline;
 - open *Concevoir*: build a pipeline step by step, each operator chosen from
   the catalogue with a form for its parameters, and deploy it;
@@ -50,7 +50,7 @@ acyclic, every operator known to the cluster, types matching along each edge.
   "tenant": "acme", "graph": "count-per-key",
   "nodes": [
     {"id": "events", "op": "std/pulsar-source@1",
-     "config": {"service_url": "pulsar://broker:6650",
+     "config": {"serviceUrl": "pulsar://broker:6650",
                 "topic": "persistent://acme/prod/events",
                 "subscription": "count-per-key"}},
     {"id": "by-key", "op": "std/pulsar-key@1"},
@@ -75,7 +75,7 @@ most of the time while what feeds it waits.
 
 Closed windows wait in the store, not on an edge, so backpressure crosses an
 aggregate differently: a slice stops reading when too many of the windows it
-closed are still waiting to be emitted (`max_pending_windows`). A sink that
+closed are still waiting to be emitted (`maxPendingWindows`). A sink that
 cannot keep up behind an aggregate thus ends up slowing the source down, and
 the state waiting in the store stays bounded.
 
@@ -105,18 +105,18 @@ atomicity (no `MULTI`, no scripting), so the protocol also runs on Materia KV:
 - accumulators are copied out of the log into one hash per window, by the
   instance that owns the slice and by it alone. Once a window is emitted its
   state is deleted at once; its index entry stays until no log record has
-  mentioned the window for `gc_grace` (30 s by default), then state and entry
+  mentioned the window for `gcGrace` (30 s by default), then state and entry
   go for good. A write still in flight from a worker that lost the slice thus
   cannot leave a window behind, provided a store command takes effect within
-  a third of `gc_grace` or not at all, clock difference between workers
+  a third of `gcGrace` or not at all, clock difference between workers
   included;
 - sinks receive each element with a deterministic `EmitId` and must be
   idempotent on it: after a failure the same elements are written again with
   the same ids.
 
 **Event time.** Windows close on watermarks (highest event time seen minus
-`max_out_of_orderness`); a partition that is fully read and silent for
-`idle_timeout` follows the wall clock so that windows still close. Records
+`maxOutOfOrderness`); a partition that is fully read and silent for
+`idleTimeout` follows the wall clock so that windows still close. Records
 arriving for a closed window are dropped and counted.
 
 **Partitions come and go.** The controller asks every source for its number
@@ -130,7 +130,7 @@ rather than emitted a second time under the same ids with another value. A
 partition that disappears *retires* its slice: the slice stops, the emitter
 keeps reading what it committed until every window it holds is out; the
 controller then closes its log, so that an instance still running somewhere
-commits nothing more, and deletes its state two `gc_grace` later.
+commits nothing more, and deletes its state two `gcGrace` later.
 
 **Multi-tenant.** Every graph, actor, metric and KV key belongs to a tenant
 (`t:<tenant>:...`); secrets are resolved per tenant. Workers are shared by all
@@ -281,7 +281,7 @@ what was produced.
 - **Placement** moves slices off a saturated worker but never brings them back
   together; load is the process's CPU and memory as read from `/proc`.
 - **Backpressure crosses an aggregate by counting windows**, not records: a
-  slice stops reading once `max_pending_windows` (16 by default) of the
+  slice stops reading once `maxPendingWindows` (16 by default) of the
   windows it closed are still waiting to be emitted. Until then a slow sink
   behind an aggregate only shows as backpressure on the emitting half of the
   aggregate, while closed windows wait in the KV.
@@ -300,7 +300,7 @@ what was produced.
   are no quotas and no fair scheduling yet. An operator that panics restarts
   its slice, not the process.
 - Events a new partition receives before the pipeline reads it may be late
-  by then: budget `allowed_lateness` for `replan_interval` if that matters.
+  by then: budget `allowedLateness` for `replan_interval` if that matters.
   A partition removed and later added again under the same index resumes
   from the state of the old one (Pulsar only ever adds partitions).
 - Changing a node's configuration restarts the graph's slices (state is

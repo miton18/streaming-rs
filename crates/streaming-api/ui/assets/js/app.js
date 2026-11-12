@@ -13,7 +13,7 @@ const POLL_MS = 1000;
 const CATALOG_TTL = 15000;
 
 const store = {
-  tenants: null,      // [{tenant, graphs, actors, in_per_sec}]
+  tenants: null,      // [{tenant, graphs, actors, inPerSec}]
   graphs: {},         // tenant -> [graph summary]
   cluster: null,
   clusterPrev: null,  // previous snapshot (KV rates)
@@ -212,10 +212,10 @@ async function tick() {
   }).catch(() => {}));
 
   jobs.push(get(paths.cluster()).then((d) => {
-    if (store.cluster && store.cluster.now_ms !== d.now_ms) store.clusterPrev = store.cluster;
+    if (store.cluster && store.cluster.nowMs !== d.nowMs) store.clusterPrev = store.cluster;
     store.cluster = d;
-    if (typeof d.now_ms === 'number') {
-      const off = d.now_ms - Date.now();
+    if (typeof d.nowMs === 'number') {
+      const off = d.nowMs - Date.now();
       conn.clockOffset = conn.clockOffset ? conn.clockOffset * 0.7 + off * 0.3 : off;
     }
   }).catch(() => {}));

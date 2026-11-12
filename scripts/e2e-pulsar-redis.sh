@@ -68,11 +68,11 @@ sleep 6
 cat >"$WORK/graph.json" <<JSON
 {
   "tenant": "acme", "graph": "count-per-key",
-  "settings": {"max_out_of_orderness": "1s", "idle_timeout": "3s",
-               "linger": "200ms", "flush_interval": "500ms"},
+  "settings": {"maxOutOfOrderness": "1s", "idleTimeout": "3s",
+               "linger": "200ms", "flushInterval": "500ms"},
   "nodes": [
     {"id": "events", "op": "std/pulsar-source@1",
-     "config": {"service_url": "pulsar://127.0.0.1:6650", "topic": "$TOPIC",
+     "config": {"serviceUrl": "pulsar://127.0.0.1:6650", "topic": "$TOPIC",
                 "subscription": "count-per-key"}},
     {"id": "by-key", "op": "std/pulsar-key@1"},
     {"id": "window", "op": "std/tumbling@1", "config": {"size": "5s"}},
@@ -81,7 +81,7 @@ cat >"$WORK/graph.json" <<JSON
     {"id": "results", "op": "std/kv-sink@1", "config": {"retain": 1000}},
     {"id": "to-pulsar", "op": "std/count-to-pulsar@1"},
     {"id": "out", "op": "std/pulsar-sink@1",
-     "config": {"service_url": "pulsar://127.0.0.1:6650", "topic": "$OUT"}}
+     "config": {"serviceUrl": "pulsar://127.0.0.1:6650", "topic": "$OUT"}}
   ],
   "edges": [["events", "by-key"], ["by-key", "window"], ["window", "count"],
             ["count", "to-json"], ["to-json", "results"],

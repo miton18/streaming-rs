@@ -48,13 +48,13 @@ fn spec() -> GraphSpec {
         "graph": "count-per-key",
         "version": 1,
         "settings": {
-            "max_out_of_orderness": "50ms",
-            "idle_timeout": "200ms",
+            "maxOutOfOrderness": "50ms",
+            "idleTimeout": "200ms",
             "linger": "20ms",
-            "flush_interval": "50ms",
-            "gc_grace": "200ms",
-            "max_batch": 64,
-            "chunk_size": 16
+            "flushInterval": "50ms",
+            "gcGrace": "200ms",
+            "maxBatch": 64,
+            "chunkSize": 16
         },
         "nodes": [
             {"id": "events", "op": "test/log@1"},

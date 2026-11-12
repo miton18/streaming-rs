@@ -240,7 +240,7 @@ export class DagView {
       attr(e.path, 'stroke-width', w);
       attr(e.path, 'marker-end', `url(#arrow-${t})`);
       const dst = byId.get(e.to);
-      const q = dst && dst.queue_cap ? ` (${dst.queue_len}/${dst.queue_cap})` : '';
+      const q = dst && dst.queueCap ? ` (${dst.queueLen}/${dst.queueCap})` : '';
       text(e.title, `${e.from} → ${e.to} · file d'entrée de ${e.to} : ${pct(fill)}${q}`);
       const showLabel = fill >= 0.05;
       e.label.hidden = !showLabel;
@@ -321,8 +321,8 @@ export class DagView {
     text(r.bp, `bp ${pct(n.backpressured)}`);
     r.bp.style.visibility = n.backpressured >= 0.005 ? '' : 'hidden';
     const isSource = n.kind === 'source';
-    text(r.rin, isSource ? '–' : rate(n.in_per_sec));
-    text(r.rout, rate(n.out_per_sec));
+    text(r.rin, isSource ? '–' : rate(n.inPerSec));
+    text(r.rout, rate(n.outPerSec));
     const acts = `${n.actors || 0} acteur${(n.actors || 0) > 1 ? 's' : ''} · ${workersLabel(n.workers)}`;
     text(r.acts, acts);
     attr(r.acts, 'title', (n.workers || []).join(', '));
@@ -332,7 +332,7 @@ export class DagView {
     toggle(card, 'pending', st === 'pending' || st === 'stopped');
     toggle(card, 'failed', st === 'failed');
     attr(card, 'aria-pressed', selected ? 'true' : 'false');
-    attr(card, 'aria-label', `${n.id}, ${n.kind || ''}, ${n.bottleneck ? 'goulot, ' : ''}${n.paused ? 'en pause, ' : ''}busy ${pct(n.busy)}, backpressure ${pct(n.backpressured)}, sortie ${rate(n.out_per_sec)}`);
+    attr(card, 'aria-label', `${n.id}, ${n.kind || ''}, ${n.bottleneck ? 'goulot, ' : ''}${n.paused ? 'en pause, ' : ''}busy ${pct(n.busy)}, backpressure ${pct(n.backpressured)}, sortie ${rate(n.outPerSec)}`);
   }
 
   /** Bring a node into view, taking an overlapping side panel into account. */

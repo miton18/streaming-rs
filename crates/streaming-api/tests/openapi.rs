@@ -98,6 +98,7 @@ fn every_operation_is_documented_and_declares_its_path_parameters() {
 fn derives_bodies_and_responses_from_the_signatures() {
     let document = document();
     let graph = &document["paths"]["/api/v1/tenants/{tenant}/graphs/{graph}"];
+    assert_eq!(graph["put"]["operationId"], "putGraph");
     let json = |value: &Value| value["content"]["application/json"]["schema"]["$ref"].clone();
     assert_eq!(
         json(&graph["put"]["requestBody"]),
@@ -140,6 +141,16 @@ fn derives_bodies_and_responses_from_the_signatures() {
     // Identifiers carry their alphabet.
     assert_eq!(schemas["TenantId"]["pattern"], "^[A-Za-z0-9_-]+$");
     assert_eq!(schemas["OpRef"]["pattern"], "^[A-Za-z0-9_/@.-]+$");
+    // Field names are lowerCamelCase, as on the wire.
+    assert!(schemas["GraphSummary"]["properties"]["watermarkMs"].is_object());
+    assert!(schemas["GraphSettings"]["properties"]["maxPendingWindows"].is_object());
+    let text = document.to_string();
+    for (name, schema) in schemas.as_object().unwrap() {
+        for field in schema["properties"].as_object().into_iter().flat_map(|p| p.keys()) {
+            assert!(!field.contains('_'), "{name}.{field} is not lowerCamelCase");
+        }
+    }
+    assert!(!text.contains("\"operationId\":\"put_graph\""));
     // A description read back always has its version; one sent may omit it.
     let required = |name: &str| schemas[name]["required"].as_array().unwrap().clone();
     assert!(required("GraphSpec").contains(&"version".into()));

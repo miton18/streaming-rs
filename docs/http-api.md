@@ -29,18 +29,18 @@ The OpenAPI document of this API.
 ```json
 {
   "epoch": 12,
-  "now_ms": 1790000000000,
+  "nowMs": 1790000000000,
   "workers": [
     {
       "worker": "worker-a", "alive": true, "generation": 1790000000000,
-      "heartbeat_ms": 1790000000000,
-      "load": {"cpu": 0.31, "memory": 0.12, "memory_bytes": 52428800},
-      "actors": 14, "slices": 3, "api_addr": "127.0.0.1:8080", "version": "0.1.0",
-      "tenants": {"acme": {"actors": 7, "in_per_sec": 1200.0, "busy": 0.4}}
+      "heartbeatMs": 1790000000000,
+      "load": {"cpu": 0.31, "memory": 0.12, "memoryBytes": 52428800},
+      "actors": 14, "slices": 3, "apiAddr": "127.0.0.1:8080", "version": "0.1.0",
+      "tenants": {"acme": {"actors": 7, "inPerSec": 1200.0, "busy": 0.4}}
     }
   ],
   "placement": {
-    "version": 3, "computed_by": "worker-a", "computed_ms": 1790000000000,
+    "version": 3, "computedBy": "worker-a", "computedMs": 1790000000000,
     "assignments": {"acme/count-per-key/src.events.0": "worker-a"}
   },
   "kv": {"keys": 120, "bytes": 34567, "reads": 1000, "writes": 2000}
@@ -68,7 +68,7 @@ parameter, or does not say.
 
 ### `GET /api/v1/tenants`
 ```json
-{"tenants": [{"tenant": "acme", "graphs": 2, "actors": 14, "in_per_sec": 8400.0}]}
+{"tenants": [{"tenant": "acme", "graphs": 2, "actors": 14, "inPerSec": 8400.0}]}
 ```
 
 ### `GET /api/v1/tenants/{tenant}/graphs`
@@ -76,12 +76,12 @@ parameter, or does not say.
 {"graphs": [{
   "tenant": "acme", "graph": "count-per-key", "version": 3, "state": "running",
   "nodes": 8, "slices": 5, "actors": 22,
-  "in_per_sec": 8400.0, "out_per_sec": 41.0,
+  "inPerSec": 8400.0, "outPerSec": 41.0,
   "bottleneck": {"node": "count", "kind": "aggregate", "busy": 0.97, "reason": "..."},
-  "watermark_ms": 1790000000000, "updated_ms": 1790000000000, "error": null
+  "watermarkMs": 1790000000000, "updatedMs": 1790000000000, "error": null
 }]}
 ```
-`in_per_sec` is the sum of the output rates of the source nodes, `out_per_sec`
+`inPerSec` is the sum of the output rates of the source nodes, `outPerSec`
 the sum of the output rates of the sink nodes. `error` is the plan error, if any.
 
 ### `GET /api/v1/tenants/{tenant}/graphs/{graph}`
@@ -93,23 +93,23 @@ the sum of the output rates of the sink nodes. `error` is the plan error, if any
   "plan": { "...": "GraphPlan, or null" },
   "desired": { "...": "DesiredState" },
   "bottleneck": {"node": "count", "kind": "aggregate", "busy": 0.97, "reason": "..."},
-  "watermark_ms": 1790000000000,
+  "watermarkMs": 1790000000000,
   "nodes": [{
     "id": "count", "op": "std/count@1", "kind": "aggregate", "description": "...",
-    "input_type": "*", "output_type": "streaming_core::data::Windowed<u64>",
+    "inputType": "*", "outputType": "streaming_core::data::Windowed<u64>",
     "config": {},
     "paused": false, "bottleneck": true,
     "state": "running",
     "actors": 3, "workers": ["worker-a"],
-    "records_in": 123456, "records_out": 4567,
-    "in_per_sec": 8400.0, "out_per_sec": 41.0,
+    "recordsIn": 123456, "recordsOut": 4567,
+    "inPerSec": 8400.0, "outPerSec": 41.0,
     "busy": 0.97, "idle": 0.03, "backpressured": 0.0,
-    "queue_len": 12, "queue_cap": 16,
-    "late_dropped": 0, "errors": 0, "last_error": null,
+    "queueLen": 12, "queueCap": 16,
+    "lateDropped": 0, "errors": 0, "lastError": null,
     "instances": [{ "...": "ActorSnapshot", "worker": "worker-a" }]
   }],
   "edges": [{"from": "events", "to": "decode", "fill": 0.75}],
-  "slices": [{ "...": "SliceSnapshot", "worker": "worker-a", "assigned_to": "worker-a" }]
+  "slices": [{ "...": "SliceSnapshot", "worker": "worker-a", "assignedTo": "worker-a" }]
 }
 ```
 
@@ -128,19 +128,19 @@ aggregate node additionally has one `emitter` actor):
   (a sink's destination), highest over the instances. `busy` is occupation,
   not CPU: a sink busy mostly waiting is limited by its destination, and
   neither more CPU nor another worker helps. The bottleneck carries
-  `waiting` and `limited_by` (`"destination"`, `"work"`, or `"store"` for
+  `waiting` and `limitedBy` (`"destination"`, `"work"`, or `"store"` for
   commits) accordingly.
-- `records_in`, `in_per_sec`: summed over instances whose kind is not `emitter`.
-- `records_out`, `out_per_sec`: summed over instances whose kind is not
+- `recordsIn`, `inPerSec`: summed over instances whose kind is not `emitter`.
+- `recordsOut`, `outPerSec`: summed over instances whose kind is not
   `aggregate`; if the node has no `emitter` instance, summed over all.
-- `queue_len`, `queue_cap`, `late_dropped`, `errors`: summed. `last_error`: any.
-- `paused`: the node is in `desired.paused_nodes`.
-- `edges[].fill`: `queue_len / queue_cap` of the destination node (0 when `queue_cap` is 0).
+- `queueLen`, `queueCap`, `lateDropped`, `errors`: summed. `lastError`: any.
+- `paused`: the node is in `desired.pausedNodes`.
+- `edges[].fill`: `queueLen / queue_cap` of the destination node (0 when `queueCap` is 0).
 - `slices`: every `SliceSnapshot` of the graph from alive workers, with the
-  reporting `worker` and the worker the placement assigns it to (`assigned_to`,
+  reporting `worker` and the worker the placement assigns it to (`assignedTo`,
   may be null). Slices of the plan nobody reports yet appear with
   `state: "starting"`, `worker: null`.
-- `watermark_ms`: minimum `watermark_ms` over the reported `src.*` slices,
+- `watermarkMs`: minimum `watermarkMs` over the reported `src.*` slices,
   null if any is missing.
 
 Bottleneck rule: a node *limits* the graph when it works most of the time while
@@ -186,7 +186,7 @@ Body `{"state": "running" | "paused" | "draining" | "stopped"}`.
 
 ### `POST /api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/pause`
 ### `POST /api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/resume`
-Add or remove the node from `desired.paused_nodes`. `404` for an unknown node.
+Add or remove the node from `desired.pausedNodes`. `404` for an unknown node.
 
 ### `PATCH /api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/config`
 Body: a JSON object, shallow-merged into the node configuration (a `null`

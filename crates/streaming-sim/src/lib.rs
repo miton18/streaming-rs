@@ -749,12 +749,12 @@ impl Scenario {
         let first_window = if self.slide == self.window {
             serde_json::json!({"id": "win", "op": "std/tumbling@1", "config": {
                 "size": millis(self.window),
-                "allowed_lateness": millis(self.allowed_lateness)}})
+                "allowedLateness": millis(self.allowed_lateness)}})
         } else {
             serde_json::json!({"id": "win", "op": "std/sliding@1", "config": {
                 "size": millis(self.window),
                 "slide": millis(self.slide),
-                "allowed_lateness": millis(self.allowed_lateness)}})
+                "allowedLateness": millis(self.allowed_lateness)}})
         };
         let big = millis(self.big_window());
         serde_json::from_value(serde_json::json!({
@@ -762,16 +762,16 @@ impl Scenario {
             "graph": "sim",
             "version": 1,
             "settings": {
-                "max_out_of_orderness": "600ms",
-                "idle_timeout": millis(self.idle_timeout),
+                "maxOutOfOrderness": "600ms",
+                "idleTimeout": millis(self.idle_timeout),
                 "linger": "40ms",
-                "flush_interval": "250ms",
-                "max_batch": self.max_batch,
-                "chunk_size": 7,
-                "mailbox_capacity": 2,
-                "max_in_flight_epochs": 2,
-                "max_pending_windows": self.max_pending_windows,
-                "gc_grace": millis(self.gc_grace)
+                "flushInterval": "250ms",
+                "maxBatch": self.max_batch,
+                "chunkSize": 7,
+                "mailboxCapacity": 2,
+                "maxInFlightEpochs": 2,
+                "maxPendingWindows": self.max_pending_windows,
+                "gcGrace": millis(self.gc_grace)
             },
             "nodes": [
                 {"id": "events", "op": "sim/log@1"},

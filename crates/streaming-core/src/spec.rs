@@ -21,6 +21,7 @@ use crate::{
 
 /// One node of a graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NodeSpec {
     /// Unique id inside the graph. Names the node in metrics, control and state keys.
     pub id: NodeId,
@@ -64,6 +65,7 @@ fn default_max_pending_windows() -> usize {
 
 /// Engine settings of a graph. Every field has a default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GraphSettings {
     /// Watermark = highest event time seen minus this bound.
     #[schemars(with = "crate::time::DurationText")]
@@ -131,6 +133,7 @@ impl Default for GraphSettings {
 
 /// The description of a graph: nodes referencing operators, and edges.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GraphSpec {
     /// Owning tenant.
     pub tenant: TenantId,
@@ -497,6 +500,21 @@ mod tests {
     use moonpool_core::TokioProviders;
 
     use super::*;
+
+    #[test]
+    fn rejects_unknown_keys_such_as_snake_case_ones() {
+        let spec = serde_json::json!({
+            "tenant": "acme", "graph": "g", "nodes": [], "edges": [],
+            "settings": {"gc_grace": "1m"}
+        });
+        let error = serde_json::from_value::<GraphSpec>(spec).unwrap_err().to_string();
+        assert!(error.contains("unknown field `gc_grace`"), "{error}");
+        assert!(error.contains("gcGrace"), "{error}");
+        let node = serde_json::json!({"id": "a", "op": "std/count@1", "cfg": {}});
+        assert!(serde_json::from_value::<NodeSpec>(node).is_err());
+        let spec = serde_json::json!({"tenant": "acme", "graph": "g", "nodes": [], "edges": [], "extra": 1});
+        assert!(serde_json::from_value::<GraphSpec>(spec).is_err());
+    }
     use crate::registry::Registry;
 
     struct Event;

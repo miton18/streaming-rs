@@ -72,6 +72,7 @@ impl From<streaming_core::IdError> for ApiError {
 
 /// The body of an error.
 #[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct ErrorBody {
     /// What went wrong, for a person.
     error: String,
@@ -374,6 +375,7 @@ impl JsonSchema for Limit {
 
 /// The query of [`outputs`].
 #[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct OutputsQuery {
     /// Rows to return at most (200 by default); above 2000, 2000.
     #[serde(default)]
@@ -382,6 +384,7 @@ struct OutputsQuery {
 
 /// The rows of a `std/kv-sink@1` node.
 #[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct OutputsView {
     /// Rows, most recent event first, then by key.
     rows: Vec<OutputRow>,
@@ -420,6 +423,7 @@ async fn outputs(
 
 /// The version of a description after a change.
 #[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct VersionReply {
     /// Version of the stored description.
     version: u64,
@@ -449,6 +453,7 @@ async fn put_graph(
 
 /// A graph being deleted.
 #[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct DeletingReply {
     /// Always `true`: workers stop the graph, then its state is removed.
     deleting: bool,
@@ -470,6 +475,7 @@ async fn delete_graph(
 
 /// The run state of a graph.
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct StateBody {
     /// The desired run state.
     state: RunState,
@@ -489,6 +495,7 @@ async fn set_state(
 
 /// Whether a node is paused.
 #[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct PausedReply {
     /// The node.
     node: NodeId,

@@ -93,7 +93,7 @@
             "description": "Its kind (`aggregate`, ..., or `commit`).",
             "type": "string"
           },
-          "limited_by": {
+          "limitedBy": {
             "default": "",
             "description": "What holds the node back: `\"destination\"` when most of its busy time\nis spent waiting for the system it writes to, so that neither more\nCPU nor moving it helps; `\"work\"` otherwise.",
             "type": "string"
@@ -118,7 +118,7 @@
           "kind",
           "busy",
           "waiting",
-          "limited_by",
+          "limitedBy",
           "reason"
         ],
         "type": "object"
@@ -155,7 +155,7 @@
               "null"
             ]
           },
-          "now_ms": {
+          "nowMs": {
             "description": "Server time.",
             "format": "int64",
             "type": "integer"
@@ -174,7 +174,7 @@
         },
         "required": [
           "epoch",
-          "now_ms",
+          "nowMs",
           "workers",
           "placement",
           "kv"
@@ -197,7 +197,7 @@
       "DesiredState": {
         "description": "What operators want a graph to do.",
         "properties": {
-          "paused_nodes": {
+          "pausedNodes": {
             "default": [],
             "description": "Nodes paused individually. A paused node stops consuming its inputs;\nbackpressure then stalls everything upstream of it.",
             "items": {
@@ -211,7 +211,7 @@
             "default": "running",
             "description": "Run state of the whole graph."
           },
-          "updated_ms": {
+          "updatedMs": {
             "default": 0,
             "description": "When this document was last changed.",
             "format": "int64",
@@ -220,8 +220,8 @@
         },
         "required": [
           "state",
-          "paused_nodes",
-          "updated_ms"
+          "pausedNodes",
+          "updatedMs"
         ],
         "type": "object"
       },
@@ -269,20 +269,20 @@
             "description": "Whether every element of the window is out.",
             "type": "boolean"
           },
-          "end_ms": {
+          "endMs": {
             "description": "End of the window, exclusive.",
             "format": "int64",
             "type": "integer"
           },
-          "start_ms": {
+          "startMs": {
             "description": "Start of the window, inclusive.",
             "format": "int64",
             "type": "integer"
           }
         },
         "required": [
-          "start_ms",
-          "end_ms",
+          "startMs",
+          "endMs",
           "complete"
         ],
         "type": "object"
@@ -372,7 +372,7 @@
             "minimum": 0,
             "type": "integer"
           },
-          "watermark_ms": {
+          "watermarkMs": {
             "description": "Minimum watermark of the source slices; null if any is unknown.",
             "format": "int64",
             "type": [
@@ -390,7 +390,7 @@
           "plan",
           "desired",
           "bottleneck",
-          "watermark_ms",
+          "watermarkMs",
           "nodes",
           "edges",
           "slices"
@@ -468,7 +468,7 @@
             },
             "type": "object"
           },
-          "planned_ms": {
+          "plannedMs": {
             "default": 0,
             "description": "When the plan was computed.",
             "format": "int64",
@@ -490,7 +490,7 @@
             },
             "type": "array"
           },
-          "spec_version": {
+          "specVersion": {
             "description": "Version of the description this plan was computed from.",
             "format": "uint64",
             "minimum": 0,
@@ -498,10 +498,10 @@
           }
         },
         "required": [
-          "spec_version",
+          "specVersion",
           "partitions",
           "slices",
-          "planned_ms",
+          "plannedMs",
           "error",
           "generation",
           "retired",
@@ -512,26 +512,27 @@
         "type": "object"
       },
       "GraphSettings": {
+        "additionalProperties": false,
         "description": "Engine settings of a graph. Every field has a default.",
         "properties": {
-          "chunk_size": {
+          "chunkSize": {
             "default": 256,
             "description": "Number of records per chunk on an edge.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
-          "flush_interval": {
+          "flushInterval": {
             "$ref": "#/components/schemas/Duration",
             "default": "1s",
             "description": "How often closed windows are looked for."
           },
-          "gc_grace": {
+          "gcGrace": {
             "$ref": "#/components/schemas/Duration",
             "default": "30s",
             "description": "How long the index entry of an emitted window outlives its state. A\nstore command issued by a worker that has since lost its slice may\nstill land: the entry is what lets such a write be found and deleted.\nMust exceed three times the command timeout of the store, plus the\nclock difference between workers."
           },
-          "idle_timeout": {
+          "idleTimeout": {
             "$ref": "#/components/schemas/Duration",
             "default": "30s",
             "description": "After this long without any record on a fully-read partition, its\nwatermark follows the wall clock so that downstream windows can close."
@@ -541,33 +542,33 @@
             "default": "200ms",
             "description": "Maximum time a source waits to fill a batch."
           },
-          "mailbox_capacity": {
+          "mailboxCapacity": {
             "default": 8,
             "description": "Capacity of every edge, in chunks. A full edge blocks its producer:\nthis is what propagates backpressure up to the source.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
-          "max_batch": {
+          "maxBatch": {
             "default": 1000,
             "description": "Maximum number of source records per epoch (one KV commit per epoch).",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
-          "max_in_flight_epochs": {
+          "maxInFlightEpochs": {
             "default": 2,
             "description": "How many epochs a slice may have read but not yet committed.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
-          "max_out_of_orderness": {
+          "maxOutOfOrderness": {
             "$ref": "#/components/schemas/Duration",
             "default": "500ms",
             "description": "Watermark = highest event time seen minus this bound."
           },
-          "max_pending_windows": {
+          "maxPendingWindows": {
             "default": 16,
             "description": "How many windows a slice may have closed, per aggregate, without their\nresults being emitted yet. Past that number the slice stops reading\nuntil emission catches up: this is how a slow sink behind an aggregate\nslows the sources down, and what bounds the state waiting in the store.\n`0` removes the limit.",
             "format": "uint",
@@ -576,40 +577,41 @@
           }
         },
         "required": [
-          "max_out_of_orderness",
-          "idle_timeout",
-          "max_batch",
+          "maxOutOfOrderness",
+          "idleTimeout",
+          "maxBatch",
           "linger",
-          "mailbox_capacity",
-          "chunk_size",
-          "flush_interval",
-          "max_in_flight_epochs",
-          "gc_grace",
-          "max_pending_windows"
+          "mailboxCapacity",
+          "chunkSize",
+          "flushInterval",
+          "maxInFlightEpochs",
+          "gcGrace",
+          "maxPendingWindows"
         ],
         "type": "object"
       },
       "GraphSettingsInput": {
+        "additionalProperties": false,
         "description": "Engine settings of a graph. Every field has a default.",
         "properties": {
-          "chunk_size": {
+          "chunkSize": {
             "default": 256,
             "description": "Number of records per chunk on an edge.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
-          "flush_interval": {
+          "flushInterval": {
             "$ref": "#/components/schemas/Duration",
             "default": "1s",
             "description": "How often closed windows are looked for."
           },
-          "gc_grace": {
+          "gcGrace": {
             "$ref": "#/components/schemas/Duration",
             "default": "30s",
             "description": "How long the index entry of an emitted window outlives its state. A\nstore command issued by a worker that has since lost its slice may\nstill land: the entry is what lets such a write be found and deleted.\nMust exceed three times the command timeout of the store, plus the\nclock difference between workers."
           },
-          "idle_timeout": {
+          "idleTimeout": {
             "$ref": "#/components/schemas/Duration",
             "default": "30s",
             "description": "After this long without any record on a fully-read partition, its\nwatermark follows the wall clock so that downstream windows can close."
@@ -619,33 +621,33 @@
             "default": "200ms",
             "description": "Maximum time a source waits to fill a batch."
           },
-          "mailbox_capacity": {
+          "mailboxCapacity": {
             "default": 8,
             "description": "Capacity of every edge, in chunks. A full edge blocks its producer:\nthis is what propagates backpressure up to the source.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
-          "max_batch": {
+          "maxBatch": {
             "default": 1000,
             "description": "Maximum number of source records per epoch (one KV commit per epoch).",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
-          "max_in_flight_epochs": {
+          "maxInFlightEpochs": {
             "default": 2,
             "description": "How many epochs a slice may have read but not yet committed.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
-          "max_out_of_orderness": {
+          "maxOutOfOrderness": {
             "$ref": "#/components/schemas/Duration",
             "default": "500ms",
             "description": "Watermark = highest event time seen minus this bound."
           },
-          "max_pending_windows": {
+          "maxPendingWindows": {
             "default": 16,
             "description": "How many windows a slice may have closed, per aggregate, without their\nresults being emitted yet. Past that number the slice stops reading\nuntil emission catches up: this is how a slow sink behind an aggregate\nslows the sources down, and what bounds the state waiting in the store.\n`0` removes the limit.",
             "format": "uint",
@@ -656,6 +658,7 @@
         "type": "object"
       },
       "GraphSpec": {
+        "additionalProperties": false,
         "description": "The description of a graph: nodes referencing operators, and edges.",
         "properties": {
           "edges": {
@@ -689,16 +692,16 @@
           "settings": {
             "$ref": "#/components/schemas/GraphSettings",
             "default": {
-              "chunk_size": 256,
-              "flush_interval": "1s",
-              "gc_grace": "30s",
-              "idle_timeout": "30s",
+              "chunkSize": 256,
+              "flushInterval": "1s",
+              "gcGrace": "30s",
+              "idleTimeout": "30s",
               "linger": "200ms",
-              "mailbox_capacity": 8,
-              "max_batch": 1000,
-              "max_in_flight_epochs": 2,
-              "max_out_of_orderness": "500ms",
-              "max_pending_windows": 16
+              "mailboxCapacity": 8,
+              "maxBatch": 1000,
+              "maxInFlightEpochs": 2,
+              "maxOutOfOrderness": "500ms",
+              "maxPendingWindows": 16
             },
             "description": "Engine settings."
           },
@@ -725,6 +728,7 @@
         "type": "object"
       },
       "GraphSpecInput": {
+        "additionalProperties": false,
         "description": "The description of a graph: nodes referencing operators, and edges.",
         "properties": {
           "edges": {
@@ -758,16 +762,16 @@
           "settings": {
             "$ref": "#/components/schemas/GraphSettingsInput",
             "default": {
-              "chunk_size": 256,
-              "flush_interval": "1s",
-              "gc_grace": "30s",
-              "idle_timeout": "30s",
+              "chunkSize": 256,
+              "flushInterval": "1s",
+              "gcGrace": "30s",
+              "idleTimeout": "30s",
               "linger": "200ms",
-              "mailbox_capacity": 8,
-              "max_batch": 1000,
-              "max_in_flight_epochs": 2,
-              "max_out_of_orderness": "500ms",
-              "max_pending_windows": 16
+              "mailboxCapacity": 8,
+              "maxBatch": 1000,
+              "maxInFlightEpochs": 2,
+              "maxOutOfOrderness": "500ms",
+              "maxPendingWindows": 16
             },
             "description": "Engine settings."
           },
@@ -822,7 +826,7 @@
             "$ref": "#/components/schemas/GraphId",
             "description": "Graph."
           },
-          "in_per_sec": {
+          "inPerSec": {
             "description": "Sum of the output rates of the source nodes.",
             "format": "double",
             "type": "number"
@@ -833,7 +837,7 @@
             "minimum": 0,
             "type": "integer"
           },
-          "out_per_sec": {
+          "outPerSec": {
             "description": "Sum of the output rates of the sink nodes.",
             "format": "double",
             "type": "number"
@@ -852,7 +856,7 @@
             "$ref": "#/components/schemas/TenantId",
             "description": "Tenant."
           },
-          "updated_ms": {
+          "updatedMs": {
             "description": "Last change of the description (from the index).",
             "format": "int64",
             "type": "integer"
@@ -863,7 +867,7 @@
             "minimum": 0,
             "type": "integer"
           },
-          "watermark_ms": {
+          "watermarkMs": {
             "description": "Minimum watermark of the source slices.",
             "format": "int64",
             "type": [
@@ -880,11 +884,11 @@
           "nodes",
           "slices",
           "actors",
-          "in_per_sec",
-          "out_per_sec",
+          "inPerSec",
+          "outPerSec",
           "bottleneck",
-          "watermark_ms",
-          "updated_ms",
+          "watermarkMs",
+          "updatedMs",
           "error"
         ],
         "type": "object"
@@ -937,7 +941,7 @@
             "format": "double",
             "type": "number"
           },
-          "in_per_sec": {
+          "inPerSec": {
             "default": 0.0,
             "description": "Input rate over the last interval, in records per second.",
             "format": "double",
@@ -947,7 +951,7 @@
             "$ref": "#/components/schemas/ActorKind",
             "description": "Role of the actor."
           },
-          "last_error": {
+          "lastError": {
             "default": null,
             "description": "Most recent error, if any.",
             "type": [
@@ -955,7 +959,7 @@
               "null"
             ]
           },
-          "late_dropped": {
+          "lateDropped": {
             "default": 0,
             "description": "Records dropped because their window was already closed.",
             "format": "uint64",
@@ -970,34 +974,34 @@
             "$ref": "#/components/schemas/OpRef",
             "description": "Operator reference of the node."
           },
-          "out_per_sec": {
+          "outPerSec": {
             "default": 0.0,
             "description": "Output rate over the last interval, in records per second.",
             "format": "double",
             "type": "number"
           },
-          "queue_cap": {
+          "queueCap": {
             "default": 0,
             "description": "Total capacity of the actor's input edges, in chunks.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
-          "queue_len": {
+          "queueLen": {
             "default": 0,
             "description": "Chunks waiting in the actor's input edges.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
-          "records_in": {
+          "recordsIn": {
             "default": 0,
             "description": "Records received since the actor started.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },
-          "records_out": {
+          "recordsOut": {
             "default": 0,
             "description": "Records sent downstream (or written, for a sink) since the actor started.",
             "format": "uint64",
@@ -1036,19 +1040,19 @@
           "kind",
           "op",
           "state",
-          "records_in",
-          "records_out",
-          "in_per_sec",
-          "out_per_sec",
+          "recordsIn",
+          "recordsOut",
+          "inPerSec",
+          "outPerSec",
           "busy",
           "idle",
           "backpressured",
           "waiting",
-          "queue_len",
-          "queue_cap",
-          "late_dropped",
+          "queueLen",
+          "queueCap",
+          "lateDropped",
           "errors",
-          "last_error",
+          "lastError",
           "worker"
         ],
         "type": "object"
@@ -1072,7 +1076,7 @@
             "format": "double",
             "type": "number"
           },
-          "memory_bytes": {
+          "memoryBytes": {
             "description": "Resident memory, in bytes.",
             "format": "uint64",
             "minimum": 0,
@@ -1082,7 +1086,7 @@
         "required": [
           "cpu",
           "memory",
-          "memory_bytes"
+          "memoryBytes"
         ],
         "type": "object"
       },
@@ -1094,6 +1098,7 @@
         "type": "string"
       },
       "NodeSpec": {
+        "additionalProperties": false,
         "description": "One node of a graph.",
         "properties": {
           "config": {
@@ -1199,12 +1204,12 @@
             "format": "double",
             "type": "number"
           },
-          "in_per_sec": {
+          "inPerSec": {
             "description": "Input rate.",
             "format": "double",
             "type": "number"
           },
-          "input_type": {
+          "inputType": {
             "description": "Accepted type (null when the operator is not in the catalog).",
             "type": [
               "string",
@@ -1222,14 +1227,14 @@
             "description": "Operator kind (`unknown` when the operator is not in the catalog).",
             "type": "string"
           },
-          "last_error": {
+          "lastError": {
             "description": "Some instance's last error.",
             "type": [
               "string",
               "null"
             ]
           },
-          "late_dropped": {
+          "lateDropped": {
             "description": "Late records dropped, summed.",
             "format": "uint64",
             "minimum": 0,
@@ -1239,12 +1244,12 @@
             "description": "Operator reference.",
             "type": "string"
           },
-          "out_per_sec": {
+          "outPerSec": {
             "description": "Output rate.",
             "format": "double",
             "type": "number"
           },
-          "output_type": {
+          "outputType": {
             "description": "Produced type (null when the operator is not in the catalog).",
             "type": [
               "string",
@@ -1255,25 +1260,25 @@
             "description": "Listed in `desired.paused_nodes`.",
             "type": "boolean"
           },
-          "queue_cap": {
+          "queueCap": {
             "description": "Queue capacity, summed.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },
-          "queue_len": {
+          "queueLen": {
             "description": "Queued chunks, summed.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },
-          "records_in": {
+          "recordsIn": {
             "description": "Records received.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },
-          "records_out": {
+          "recordsOut": {
             "description": "Records emitted.",
             "format": "uint64",
             "minimum": 0,
@@ -1301,27 +1306,27 @@
           "op",
           "kind",
           "description",
-          "input_type",
-          "output_type",
+          "inputType",
+          "outputType",
           "config",
           "paused",
           "bottleneck",
           "state",
           "actors",
           "workers",
-          "records_in",
-          "records_out",
-          "in_per_sec",
-          "out_per_sec",
+          "recordsIn",
+          "recordsOut",
+          "inPerSec",
+          "outPerSec",
           "busy",
           "idle",
           "backpressured",
           "waiting",
-          "queue_len",
-          "queue_cap",
-          "late_dropped",
+          "queueLen",
+          "queueCap",
+          "lateDropped",
           "errors",
-          "last_error",
+          "lastError",
           "instances"
         ],
         "type": "object"
@@ -1530,7 +1535,7 @@
             "description": "Slice -> worker.",
             "type": "object"
           },
-          "computed_by": {
+          "computedBy": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WorkerId"
@@ -1542,7 +1547,7 @@
             "default": null,
             "description": "The worker that computed this placement."
           },
-          "computed_ms": {
+          "computedMs": {
             "default": 0,
             "description": "When it was computed.",
             "format": "int64",
@@ -1557,8 +1562,8 @@
         },
         "required": [
           "version",
-          "computed_by",
-          "computed_ms",
+          "computedBy",
+          "computedMs",
           "assignments"
         ],
         "type": "object"
@@ -1601,7 +1606,7 @@
       "SliceView": {
         "description": "A slice snapshot with the reporting and the assigned worker.",
         "properties": {
-          "assigned_to": {
+          "assignedTo": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WorkerId"
@@ -1612,7 +1617,7 @@
             ],
             "description": "Worker the placement assigns the slice to."
           },
-          "commit_ms": {
+          "commitMs": {
             "default": 0.0,
             "description": "Average duration of a commit over the last interval, in milliseconds.",
             "format": "double",
@@ -1643,14 +1648,14 @@
             "$ref": "#/components/schemas/GraphId",
             "description": "Graph."
           },
-          "in_flight_epochs": {
+          "inFlightEpochs": {
             "default": 0,
             "description": "Epochs read but not yet committed.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
-          "last_error": {
+          "lastError": {
             "default": null,
             "description": "Most recent error, if any.",
             "type": [
@@ -1697,7 +1702,7 @@
             "minimum": 0,
             "type": "integer"
           },
-          "watermark_ms": {
+          "watermarkMs": {
             "default": null,
             "description": "Last committed watermark.",
             "format": "int64",
@@ -1738,16 +1743,16 @@
           "epoch",
           "position",
           "window",
-          "watermark_ms",
+          "watermarkMs",
           "commits",
-          "commit_ms",
-          "in_flight_epochs",
+          "commitMs",
+          "inFlightEpochs",
           "fenced",
           "restarts",
           "throttled",
-          "last_error",
+          "lastError",
           "worker",
-          "assigned_to"
+          "assignedTo"
         ],
         "type": "object"
       },
@@ -1786,7 +1791,7 @@
             "minimum": 0,
             "type": "integer"
           },
-          "in_per_sec": {
+          "inPerSec": {
             "description": "Input rate of the tenant on alive workers, records per second.",
             "format": "double",
             "type": "number"
@@ -1800,7 +1805,7 @@
           "tenant",
           "graphs",
           "actors",
-          "in_per_sec"
+          "inPerSec"
         ],
         "type": "object"
       },
@@ -1818,7 +1823,7 @@
             "format": "double",
             "type": "number"
           },
-          "in_per_sec": {
+          "inPerSec": {
             "description": "Records its source actors read over the last interval, per second.",
             "format": "double",
             "type": "number"
@@ -1826,7 +1831,7 @@
         },
         "required": [
           "actors",
-          "in_per_sec",
+          "inPerSec",
           "busy"
         ],
         "type": "object"
@@ -1886,7 +1891,7 @@
             "description": "Heartbeat younger than the member timeout.",
             "type": "boolean"
           },
-          "api_addr": {
+          "apiAddr": {
             "description": "Worker HTTP address.",
             "type": [
               "string",
@@ -1899,7 +1904,7 @@
             "minimum": 0,
             "type": "integer"
           },
-          "heartbeat_ms": {
+          "heartbeatMs": {
             "description": "Last heartbeat.",
             "format": "int64",
             "type": "integer"
@@ -1937,11 +1942,11 @@
           "worker",
           "alive",
           "generation",
-          "heartbeat_ms",
+          "heartbeatMs",
           "load",
           "actors",
           "slices",
-          "api_addr",
+          "apiAddr",
           "version",
           "tenants"
         ],
@@ -2041,7 +2046,7 @@
     },
     "/api/v1/openapi.json": {
       "get": {
-        "operationId": "openapi_document",
+        "operationId": "openapiDocument",
         "responses": {
           "200": {
             "content": {
@@ -2104,7 +2109,7 @@
     },
     "/api/v1/tenants/{tenant}/graphs": {
       "get": {
-        "operationId": "tenant_graphs",
+        "operationId": "tenantGraphs",
         "parameters": [
           {
             "in": "path",
@@ -2156,7 +2161,7 @@
     "/api/v1/tenants/{tenant}/graphs/{graph}": {
       "delete": {
         "description": "The graph is marked as being deleted; workers stop it and the controller\nremoves its state.",
-        "operationId": "delete_graph",
+        "operationId": "deleteGraph",
         "parameters": [
           {
             "in": "path",
@@ -2271,7 +2276,7 @@
       },
       "put": {
         "description": "The description must name the graph of the path. It is validated against\nthe catalogue (operators, types, edges) before being stored; the version\nand the cluster epoch are bumped, and workers converge on it.",
-        "operationId": "put_graph",
+        "operationId": "putGraph",
         "parameters": [
           {
             "in": "path",
@@ -2400,7 +2405,7 @@
     "/api/v1/tenants/{tenant}/graphs/{graph}/nodes/{node}/config": {
       "patch": {
         "description": "The body is merged into the node's configuration object, key by key; the\nnew description is validated and stored as a new version.",
-        "operationId": "patch_config",
+        "operationId": "patchConfig",
         "parameters": [
           {
             "in": "path",
@@ -2689,7 +2694,7 @@
     },
     "/api/v1/tenants/{tenant}/graphs/{graph}/state": {
       "post": {
-        "operationId": "set_state",
+        "operationId": "setState",
         "parameters": [
           {
             "in": "path",

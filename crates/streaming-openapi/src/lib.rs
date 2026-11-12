@@ -346,7 +346,7 @@ pub struct OperationContext<'a> {
 }
 
 impl OperationContext<'_> {
-    /// Set the operation id (the handler's name).
+    /// Set the operation id (the handler's name, in lowerCamelCase).
     pub fn set_operation_id(&mut self, id: &str) {
         self.operation.operation_id = Some(id.to_owned());
     }
@@ -617,7 +617,7 @@ pub struct Components {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Operation {
-    /// The handler's name.
+    /// The handler's name, in lowerCamelCase.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
     /// First paragraph of the handler's doc comment.

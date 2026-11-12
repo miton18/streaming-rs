@@ -15,6 +15,7 @@ pub const DEFAULT_MAX_BATCH_BYTES: usize = 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct RawConfig {
     endpoint: String,
     token: Value,
@@ -33,7 +34,7 @@ struct RawConfig {
 /// ```json
 /// {"endpoint": "https://host/api/v0/update",
 ///  "token": "..." | {"secret": "name"},
-///  "time_unit": "us", "timeout": "10s", "max_batch_bytes": 1048576}
+///  "timeUnit": "us", "timeout": "10s", "maxBatchBytes": 1048576}
 /// ```
 ///
 /// Only `endpoint` and `token` are required.
@@ -131,7 +132,7 @@ impl Warp10Config {
             return Err(OpError::Config("timeout must be positive".into()));
         }
         if self.max_batch_bytes == 0 {
-            return Err(OpError::Config("max_batch_bytes must be positive".into()));
+            return Err(OpError::Config("maxBatchBytes must be positive".into()));
         }
         Ok(())
     }
@@ -166,8 +167,8 @@ mod tests {
     #[test]
     fn everything_set() {
         let c = Warp10Config::from_json(
-            &json!({"endpoint": "http://h/api/v0/update", "token": "t", "time_unit": "ns",
-                    "timeout": "250ms", "max_batch_bytes": 100}),
+            &json!({"endpoint": "http://h/api/v0/update", "token": "t", "timeUnit": "ns",
+                    "timeout": "250ms", "maxBatchBytes": 100}),
             literal,
         )
         .unwrap();
@@ -195,10 +196,10 @@ mod tests {
             v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             Warp10Config::from_json(&v, literal)
         };
-        assert!(base(json!({"time_unit": "s"})).is_err());
+        assert!(base(json!({"timeUnit": "s"})).is_err());
         assert!(base(json!({"timeout": "soon"})).is_err());
         assert!(base(json!({"timeout": "0s"})).is_err());
-        assert!(base(json!({"max_batch_bytes": 0})).is_err());
+        assert!(base(json!({"maxBatchBytes": 0})).is_err());
         assert!(base(json!({"unknown": 1})).is_err());
         assert!(base(json!({"endpoint": "ftp://h/"})).is_err());
         assert!(base(json!({"token": ""})).is_err());

@@ -19,6 +19,7 @@ use crate::{
 
 /// Resource usage of a worker process. Ratios are in `0.0..=1.0`.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Load {
     /// CPU usage of the process, relative to the cores it may use.
     pub cpu: f64,
@@ -39,6 +40,7 @@ impl Load {
 
 /// What a worker advertises about itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MemberInfo {
     /// Worker id.
     pub worker: WorkerId,
@@ -73,6 +75,7 @@ impl MemberInfo {
 
 /// Entry of the graph index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphIndexEntry {
     /// Owning tenant.
     pub tenant: TenantId,
@@ -105,6 +108,7 @@ pub enum RunState {
 
 /// What operators want a graph to do.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct DesiredState {
     /// Run state of the whole graph.
     #[serde(default)]
@@ -120,6 +124,7 @@ pub struct DesiredState {
 
 /// How a graph is cut into slices, computed by the controller.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphPlan {
     /// Version of the description this plan was computed from.
     pub spec_version: u64,
@@ -162,6 +167,7 @@ pub struct GraphPlan {
 
 /// Which worker runs which slice, computed by the controller.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Placement {
     /// Incremented on every change.
     pub version: u64,
@@ -222,6 +228,7 @@ pub enum ActorState {
 /// `busy + idle + backpressured` is about 1: the three ratios split the last
 /// interval between working, waiting for input and waiting for room downstream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ActorSnapshot {
     /// Owning tenant.
     pub tenant: TenantId,
@@ -284,6 +291,7 @@ pub struct ActorSnapshot {
 
 /// How far the emitting half of an aggregate node got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct EmittedWindow {
     /// Start of the window, inclusive.
     pub start_ms: Timestamp,
@@ -295,6 +303,7 @@ pub struct EmittedWindow {
 
 /// Progress of one slice, as of one snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SliceSnapshot {
     /// Owning tenant.
     pub tenant: TenantId,
@@ -344,6 +353,7 @@ pub struct SliceSnapshot {
 
 /// What one tenant consumes on one worker.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TenantUsage {
     /// Actors of the tenant running on the worker.
     pub actors: u32,
@@ -356,6 +366,7 @@ pub struct TenantUsage {
 
 /// Everything a worker reports about itself, published periodically.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkerSnapshot {
     /// The reporting worker.
     pub worker: WorkerId,
@@ -379,6 +390,7 @@ pub struct WorkerSnapshot {
 
 /// One row written by a `std/kv-sink@1` node, readable through the API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct OutputRow {
     /// Emit id of the element.
     pub id: String,

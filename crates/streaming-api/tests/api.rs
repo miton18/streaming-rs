@@ -327,14 +327,14 @@ async fn cluster_lists_workers_placement_and_kv_stats() {
     let (status, body) = env.get("/api/v1/cluster").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["epoch"], 1);
-    assert_eq!(body["now_ms"], NOW);
+    assert_eq!(body["nowMs"], NOW);
     let workers = body["workers"].as_array().unwrap();
     assert_eq!(workers.len(), 2);
     assert_eq!(workers[0]["worker"], "worker-a");
     assert_eq!(workers[0]["alive"], true);
     assert_eq!(workers[0]["generation"], 7);
-    assert_eq!(workers[0]["load"]["memory_bytes"], 52_428_800);
-    assert_eq!(workers[0]["api_addr"], "127.0.0.1:8080");
+    assert_eq!(workers[0]["load"]["memoryBytes"], 52_428_800);
+    assert_eq!(workers[0]["apiAddr"], "127.0.0.1:8080");
     assert_eq!(workers[0]["tenants"]["acme"]["actors"], 7);
     assert_eq!(workers[1]["alive"], false);
     assert_eq!(workers[1]["tenants"], json!({}));
@@ -500,7 +500,7 @@ async fn graph_detail_joins_snapshots_and_computes_the_bottleneck() {
     assert_eq!(body["spec"]["nodes"][0]["config"]["topic"], "events");
     assert_eq!(body["bottleneck"]["node"], "count");
     assert_eq!(body["bottleneck"]["kind"], "aggregate");
-    assert_eq!(body["watermark_ms"], NOW - 1000);
+    assert_eq!(body["watermarkMs"], NOW - 1000);
     let nodes = body["nodes"].as_array().unwrap();
     assert_eq!(nodes.len(), 5);
     let count = &nodes[3];
@@ -520,7 +520,7 @@ async fn graph_detail_joins_snapshots_and_computes_the_bottleneck() {
     let slices = body["slices"].as_array().unwrap();
     assert_eq!(slices.len(), 1);
     assert_eq!(slices[0]["worker"], "worker-a");
-    assert_eq!(slices[0]["assigned_to"], "worker-a");
+    assert_eq!(slices[0]["assignedTo"], "worker-a");
     assert_eq!(slices[0]["slice"], "src.events.0");
     assert_eq!(slices[0]["epoch"], 3);
     assert_eq!(body["desired"]["state"], "running");
@@ -548,8 +548,8 @@ async fn graph_list_and_tenants() {
     assert_eq!(
         body,
         json!({"tenants": [
-            {"tenant": "acme", "graphs": 2, "actors": 7, "in_per_sec": 1200.0},
-            {"tenant": "globex", "graphs": 1, "actors": 0, "in_per_sec": 0.0}
+            {"tenant": "acme", "graphs": 2, "actors": 7, "inPerSec": 1200.0},
+            {"tenant": "globex", "graphs": 1, "actors": 0, "inPerSec": 0.0}
         ]})
     );
 
@@ -563,14 +563,14 @@ async fn graph_list_and_tenants() {
     assert_eq!(g["actors"], 2);
     assert_eq!(g["slices"], 1);
     assert_eq!(g["state"], "running");
-    assert_eq!(g["in_per_sec"], 90.0);
-    assert_eq!(g["out_per_sec"], 0.0);
+    assert_eq!(g["inPerSec"], 90.0);
+    assert_eq!(g["outPerSec"], 0.0);
     assert_eq!(g["bottleneck"]["node"], "count");
-    assert_eq!(g["updated_ms"], NOW);
+    assert_eq!(g["updatedMs"], NOW);
     assert_eq!(g["error"], Value::Null);
     assert_eq!(graphs[1]["graph"], "h");
     assert_eq!(graphs[1]["bottleneck"], Value::Null);
-    assert_eq!(graphs[1]["watermark_ms"], Value::Null);
+    assert_eq!(graphs[1]["watermarkMs"], Value::Null);
 }
 
 #[tokio::test]
@@ -701,18 +701,18 @@ async fn pause_and_resume_nodes() {
     let (status, _) = env.call(Method::POST, &format!("{base}/count/pause"), None).await;
     assert_eq!(status, StatusCode::OK);
     let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
-    assert_eq!(detail["desired"]["paused_nodes"], json!(["count"]));
+    assert_eq!(detail["desired"]["pausedNodes"], json!(["count"]));
     assert_eq!(detail["nodes"][3]["paused"], true);
     assert_eq!(detail["nodes"][0]["paused"], false);
     // Idempotent.
     env.call(Method::POST, &format!("{base}/count/pause"), None).await;
     let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
-    assert_eq!(detail["desired"]["paused_nodes"], json!(["count"]));
+    assert_eq!(detail["desired"]["pausedNodes"], json!(["count"]));
 
     let (status, _) = env.call(Method::POST, &format!("{base}/count/resume"), None).await;
     assert_eq!(status, StatusCode::OK);
     let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
-    assert_eq!(detail["desired"]["paused_nodes"], json!([]));
+    assert_eq!(detail["desired"]["pausedNodes"], json!([]));
 
     let (status, body) = env.call(Method::POST, &format!("{base}/ghost/pause"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);

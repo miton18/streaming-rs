@@ -2,8 +2,8 @@
 //!
 //! | reference | kind | configuration |
 //! |---|---|---|
-//! | `std/tumbling@1` | window | `{"size": "5m", "allowed_lateness": "0s"}` |
-//! | `std/sliding@1` | window | `{"size": "5m", "slide": "1m", "allowed_lateness": "0s"}` |
+//! | `std/tumbling@1` | window | `{"size": "5m", "allowedLateness": "0s"}` |
+//! | `std/sliding@1` | window | `{"size": "5m", "slide": "1m", "allowedLateness": "0s"}` |
 //! | `std/count@1` | aggregate | none; emits `Windowed<u64>` |
 //! | `std/identity@1` | map | none |
 
@@ -26,6 +26,7 @@ fn zero() -> Duration {
 
 /// Fixed-size, non-overlapping windows aligned on the epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Tumbling {
     /// Window length.
     #[serde(with = "duration_str")]
@@ -60,6 +61,7 @@ impl WindowAssigner for Tumbling {
 
 /// Fixed-size windows starting every `slide`, aligned on the epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Sliding {
     /// Window length.
     #[serde(with = "duration_str")]
@@ -195,7 +197,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
     );
     let lateness = || {
         crate::ParamSpec::new(
-            "allowed_lateness",
+            "allowedLateness",
             "duration",
             "How long after its end a window still accepts records.",
         )

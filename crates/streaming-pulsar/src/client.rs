@@ -106,9 +106,9 @@ async fn connect<P: Providers>(providers: &P, settings: &ConnectionSettings) -> 
     let client = if settings.url.tls {
         let tls = match &settings.tls_trust_certs_file {
             Some(path) => {
-                let pem = std::fs::read(path).map_err(|e| format!("cannot read tls_trust_certs_file `{path}`: {e}"))?;
+                let pem = std::fs::read(path).map_err(|e| format!("cannot read tlsTrustCertsFile `{path}`: {e}"))?;
                 magnetar::runtime_tokio::Client::tls_config_from_pem(&pem)
-                    .map_err(|e| format!("invalid tls_trust_certs_file `{path}`: {e}"))?
+                    .map_err(|e| format!("invalid tlsTrustCertsFile `{path}`: {e}"))?
             }
             None => magnetar::runtime_tokio::default_tls_config()
                 .map_err(|e| format!("cannot build the TLS configuration: {e}"))?,

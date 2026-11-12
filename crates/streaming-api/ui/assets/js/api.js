@@ -17,7 +17,7 @@ export const conn = {
   lastOk: 0,           // Date.now() of the last successful read
   downSince: 0,
   lastError: '',
-  clockOffset: 0,      // server now_ms - local Date.now()
+  clockOffset: 0,      // server nowMs - local Date.now()
   listeners: new Set(),
   set(ok, err) {
     const was = this.ok;

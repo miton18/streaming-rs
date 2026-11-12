@@ -11,6 +11,7 @@ pub type Timestamp = i64;
 ///
 /// Windows order by `(end, start)`: the order in which they close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Window {
     /// Inclusive start.
     pub start: Timestamp,

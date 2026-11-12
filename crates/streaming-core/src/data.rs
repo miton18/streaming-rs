@@ -313,6 +313,7 @@ impl fmt::Debug for Emit {
 
 /// Output of an aggregate node: the result of one key in one closed window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Windowed<V> {
     /// The closed window.
     pub window: Window,

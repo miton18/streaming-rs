@@ -44,12 +44,12 @@ function updateWorker(el, w) {
   text(r.name, w.worker);
   setTag(r.tag, w.alive ? 'en ligne' : 'hors ligne', w.alive ? 'success' : 'danger');
   toggle(el, 'dead', !w.alive);
-  const facts = [`v${w.version || '?'}`, w.api_addr ? `API ${w.api_addr}` : 'sans API', `battement ${ago(w.heartbeat_ms, conn.now())}`];
+  const facts = [`v${w.version || '?'}`, w.apiAddr ? `API ${w.apiAddr}` : 'sans API', `battement ${ago(w.heartbeatMs, conn.now())}`];
   text(r.facts, facts.join(' · '));
   attr(r.facts, 'title', `génération ${w.generation} (démarré ${time(w.generation)})`);
   const load = w.load || {};
   setGauge(r.cpu, load.cpu || 0, pct(load.cpu || 0));
-  setGauge(r.mem, load.memory || 0, `${pct(load.memory || 0)} · ${bytes(load.memory_bytes || 0)}`);
+  setGauge(r.mem, load.memory || 0, `${pct(load.memory || 0)} · ${bytes(load.memoryBytes || 0)}`);
   text(r.actors, int(w.actors));
   text(r.slices, int(w.slices));
   const tenants = Object.entries(w.tenants || {}).sort((a, b) => a[0].localeCompare(b[0]));
@@ -60,7 +60,7 @@ function updateWorker(el, w) {
     return tr;
   }, (tr, [t, u]) => {
     const [a, b, c, d] = tr.children;
-    text(a, t); text(b, int(u.actors)); text(c, rate(u.in_per_sec)); text(d, nf2.format(u.busy || 0));
+    text(a, t); text(b, int(u.actors)); text(c, rate(u.inPerSec)); text(d, nf2.format(u.busy || 0));
   });
 }
 
@@ -95,7 +95,7 @@ export class ClusterView {
     this.stats.update(store);
     const c = store.cluster;
     if (!c) return;
-    text(this.meta, `Epoch ${int(c.epoch)} · horloge serveur ${time(c.now_ms)}`);
+    text(this.meta, `Epoch ${int(c.epoch)} · horloge serveur ${time(c.nowMs)}`);
     const alive = c.workers.filter((w) => w.alive).length;
     text(this.wmeta, `${alive} en ligne sur ${c.workers.length}`);
     const workers = [...c.workers].sort((a, b) => a.worker.localeCompare(b.worker, 'fr', { numeric: true }));
@@ -119,7 +119,7 @@ export class ClusterView {
         rows.push({ k: `s:${key}`, t, g, slice: rest.join('/'), w, alive: aliveSet.has(w) });
       }
     }
-    text(this.pmeta, `version ${p.version ?? '–'}${p.computed_by ? ` · calculé par ${p.computed_by}` : ''}${p.computed_ms ? ` à ${time(p.computed_ms)}` : ''}`);
+    text(this.pmeta, `version ${p.version ?? '–'}${p.computedBy ? ` · calculé par ${p.computedBy}` : ''}${p.computedMs ? ` à ${time(p.computedMs)}` : ''}`);
     this.pempty.hidden = Object.keys(p.assignments || {}).length > 0;
     syncList(this.ptbody, rows, (r) => r.k, (r) => {
       if (r.group) {

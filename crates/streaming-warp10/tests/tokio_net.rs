@@ -393,7 +393,7 @@ async fn registered_in_the_registry_and_builds_from_json() {
         &json!({
             "endpoint": format!("http://127.0.0.1:{}/api/v0/update", server.port),
             "token": {"secret": "warp-write"},
-            "time_unit": "us", "timeout": "5s", "max_batch_bytes": 4096
+            "timeUnit": "us", "timeout": "5s", "maxBatchBytes": 4096
         }),
     )
     .expect("sink builds");
