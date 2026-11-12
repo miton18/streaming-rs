@@ -186,11 +186,21 @@ pub(crate) async fn close_log(kv: &dyn Kv, slice: &SliceKey, generation: u64) ->
 /// Delete what a slice whose log is closed left in the store. The closing
 /// mark stays, so that the slice can come back under a later plan and start
 /// afresh.
+///
+/// `nodes` are the aggregates the slice holds state for. Any command may
+/// fail and the purge is then tried again from the start, so what an earlier
+/// attempt removed costs a single read: an empty index is not deleted again.
 pub(crate) async fn purge_closed(kv: &dyn Kv, slice: &SliceKey, nodes: &[NodeId]) -> Result<(), KvError> {
     for node in nodes {
-        let windows: Vec<Window> = indexed_windows(kv, slice, node).await?.into_keys().collect();
+        let index = keys::slice_window_index(slice, node);
+        let entries = kv.hgetall(&index).await?;
+        if entries.is_empty() {
+            // Index first: no index, no window hash.
+            continue;
+        }
+        let windows: Vec<Window> = entries.iter().filter_map(|(field, _)| field.parse().ok()).collect();
         delete_windows(kv, slice, node, &windows).await?;
-        kv.del(vec![keys::slice_window_index(slice, node)]).await?;
+        kv.del(vec![index]).await?;
     }
     kv.del(vec![keys::slice_log(slice)]).await?;
     let seal = keys::slice_seal(slice);

@@ -497,15 +497,6 @@ pub(crate) async fn run_once<P: Providers>(
                     // committed is emitted its log is closed; its state is
                     // deleted two `gc_grace` later, when no write issued
                     // before the closing can still land.
-                    // Only aggregates keep window state: a purge that also
-                    // asked every other node would need dozens of flawless
-                    // store calls in a row, and never finish under faults.
-                    let nodes: Vec<_> = spec
-                        .nodes
-                        .iter()
-                        .map(|node| node.id.clone())
-                        .filter(|node| topology.kind(node) == OpKind::Aggregate)
-                        .collect();
                     let now_ms = env.clock.now_ms();
                     let grace_ms = 2 * spec.settings.gc_grace.as_millis() as i64;
                     let mut rewritten = false;
@@ -526,7 +517,19 @@ pub(crate) async fn run_once<P: Providers>(
                                 kept.push(slice);
                             }
                             Some(since) if now_ms.saturating_sub(since) >= grace_ms => {
-                                state::purge_closed(kv, &key, &nodes).await?;
+                                // Only aggregates keep window state.
+                                let nodes: Vec<_> = topology
+                                    .slice_nodes(&slice)
+                                    .into_iter()
+                                    .filter(|node| topology.kind(node) == OpKind::Aggregate)
+                                    .collect();
+                                if let Err(error) = state::purge_closed(kv, &key, &nodes).await {
+                                    // Try again next round; the slices after
+                                    // this one and the placement go on.
+                                    tracing::warn!(slice = %key, %error, "purging a retired slice failed");
+                                    kept.push(slice);
+                                    continue;
+                                }
                                 current.closing.remove(&slice);
                                 if !current.closed.contains(&slice) {
                                     current.closed.push(slice);
