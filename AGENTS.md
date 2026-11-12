@@ -367,6 +367,12 @@ The harness (`streaming-sim/src/lib.rs`):
   workloads wait on `ctx.shutdown()`; without pinned seeds each run explores
   new ones; a "did not settle" may be a configuration too slow for the
   900 s timeout rather than a deadlock — look at whether progress is made.
+- `Scenario::random` lowers what it drew when the run could not end in
+  time. A slow sink is paid once per write, a window reaching its sink
+  seven keys at a time (`CHUNK_SIZE`): counted once per epoch only, a draw
+  with 200 keys, 28 windows and a sink at three seconds did not settle on
+  one seed in three (`SIM_CONFIG_SEED=1794525933778258523`, on the previous
+  harness as well).
 - Simulated time only passes when every task waits. A fault that answers at
   once must therefore be bounded, or a seed never ends: the simulated broker
   rewound at every read, redelivered more than it delivered when asked for a
@@ -378,9 +384,9 @@ The harness (`streaming-sim/src/lib.rs`):
   handed reader did the same.
 
 Last validated state (SDK traits): the hand-written suite at 200 seeds per
-scenario; 2,700 runs of the bench's scenarios
+scenario and 40 random configurations at ten seeds; 2,700 runs of the bench's scenarios
 without a planted bug, half of them through a source that pushes, none
-lasting more than a fraction of a second; the sixteen planted bugs noticed
+lasting more than a fraction of a second; the seventeen planted bugs noticed
 one at a time over 72 runs each, from `ForgetAtOnce` (2 runs),
 `JoinWithoutWatermark` (5) and `CommitBelowTheSeal` (6) to
 `AckBeforeCommit`, `DeleteByTheIndexEntry` and `DeleteWithoutClosing` (all
@@ -388,8 +394,9 @@ one at a time over 72 runs each, from `ForgetAtOnce` (2 runs),
 55 of 72 through a source that pushes. The simulated operators having moved
 to the SDK traits and the broker's redeliveries being bounded, the six least
 noticed were run on the previous harness too, at the same rates
-(`ForgetAtOnce`: 15 runs of 256 before, 12 of 288 after). The sixteen were
-noticed with `SIM_PIPED=1` as well, at the same rates.
+(`ForgetAtOnce`: 15 runs of 256 before, 12 of 288 after). The seventeen
+were noticed with `SIM_PIPED=1` as well, at the same rates
+(`CloseWithoutClaim`: 16 runs of 72 both ways).
 
 Before that (declarations): 3,000 runs of the two deployment
 scenarios, the hand-written suite, 680 random configurations, and the four

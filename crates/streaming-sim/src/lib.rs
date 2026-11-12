@@ -606,6 +606,10 @@ impl Source for SimLog {
     }
 }
 
+/// How many elements the engine hands downstream at a time: small, so that
+/// batches are cut everywhere.
+const CHUNK_SIZE: u64 = 7;
+
 /// How long the pushing source waits for records before it looks again at
 /// what the engine committed.
 const PUSH_WAIT: Duration = Duration::from_millis(100);
@@ -1035,6 +1039,19 @@ impl Scenario {
         if windows * epochs * scenario.sink_latency_ms > 300_000 {
             scenario.sink_latency_ms = 8;
         }
+        // And once per write, each of them waiting half the latency on
+        // average: a window reaches its sink `CHUNK_SIZE` keys at a time.
+        let produce_ms = scenario.produce_for.as_millis().max(1) as u64;
+        let keys_per_window = scenario
+            .keys
+            .min((scenario.events * window).div_ceil(produce_ms))
+            .max(1);
+        let writes = windows * keys_per_window.div_ceil(CHUNK_SIZE);
+        for faster in [600, 8] {
+            if writes * scenario.sink_latency_ms / 2 > 300_000 {
+                scenario.sink_latency_ms = faster;
+            }
+        }
         scenario
     }
 
@@ -1083,7 +1100,7 @@ impl Scenario {
                 "linger": "40ms",
                 "flushInterval": "250ms",
                 "maxBatch": self.max_batch,
-                "chunkSize": 7,
+                "chunkSize": CHUNK_SIZE,
                 "mailboxCapacity": 2,
                 "maxInFlightEpochs": 2,
                 "maxPendingWindows": self.max_pending_windows,
