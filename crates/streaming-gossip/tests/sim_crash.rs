@@ -7,17 +7,13 @@
 
 mod common;
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use async_trait::async_trait;
-use common::{
-    NodeParams, Registry, builder_with, check_report, convergence_gap, fail, node_id_for, seeds,
-    sleep,
-};
+use common::{NodeParams, Registry, builder_with, check_report, convergence_gap, fail, node_id_for, seeds, sleep};
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, RandomProvider, SimContext, SimulationResult,
-    TimeProvider, Workload, assert_always, assert_sometimes,
+    Attrition, AttritionScope, Chaos, ChaosMode, RandomProvider, SimContext, SimulationResult, TimeProvider, Workload,
+    assert_always, assert_sometimes,
 };
 use streaming_gossip::GossipStats;
 
@@ -47,10 +43,7 @@ impl CrashWorkload {
                 { "ip" => old.ip, "generation" => old.gossip.generation(), "frames_sent_now" => s.frames_sent, "frames_sent_at_retire" => old.stats_at_retire.frames_sent }
             );
             if now > old.at + Duration::from_secs(2) {
-                assert_sometimes!(
-                    true,
-                    "retired incarnation observed frozen 2s after its crash"
-                );
+                assert_sometimes!(true, "retired incarnation observed frozen 2s after its crash");
             }
         }
         // 2. A node down for longer than dead_after + slack is not alive (with
@@ -69,9 +62,7 @@ impl CrashWorkload {
             let id = node_id_for(ip);
             for (obs_ip, obs) in &r.live {
                 let view = obs.gossip.node_view(&id);
-                let wrongly_alive = view
-                    .as_ref()
-                    .is_some_and(|v| v.alive && v.generation == generation);
+                let wrongly_alive = view.as_ref().is_some_and(|v| v.alive && v.generation == generation);
                 assert_always!(
                     !wrongly_alive,
                     "node down for longer than dead_after + slack is not seen alive",
@@ -117,9 +108,7 @@ impl Workload for CrashWorkload {
             if now - settle_start > self.settle_deadline {
                 assert_always!(false, "cluster converges after attrition");
                 let stats: Vec<_> = live.iter().map(|(ip, g)| (ip.clone(), g.stats())).collect();
-                return Err(fail(format!(
-                    "no convergence after attrition: {gap}; {stats:#?}"
-                )));
+                return Err(fail(format!("no convergence after attrition: {gap}; {stats:#?}")));
             }
             sleep(ctx, Duration::from_millis(100)).await?;
         }
@@ -144,21 +133,14 @@ impl Workload for CrashWorkload {
         }
         let crashed = !r.retired.is_empty();
         drop(r);
-        let total =
-            |f: fn(&GossipStats) -> u64| live.iter().map(|(_, g)| f(&g.stats())).sum::<u64>();
+        let total = |f: fn(&GossipStats) -> u64| live.iter().map(|(_, g)| f(&g.stats())).sum::<u64>();
         assert_sometimes!(crashed, "a node crashed or was rebooted");
-        assert_sometimes!(
-            total(|s| s.generation_bumps) > 0,
-            "generation bump observed"
-        );
+        assert_sometimes!(total(|s| s.generation_bumps) > 0, "generation bump observed");
         assert_sometimes!(total(|s| s.nodes_marked_dead) > 0, "node marked dead");
         assert_sometimes!(total(|s| s.nodes_revived) > 0, "dead node revived");
         assert_sometimes!(total(|s| s.nodes_forgotten) > 0, "dead node forgotten");
         assert_sometimes!(total(|s| s.connect_failures) > 0, "connect failure handled");
-        assert_sometimes!(
-            total(|s| s.deltas_truncated) > 0,
-            "delta truncated by the byte budget"
-        );
+        assert_sometimes!(total(|s| s.deltas_truncated) > 0, "delta truncated by the byte budget");
         Ok(())
     }
 }

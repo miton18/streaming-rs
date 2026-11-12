@@ -5,15 +5,19 @@
 //! [`OpRef`]; the operator itself is Rust code compiled into the workers and
 //! registered under the same reference.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ids::{GraphId, GraphKey, NodeId, OpRef, SliceId, TenantId};
-use crate::registry::{Catalog, OpDescriptor, OpKind, TypeTag};
-use crate::time::duration_str;
+use crate::{
+    ids::{GraphId, GraphKey, NodeId, OpRef, SliceId, TenantId},
+    registry::{Catalog, OpDescriptor, OpKind, TypeTag},
+    time::duration_str,
+};
 
 /// One node of a graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,9 +206,7 @@ pub enum SpecError {
         reason: String,
     },
     /// Two connected nodes disagree on the type flowing between them.
-    #[error(
-        "edge `{from}` -> `{to}`: `{from}` produces `{produced}` but `{to}` expects `{expected}`"
-    )]
+    #[error("edge `{from}` -> `{to}`: `{from}` produces `{produced}` but `{to}` expects `{expected}`")]
     Type {
         /// Edge origin.
         from: NodeId,
@@ -246,10 +248,7 @@ impl Topology {
                 node: node.id.clone(),
                 op: node.op.clone(),
             })?;
-            if descriptors
-                .insert(node.id.clone(), descriptor.clone())
-                .is_some()
-            {
+            if descriptors.insert(node.id.clone(), descriptor.clone()).is_some() {
                 return Err(SpecError::DuplicateNode(node.id.clone()));
             }
         }
@@ -282,8 +281,7 @@ impl Topology {
         }
 
         // Kahn's algorithm, keeping the declaration order among ready nodes.
-        let mut pending: BTreeMap<&NodeId, usize> =
-            inputs.iter().map(|(id, ins)| (id, ins.len())).collect();
+        let mut pending: BTreeMap<&NodeId, usize> = inputs.iter().map(|(id, ins)| (id, ins.len())).collect();
         let mut order = Vec::with_capacity(spec.nodes.len());
         loop {
             let ready: Vec<NodeId> = spec
@@ -306,9 +304,7 @@ impl Topology {
             }
         }
         if !pending.is_empty() {
-            return Err(SpecError::Cycle(
-                pending.keys().map(|id| (*id).clone()).collect(),
-            ));
+            return Err(SpecError::Cycle(pending.keys().map(|id| (*id).clone()).collect()));
         }
 
         let kind = |id: &NodeId| descriptors[id].kind;
@@ -360,9 +356,7 @@ impl Topology {
                 }
                 OpKind::Aggregate => {
                     if ins.len() != 1 || kind(&ins[0]) != OpKind::Window {
-                        return Err(wiring(
-                            "an aggregate node needs exactly one input, a window node",
-                        ));
+                        return Err(wiring("an aggregate node needs exactly one input, a window node"));
                     }
                     if outs.is_empty() {
                         return Err(wiring("an aggregate node needs at least one output"));
@@ -424,11 +418,7 @@ impl Topology {
     /// Nodes of a given kind, in topological order.
     #[must_use]
     pub fn nodes_of(&self, kind: OpKind) -> Vec<NodeId> {
-        self.order
-            .iter()
-            .filter(|id| self.kind(id) == kind)
-            .cloned()
-            .collect()
+        self.order.iter().filter(|id| self.kind(id) == kind).cloned().collect()
     }
 
     /// Every slice of the graph, given the partition count of each source.
@@ -468,11 +458,7 @@ impl Topology {
                 }
             }
         }
-        self.order
-            .iter()
-            .filter(|id| members.contains(*id))
-            .cloned()
-            .collect()
+        self.order.iter().filter(|id| members.contains(*id)).cloned().collect()
     }
 
     /// Edges internal to a slice.
@@ -484,9 +470,7 @@ impl Topology {
             .edges
             .iter()
             .filter(|(from, to)| {
-                members.contains(from)
-                    && members.contains(to)
-                    && (from == root || self.kind(from) != OpKind::Aggregate)
+                members.contains(from) && members.contains(to) && (from == root || self.kind(from) != OpKind::Aggregate)
             })
             .cloned()
             .collect()
@@ -497,9 +481,7 @@ impl Topology {
     pub fn feeding_slices(&self, aggregate: &NodeId, slices: &[SliceId]) -> Vec<SliceId> {
         slices
             .iter()
-            .filter(|slice| {
-                slice.root() != aggregate && self.slice_nodes(slice).contains(aggregate)
-            })
+            .filter(|slice| slice.root() != aggregate && self.slice_nodes(slice).contains(aggregate))
             .cloned()
             .collect()
     }
@@ -507,9 +489,10 @@ impl Topology {
 
 #[cfg(test)]
 mod tests {
+    use moonpool_core::TokioProviders;
+
     use super::*;
     use crate::registry::Registry;
-    use moonpool_core::TokioProviders;
 
     struct Event;
 
@@ -523,9 +506,7 @@ mod tests {
         });
         registry.register_map("test/decode@1", "", |_: &Vec<u8>| Some(Event));
         registry.register_key("test/key@1", "", |_: &Event| "k".to_owned());
-        registry.register_map("test/fmt@1", "", |_: &crate::data::Windowed<u64>| {
-            Some(String::new())
-        });
+        registry.register_map("test/fmt@1", "", |_: &crate::data::Windowed<u64>| Some(String::new()));
         registry.catalog()
     }
 
@@ -582,19 +563,12 @@ mod tests {
             topology.slice_nodes(&slices[0]),
             ["events", "decode", "by-key", "raw", "win", "count"].map(id)
         );
-        assert_eq!(
-            topology.slice_nodes(&slices[2]),
-            ["count", "fmt", "out"].map(id)
-        );
+        assert_eq!(topology.slice_nodes(&slices[2]), ["count", "fmt", "out"].map(id));
         assert_eq!(
             topology.slice_edges(&slices[2]),
             [(id("count"), id("fmt")), (id("fmt"), id("out"))]
         );
-        assert!(
-            !topology
-                .slice_edges(&slices[0])
-                .contains(&(id("count"), id("fmt")))
-        );
+        assert!(!topology.slice_edges(&slices[0]).contains(&(id("count"), id("fmt"))));
         assert_eq!(topology.feeding_slices(&id("count"), &slices), &slices[..2]);
         assert_eq!(topology.types[&id("win")], TypeTag::of::<Event>());
     }
@@ -622,10 +596,7 @@ mod tests {
             ],
             &[("s", "a"), ("a", "b"), ("b", "a"), ("b", "k")],
         );
-        assert!(matches!(
-            Topology::build(&cyclic, &catalog),
-            Err(SpecError::Cycle(_))
-        ));
+        assert!(matches!(Topology::build(&cyclic, &catalog), Err(SpecError::Cycle(_))));
 
         let unknown_op = spec(&[("s", "nope/x@1")], &[]);
         assert!(matches!(
@@ -664,11 +635,7 @@ mod tests {
     #[test]
     fn self_loops_are_bad_edges() {
         let looped = spec(
-            &[
-                ("s", "test/source@1"),
-                ("a", "std/identity@1"),
-                ("k", "test/sink@1"),
-            ],
+            &[("s", "test/source@1"), ("a", "std/identity@1"), ("k", "test/sink@1")],
             &[("s", "a"), ("a", "a"), ("a", "k")],
         );
         assert!(matches!(
@@ -682,11 +649,7 @@ mod tests {
         let catalog = catalog();
         // A map, a key_by and a window that each lack an output.
         let map_without_output = spec(
-            &[
-                ("s", "test/source@1"),
-                ("a", "std/identity@1"),
-                ("k", "test/sink@1"),
-            ],
+            &[("s", "test/source@1"), ("a", "std/identity@1"), ("k", "test/sink@1")],
             &[("s", "a"), ("s", "k")],
         );
         assert_eq!(wiring_error_on(&map_without_output, &catalog), id("a"));
@@ -717,11 +680,7 @@ mod tests {
 
         // A window with no input at all.
         let mut window_without_input = spec(
-            &[
-                ("w", "std/tumbling@1"),
-                ("c", "std/count@1"),
-                ("k", "test/sink@1"),
-            ],
+            &[("w", "std/tumbling@1"), ("c", "std/count@1"), ("k", "test/sink@1")],
             &[("w", "c"), ("c", "k")],
         );
         window_without_input.nodes[0].config = serde_json::json!({"size": "5m"});

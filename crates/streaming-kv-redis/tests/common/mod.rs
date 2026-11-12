@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 //! Helpers shared by the integration tests: free ports and a real redis-server.
 
-use std::net::TcpListener;
-use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::{
+    net::TcpListener,
+    process::{Child, Command, Stdio},
+    sync::Mutex,
+    time::Duration,
+};
 
 /// A port nobody listens on and that no other test of this process got.
 pub fn free_port() -> u16 {

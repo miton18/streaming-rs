@@ -18,17 +18,21 @@
 //! Faults are queued with [`FakeWarp10::push_fault`] and consumed one per
 //! well-formed, authenticated request, in order.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::io;
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    io,
+    sync::Arc,
+};
 
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use moonpool_core::{NetworkProvider, Providers, TaskProvider, TcpListenerTrait, TimeProvider};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::gts::{GtsValue, parse_line};
-use crate::http::{HttpError, Limits, ReadError, build_response, header, read_request};
+use crate::{
+    gts::{GtsValue, parse_line},
+    http::{HttpError, Limits, ReadError, build_response, header, read_request},
+};
 
 /// Identity of a stored point. The timestamp is the raw one received, in the
 /// platform unit of the sender.
@@ -52,10 +56,7 @@ impl PointKey {
     ) -> Self {
         Self {
             class: class.into(),
-            labels: labels
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect(),
+            labels: labels.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
             ts,
         }
     }
@@ -271,9 +272,7 @@ impl FakeWarp10 {
             Err(_) => return,
         };
         if request.truncated {
-            let _ = stream
-                .write_all(&build_response(413, "body too large"))
-                .await;
+            let _ = stream.write_all(&build_response(413, "body too large")).await;
             let _ = stream.close().await;
             return;
         }
@@ -281,11 +280,7 @@ impl FakeWarp10 {
         match self.handle(&request.method, &request.target, token, &request.body) {
             Verdict::Drop => {}
             Verdict::Respond(status, body) => {
-                if stream
-                    .write_all(&build_response(status, &body))
-                    .await
-                    .is_ok()
-                {
+                if stream.write_all(&build_response(status, &body)).await.is_ok() {
                     let _ = stream.flush().await;
                 }
                 let _ = stream.close().await;
@@ -294,12 +289,7 @@ impl FakeWarp10 {
     }
 
     /// Bind `addr` and serve until `shutdown` is cancelled.
-    pub async fn serve<P: Providers>(
-        &self,
-        providers: P,
-        addr: &str,
-        shutdown: CancellationToken,
-    ) -> io::Result<()> {
+    pub async fn serve<P: Providers>(&self, providers: P, addr: &str, shutdown: CancellationToken) -> io::Result<()> {
         let listener = providers.network().bind(addr).await?;
         self.serve_listener(providers, listener, shutdown).await
     }
@@ -339,10 +329,7 @@ impl FakeWarp10 {
                 Err(e) => {
                     tracing::debug!("fake warp10: accept failed: {e}");
                     // Do not spin on a persistent error.
-                    let _ = providers
-                        .time()
-                        .sleep(std::time::Duration::from_millis(10))
-                        .await;
+                    let _ = providers.time().sleep(std::time::Duration::from_millis(10)).await;
                 }
             }
         }
@@ -386,15 +373,9 @@ mod tests {
         let fake = FakeWarp10::new("t");
         assert_eq!(run(&fake, Some("t"), "1// m{a=b} 1\n2// m{a=b} 2\n").0, 200);
         assert_eq!(fake.len(), 2);
-        assert_eq!(
-            run(&fake, Some("t"), "1// m{a=b} 10\n1// m{a=c} 3\n").0,
-            200
-        );
+        assert_eq!(run(&fake, Some("t"), "1// m{a=b} 10\n1// m{a=c} 3\n").0, 200);
         assert_eq!(fake.len(), 3);
-        assert_eq!(
-            fake.get(&PointKey::new("m", [("a", "b")], 1)),
-            Some(GtsValue::Long(10))
-        );
+        assert_eq!(fake.get(&PointKey::new("m", [("a", "b")], 1)), Some(GtsValue::Long(10)));
         assert_eq!(fake.stats().points_written, 4);
     }
 
@@ -434,12 +415,7 @@ mod tests {
         assert_eq!(run(&fake, Some("t"), "2// m{} 2\n").0, 200);
         let s = fake.stats();
         assert_eq!(
-            (
-                s.status_faults,
-                s.drops_after_commit,
-                s.drops_before_commit,
-                s.accepted
-            ),
+            (s.status_faults, s.drops_after_commit, s.drops_before_commit, s.accepted),
             (1, 1, 1, 1)
         );
     }

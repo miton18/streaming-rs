@@ -9,12 +9,10 @@ mod common;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common::{
-    NodeParams, Registry, builder_with, check_report, convergence_gap, fail, seeds, sleep,
-};
+use common::{NodeParams, Registry, builder_with, check_report, convergence_gap, fail, seeds, sleep};
 use moonpool_sim::{
-    Chaos, ChaosMode, RandomProvider, SimContext, SimulationResult, TimeProvider, Workload,
-    assert_always, assert_sometimes,
+    Chaos, ChaosMode, RandomProvider, SimContext, SimulationResult, TimeProvider, Workload, assert_always,
+    assert_sometimes,
 };
 
 struct ConvergenceWorkload {
@@ -52,10 +50,7 @@ impl Workload for ConvergenceWorkload {
         let boot_deadline = ctx.time().now() + Duration::from_secs(10);
         while self.registry.live().len() < self.n {
             if ctx.time().now() > boot_deadline {
-                return Err(fail(format!(
-                    "only {} nodes booted",
-                    self.registry.live().len()
-                )));
+                return Err(fail(format!("only {} nodes booted", self.registry.live().len())));
             }
             sleep(ctx, Duration::from_millis(50)).await?;
         }
@@ -64,11 +59,7 @@ impl Workload for ConvergenceWorkload {
         let start = ctx.time().now();
         let mut cfg_version = 0u64;
         while ctx.time().now() - start < self.churn {
-            sleep(
-                ctx,
-                Duration::from_millis(ctx.random().random_range(20..400)),
-            )
-            .await?;
+            sleep(ctx, Duration::from_millis(ctx.random().random_range(20..400))).await?;
             let live = self.registry.live();
             let (_, g) = &live[ctx.random().random_range(0..live.len())];
             match ctx.random().random_range(0..7u32) {
@@ -82,10 +73,7 @@ impl Workload for ConvergenceWorkload {
                 3 => g.set("tmp", "here").unwrap(),
                 4 => g.remove("tmp"),
                 5 => g
-                    .set(
-                        &format!("dyn-{}", ctx.random().random_range(0..6u32)),
-                        &"d".repeat(40),
-                    )
+                    .set(&format!("dyn-{}", ctx.random().random_range(0..6u32)), &"d".repeat(40))
                     .unwrap(),
                 _ => g.remove(&format!("dyn-{}", ctx.random().random_range(0..6u32))),
             }
@@ -114,19 +102,11 @@ impl Workload for ConvergenceWorkload {
         check_sizes(&self.registry, &self.params, self.n);
 
         let live = self.registry.live();
-        let sum = |f: fn(&streaming_gossip::GossipStats) -> u64| {
-            live.iter().map(|(_, g)| f(&g.stats())).sum::<u64>()
-        };
-        assert_sometimes!(
-            sum(|s| s.deltas_truncated) > 0,
-            "delta truncated by the byte budget"
-        );
+        let sum = |f: fn(&streaming_gossip::GossipStats) -> u64| live.iter().map(|(_, g)| f(&g.stats())).sum::<u64>();
+        assert_sometimes!(sum(|s| s.deltas_truncated) > 0, "delta truncated by the byte budget");
         assert_sometimes!(sum(|s| s.connect_failures) > 0, "connect failure handled");
         assert_sometimes!(sum(|s| s.tombstones_gc) > 0, "tombstone garbage-collected");
-        assert_sometimes!(
-            sum(|s| s.frames_rejected) > 0,
-            "corrupted or malformed frame rejected"
-        );
+        assert_sometimes!(sum(|s| s.frames_rejected) > 0, "corrupted or malformed frame rejected");
         Ok(())
     }
 }
@@ -134,15 +114,13 @@ impl Workload for ConvergenceWorkload {
 fn run(n: usize, network: Option<ChaosMode>, iterations: u64) {
     let registry = Registry::default();
     let params = NodeParams::default();
-    let mut b = builder_with(&registry, n, params.clone(), seeds(iterations)).workload(
-        ConvergenceWorkload {
-            registry: registry.clone(),
-            n,
-            params,
-            churn: Duration::from_secs(15),
-            settle_deadline: Duration::from_secs(45),
-        },
-    );
+    let mut b = builder_with(&registry, n, params.clone(), seeds(iterations)).workload(ConvergenceWorkload {
+        registry: registry.clone(),
+        n,
+        params,
+        churn: Duration::from_secs(15),
+        settle_deadline: Duration::from_secs(45),
+    });
     if let Some(mode) = network {
         b = b.enable_chaos([Chaos::Network(mode)]);
     }

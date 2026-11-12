@@ -18,13 +18,11 @@
 //! publicly as is: bind it to a loopback or private interface, or put an
 //! authenticating reverse proxy in front of it. CORS is permissive.
 
-use std::future::Future;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use axum::Router;
 use streaming_core::{Clock, DynKv};
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 pub mod control;
 mod routes;

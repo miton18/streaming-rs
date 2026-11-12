@@ -42,14 +42,15 @@
 //! with is remembered for another `forget_after`, so that stale copies still
 //! circulating cannot resurrect them, while a real heartbeat increase can.
 
-use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
-use crate::config::{GossipConfig, Limits};
-use crate::error::GossipError;
-use crate::wire::{
-    self, Delta, Digest, DigestEntry, KeyUpdate, NodeDelta, key_update_size, node_header_size,
-    varint_len,
+use crate::{
+    config::{GossipConfig, Limits},
+    error::GossipError,
+    wire::{self, Delta, Digest, DigestEntry, KeyUpdate, NodeDelta, key_update_size, node_header_size, varint_len},
 };
 
 /// A cluster member as seen by the local node.
@@ -221,13 +222,7 @@ fn mix(s: &str, salt: u64) -> u64 {
 impl ClusterState {
     /// New state containing only the local node.
     #[must_use]
-    pub fn new(
-        self_id: &str,
-        generation: u64,
-        addr: &str,
-        cfg: StateConfig,
-        now: Duration,
-    ) -> Self {
+    pub fn new(self_id: &str, generation: u64, addr: &str, cfg: StateConfig, now: Duration) -> Self {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self_id.to_string(),
@@ -267,21 +262,14 @@ impl ClusterState {
 
     #[allow(clippy::expect_used)]
     fn me(&mut self) -> &mut NodeState {
-        self.nodes
-            .get_mut(&self.self_id)
-            .expect("self node is never removed")
+        self.nodes.get_mut(&self.self_id).expect("self node is never removed")
     }
 
     /// Publish / overwrite a local key. Returns whether anything changed.
     ///
     /// # Errors
     /// Limit violations.
-    pub fn set_local(
-        &mut self,
-        key: &str,
-        value: &str,
-        _now: Duration,
-    ) -> Result<bool, GossipError> {
+    pub fn set_local(&mut self, key: &str, value: &str, _now: Duration) -> Result<bool, GossipError> {
         let l = &self.cfg.limits;
         if key.is_empty() || key.len() > l.max_key_len {
             return Err(GossipError::KeyTooLong {
@@ -375,11 +363,7 @@ impl ClusterState {
     pub fn validate_digest(&self, d: &Digest) -> Result<(), String> {
         let l = &self.cfg.limits;
         if d.entries.len() > l.max_nodes {
-            return Err(format!(
-                "digest has {} entries > {}",
-                d.entries.len(),
-                l.max_nodes
-            ));
+            return Err(format!("digest has {} entries > {}", d.entries.len(), l.max_nodes));
         }
         for e in &d.entries {
             if e.node_id.is_empty() || e.node_id.len() > l.max_node_id_len {
@@ -396,17 +380,8 @@ impl ClusterState {
     /// heartbeats, which drive failure detection, are not starved by a large
     /// backlog), nodes sorted by decreasing staleness; then the key updates,
     /// lowest versions first, node by node in the same order.
-    pub fn compute_delta(
-        &mut self,
-        peer: &Digest,
-        budget: usize,
-        tie_break: u64,
-    ) -> (Delta, DeltaInfo) {
-        let peer: HashMap<&str, &DigestEntry> = peer
-            .entries
-            .iter()
-            .map(|e| (e.node_id.as_str(), e))
-            .collect();
+    pub fn compute_delta(&mut self, peer: &Digest, budget: usize, tie_break: u64) -> (Delta, DeltaInfo) {
+        let peer: HashMap<&str, &DigestEntry> = peer.entries.iter().map(|e| (e.node_id.as_str(), e)).collect();
 
         struct Candidate<'a> {
             header: NodeDelta,
@@ -422,8 +397,7 @@ impl ClusterState {
                 Some(d) if d.generation < ns.generation => (true, 0, None),
                 Some(d) if d.generation > ns.generation => continue,
                 Some(d) => {
-                    if d.max_version < ns.last_gc_version && d.last_gc_version < ns.last_gc_version
-                    {
+                    if d.max_version < ns.last_gc_version && d.last_gc_version < ns.last_gc_version {
                         (true, 0, Some(d.heartbeat))
                     } else {
                         (false, d.max_version, Some(d.heartbeat))
@@ -489,8 +463,7 @@ impl ClusterState {
                 0
             };
             let hsize = node_header_size(&c.header, 0);
-            let count_growth =
-                varint_len(included.len() as u64 + 1) - varint_len(included.len() as u64);
+            let count_growth = varint_len(included.len() as u64 + 1) - varint_len(included.len() as u64);
             if total + hsize + count_growth > budget {
                 info.truncated = true;
                 continue;
@@ -504,8 +477,7 @@ impl ClusterState {
             let mut complete = true;
             for (k, v) in &c.stale {
                 let n = c.header.updates.len() as u64;
-                let grow = key_update_size(k, v.value.as_deref(), v.version) + varint_len(n + 1)
-                    - varint_len(n);
+                let grow = key_update_size(k, v.value.as_deref(), v.version) + varint_len(n + 1) - varint_len(n);
                 if total + grow > budget {
                     complete = false;
                     break;
@@ -519,25 +491,13 @@ impl ClusterState {
             }
             if !complete {
                 info.truncated = true;
-                let to = c
-                    .header
-                    .updates
-                    .last()
-                    .map_or(c.header.from_version, |u| u.version);
+                let to = c.header.updates.last().map_or(c.header.from_version, |u| u.version);
                 c.header.to_version = to;
                 if c.header.reset {
                     // Only the tombstones covered by the truncated snapshot
                     // are accounted as garbage-collected.
-                    let own_gc = self
-                        .nodes
-                        .get(&c.header.node_id)
-                        .map_or(0, |n| n.last_gc_version);
-                    let covered = c
-                        .omitted_tombstones
-                        .iter()
-                        .copied()
-                        .filter(|&t| t <= to)
-                        .max();
+                    let own_gc = self.nodes.get(&c.header.node_id).map_or(0, |n| n.last_gc_version);
+                    let covered = c.omitted_tombstones.iter().copied().filter(|&t| t <= to).max();
                     c.header.last_gc_version = covered.unwrap_or(0).max(own_gc);
                 }
             }
@@ -548,11 +508,7 @@ impl ClusterState {
         }
         let delta = Delta { nodes };
         info.bytes = wire::delta_size(&delta);
-        debug_assert!(
-            info.bytes <= budget.max(1),
-            "delta {} > budget {budget}",
-            info.bytes
-        );
+        debug_assert!(info.bytes <= budget.max(1), "delta {} > budget {budget}", info.bytes);
         if info.truncated {
             self.counters.deltas_truncated += 1;
         }
@@ -629,8 +585,7 @@ impl ClusterState {
         self.validate_node_delta(&nd)?;
         let max_keys = self.cfg.limits.max_keys;
         if let Some(f) = self.forgotten.get(&nd.node_id)
-            && (nd.generation < f.generation
-                || (nd.generation == f.generation && nd.heartbeat <= f.heartbeat))
+            && (nd.generation < f.generation || (nd.generation == f.generation && nd.heartbeat <= f.heartbeat))
         {
             return Ok(false);
         }
@@ -707,11 +662,7 @@ impl ClusterState {
             ns.last_gc_version = nd.last_gc_version;
             ns.addr = nd.addr;
         } else if nd.from_version <= ns.max_version {
-            let fresh: Vec<&KeyUpdate> = nd
-                .updates
-                .iter()
-                .filter(|u| u.version > ns.max_version)
-                .collect();
+            let fresh: Vec<&KeyUpdate> = nd.updates.iter().filter(|u| u.version > ns.max_version).collect();
             if !fresh.is_empty() {
                 let mut kvs = ns.kvs.clone();
                 for u in fresh {
@@ -756,9 +707,7 @@ impl ClusterState {
             if *id == self.self_id {
                 continue;
             }
-            let fresh = ns
-                .last_progress
-                .is_some_and(|t| now.saturating_sub(t) < cfg.dead_after);
+            let fresh = ns.last_progress.is_some_and(|t| now.saturating_sub(t) < cfg.dead_after);
             if ns.alive && !fresh {
                 ns.alive = false;
                 ns.was_dead = true;

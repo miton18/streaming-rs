@@ -15,27 +15,30 @@
 //! `broker_dedup_through_an_aliased_url` expects `PULSAR_E2E_URL` to be
 //! `pulsar://localhost:<port>` (it reaches the same broker as `127.0.0.1`).
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{Read, Write},
+    net::TcpStream,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
-use magnetar::proto::CreateProducerRequest;
-use magnetar::proto::SubscribeRequest;
-use magnetar::proto::pb::command_subscribe::{InitialPosition, SubType};
-use magnetar::runtime_moonpool::{Client, MoonpoolEngine};
-use magnetar::{ConnectionConfig, OutgoingMessage};
+use magnetar::{
+    ConnectionConfig, OutgoingMessage,
+    proto::{
+        CreateProducerRequest, SubscribeRequest,
+        pb::command_subscribe::{InitialPosition, SubType},
+    },
+    runtime_moonpool::{Client, MoonpoolEngine},
+};
 use moonpool_core::TokioProviders;
 use serde_json::{Value, json};
 use streaming_core::{
-    Emit, EmitId, GraphId, NodeId, OpContext, OpFactory, OpRef, Origin, PartitionReader, Position,
-    Registry, SinkConnector, SliceId, SourceConnector, SourceRecord, StaticSecrets, SystemClock,
-    TenantId, datum,
+    Emit, EmitId, GraphId, NodeId, OpContext, OpFactory, OpRef, Origin, PartitionReader, Position, Registry,
+    SinkConnector, SliceId, SourceConnector, SourceRecord, StaticSecrets, SystemClock, TenantId, datum,
 };
 use streaming_pulsar::{
-    EMIT_ID_PROPERTY, PulsarMessage, PulsarOutput, PulsarSink, SinkConfig, WriteStats,
-    partition_topic,
+    EMIT_ID_PROPERTY, PulsarMessage, PulsarOutput, PulsarSink, SinkConfig, WriteStats, partition_topic,
 };
 
 fn broker() -> Option<String> {
@@ -70,10 +73,7 @@ fn admin(method: &str, path: &str, body: &str) -> (u16, String) {
 }
 
 fn unique(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     format!("{prefix}-{nanos}")
 }
 
@@ -109,9 +109,7 @@ fn registry() -> Registry<TokioProviders> {
 /// Build a source through the registry, as the runtime does.
 fn make_source(config: Value) -> Arc<dyn SourceConnector> {
     let registry = registry();
-    let Some((_, OpFactory::Source(factory))) =
-        registry.get(&OpRef::new("std/pulsar-source@1").unwrap())
-    else {
+    let Some((_, OpFactory::Source(factory))) = registry.get(&OpRef::new("std/pulsar-source@1").unwrap()) else {
         panic!("source not registered");
     };
     factory(&context(), &config).expect("valid source config")
@@ -119,9 +117,7 @@ fn make_source(config: Value) -> Arc<dyn SourceConnector> {
 
 fn make_sink(config: Value) -> Arc<dyn SinkConnector> {
     let registry = registry();
-    let Some((_, OpFactory::Sink(factory))) =
-        registry.get(&OpRef::new("std/pulsar-sink@1").unwrap())
-    else {
+    let Some((_, OpFactory::Sink(factory))) = registry.get(&OpRef::new("std/pulsar-sink@1").unwrap()) else {
         panic!("sink not registered");
     };
     factory(&context(), &config).expect("valid sink config")
@@ -142,12 +138,7 @@ async fn raw_client(url: &str) -> Client<TokioProviders> {
 
 /// Publish `messages` to one topic (partition), batched or not, waiting for
 /// every receipt.
-async fn produce(
-    client: &Client<TokioProviders>,
-    topic: &str,
-    batching: bool,
-    messages: Vec<OutgoingMessage>,
-) {
+async fn produce(client: &Client<TokioProviders>, topic: &str, batching: bool, messages: Vec<OutgoingMessage>) {
     let producer = client
         .open_producer(CreateProducerRequest {
             topic: topic.to_owned(),
@@ -158,10 +149,7 @@ async fn produce(
         })
         .await
         .expect("open producer");
-    let sends: Vec<_> = messages
-        .into_iter()
-        .map(|m| producer.send(m.into()))
-        .collect();
+    let sends: Vec<_> = messages.into_iter().map(|m| producer.send(m.into())).collect();
     for result in futures::future::join_all(sends).await {
         result.expect("send");
     }
@@ -176,11 +164,7 @@ fn message(i: usize) -> OutgoingMessage {
 }
 
 /// Poll until `count` records arrived or `within` elapsed.
-async fn drain(
-    reader: &mut Box<dyn PartitionReader>,
-    count: usize,
-    within: Duration,
-) -> Vec<SourceRecord> {
+async fn drain(reader: &mut Box<dyn PartitionReader>, count: usize, within: Duration) -> Vec<SourceRecord> {
     let deadline = Instant::now() + within;
     let mut records = Vec::new();
     while records.len() < count && Instant::now() < deadline {
@@ -209,13 +193,7 @@ async fn source_reads_partitions_acks_and_redelivers() {
     produce(&client, &p1, true, (3..11).map(message).collect()).await;
     produce(&client, &p1, false, (11..13).map(message).collect()).await;
     // Partition 0: a single message; partition 2 stays empty.
-    produce(
-        &client,
-        &partition_topic(&topic, 0),
-        false,
-        vec![message(99)],
-    )
-    .await;
+    produce(&client, &partition_topic(&topic, 0), false, vec![message(99)]).await;
 
     let config = json!({
         "service_url": url, "topic": topic, "subscription": "it",
@@ -223,10 +201,7 @@ async fn source_reads_partitions_acks_and_redelivers() {
     });
     let source = make_source(config.clone());
     assert_eq!(source.partitions().await.unwrap(), 3);
-    assert!(
-        source.open(3, None).await.is_err(),
-        "partition 3 does not exist"
-    );
+    assert!(source.open(3, None).await.is_err(), "partition 3 does not exist");
 
     let mut reader = source.open(1, None).await.expect("open partition 1");
     let records = drain(&mut reader, 13, Duration::from_secs(20)).await;
@@ -239,14 +214,9 @@ async fn source_reads_partitions_acks_and_redelivers() {
     // Plain messages have batch component 0, batch members 1..=n.
     assert!(records[..3].iter().all(|r| r.position.2 == 0));
     let batched: Vec<u64> = records[3..11].iter().map(|r| r.position.2).collect();
+    assert!(batched.iter().all(|b| *b >= 1), "batch members: {batched:?}");
     assert!(
-        batched.iter().all(|b| *b >= 1),
-        "batch members: {batched:?}"
-    );
-    assert!(
-        records[3..11]
-            .windows(2)
-            .any(|w| w[0].position.1 == w[1].position.1),
+        records[3..11].windows(2).any(|w| w[0].position.1 == w[1].position.1),
         "some members share an entry: {positions:?}"
     );
     assert!(records[11..].iter().all(|r| r.position.2 == 0));
@@ -256,11 +226,7 @@ async fn source_reads_partitions_acks_and_redelivers() {
         assert_eq!(m.key.as_deref(), Some(format!("k{}", i % 3).as_str()));
         assert_eq!(m.property("i"), Some(i.to_string().as_str()));
         assert_eq!(m.event_time_ms, Some(1_000_000 + i as i64));
-        assert_eq!(
-            record.event_time,
-            1_000_000 + i as i64,
-            "event_time = event"
-        );
+        assert_eq!(record.event_time, 1_000_000 + i as i64, "event_time = event");
         assert!(m.publish_time_ms > 1_600_000_000_000);
         assert_eq!(m.topic, p1);
         assert_eq!(m.partition, 1);
@@ -269,13 +235,7 @@ async fn source_reads_partitions_acks_and_redelivers() {
     assert_eq!(reader.end_position().await.unwrap(), Some(positions[12]));
     let mut empty = source.open(2, None).await.unwrap();
     assert_eq!(empty.end_position().await.unwrap(), None, "empty partition");
-    assert!(
-        empty
-            .poll(10, Duration::from_millis(300))
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(empty.poll(10, Duration::from_millis(300)).await.unwrap().is_empty());
 
     // Acknowledge up to the third plain message (an entry boundary), then
     // restart the reader: redelivery starts right after it.
@@ -285,11 +245,7 @@ async fn source_reads_partitions_acks_and_redelivers() {
     let mut reader = source.open(1, None).await.expect("reopen");
     let again = drain(&mut reader, 10, Duration::from_secs(20)).await;
     let again_positions: Vec<Position> = again.iter().map(|r| r.position).collect();
-    assert_eq!(
-        again_positions,
-        positions[3..].to_vec(),
-        "redelivery after the ack"
-    );
+    assert_eq!(again_positions, positions[3..].to_vec(), "redelivery after the ack");
 
     // Acknowledge in the middle of a batch: nothing unacknowledged is
     // skipped, nothing at or before an earlier ack comes back.
@@ -309,10 +265,7 @@ async fn source_reads_partitions_acks_and_redelivers() {
     let unacked: BTreeSet<Position> = positions[5..].iter().copied().collect();
     let seen: BTreeSet<Position> = third_positions.iter().copied().collect();
     assert!(unacked.is_subset(&seen), "no unacked record skipped");
-    eprintln!(
-        "mid-batch ack at {mid}: redelivery restarted at {}",
-        third_positions[0]
-    );
+    eprintln!("mid-batch ack at {mid}: redelivery restarted at {}", third_positions[0]);
 
     // Event time "publish".
     let mut publish = make_source(json!({
@@ -357,10 +310,7 @@ async fn failover_delivers_to_one_consumer_and_hands_over() {
     got_b.extend(rb.poll(10, Duration::from_millis(500)).await.unwrap());
     eprintln!("failover: a got {}, b got {}", got_a.len(), got_b.len());
     assert_eq!(got_a.len() + got_b.len(), 6, "each message delivered once");
-    assert!(
-        got_a.is_empty() || got_b.is_empty(),
-        "only one active consumer"
-    );
+    assert!(got_a.is_empty() || got_b.is_empty(), "only one active consumer");
 
     // The active one acks two and goes away: the other takes over from there.
     let (mut active, mut standby, got) = if got_a.is_empty() {
@@ -393,10 +343,7 @@ async fn non_partitioned_topic_is_one_partition() {
     let records = drain(&mut reader, 2, Duration::from_secs(20)).await;
     assert_eq!(records.len(), 2);
     assert_eq!(msg(&records[0]).topic, topic);
-    assert_eq!(
-        reader.end_position().await.unwrap(),
-        Some(records[1].position)
-    );
+    assert_eq!(reader.end_position().await.unwrap(), Some(records[1].position));
     client.close().await;
 }
 
@@ -461,16 +408,11 @@ async fn sink_round_trip_with_emit_ids() {
         .map(|m| (m.property(EMIT_ID_PROPERTY).unwrap().to_owned(), m))
         .collect();
     for e in &batch {
-        let m = by_id
-            .get(e.id.as_str())
-            .expect("message carries the emit id");
+        let m = by_id.get(e.id.as_str()).expect("message carries the emit id");
         let out = e.value.downcast_ref::<PulsarOutput>().unwrap();
         assert_eq!(m.payload.as_ref(), out.payload.as_slice());
         assert_eq!(m.key, out.key);
-        assert_eq!(
-            m.property("origin"),
-            Some(e.origin.position.to_string().as_str())
-        );
+        assert_eq!(m.property("origin"), Some(e.origin.position.to_string().as_str()));
         assert_eq!(m.event_time_ms, Some(e.ts));
     }
     // Every keyed element landed on the same partition.
@@ -481,11 +423,7 @@ async fn sink_round_trip_with_emit_ids() {
         .collect();
     assert_eq!(keyed.len(), 1);
     // Elements of another slice cannot go through the same sink instance.
-    assert!(
-        sink.write(&[emit(1, Position(3, 0, 0), None, "x")])
-            .await
-            .is_err()
-    );
+    assert!(sink.write(&[emit(1, Position(3, 0, 0), None, "x")]).await.is_err());
 }
 
 fn concrete_sink(config: Value) -> PulsarSink<TokioProviders> {
@@ -530,10 +468,7 @@ async fn replay_scenario(url: &str, topic: &str, dedup: bool) -> (Vec<PulsarMess
     first.write(&elements(3..=5)).await.expect("second write");
     drop(first);
     let second = concrete_sink(config);
-    second
-        .write(&elements(3..=8))
-        .await
-        .expect("replayed write");
+    second.write(&elements(3..=8)).await.expect("replayed write");
     let stats = second.last_write();
     (read_all(url, topic, 9).await, stats)
 }
@@ -579,10 +514,7 @@ async fn broker_dedup_contiguous_positions_and_broker_side_drop() {
                         "broker_dedup": {"position_bits": [8, 47, 0], "index_bits": 0}});
     let one = |i: u64| emit(0, Position(1, i, 0), None, &format!("e{i}"));
     let first = concrete_sink(config.clone());
-    first
-        .write(&(1..=4).map(one).collect::<Vec<_>>())
-        .await
-        .unwrap();
+    first.write(&(1..=4).map(one).collect::<Vec<_>>()).await.unwrap();
     let s1 = first.last_write();
     // Contiguous sequence ids: a single producer open for the whole batch.
     assert_eq!(
@@ -662,12 +594,7 @@ async fn broker_dedup_through_an_aliased_url() {
     };
     let topic = partitioned_topic("public/streaming-dedup", &unique("alias"), 3);
     let (read, stats) = replay_scenario(&alias, &topic, true).await;
-    assert_eq!(
-        payloads(&read).len(),
-        9,
-        "{:?} / {stats:?}",
-        payloads(&read)
-    );
+    assert_eq!(payloads(&read).len(), 9, "{:?} / {stats:?}", payloads(&read));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -687,10 +614,7 @@ async fn raw_failover_subscribe_sanity() {
         })
         .await
         .unwrap();
-    let got = consumer
-        .receive_with_timeout(Duration::from_secs(10))
-        .await
-        .unwrap();
+    let got = consumer.receive_with_timeout(Duration::from_secs(10)).await.unwrap();
     assert!(got.is_some());
     client.close().await;
 }

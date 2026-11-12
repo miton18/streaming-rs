@@ -1,10 +1,11 @@
 //! Wall clock and secrets: the two ambient services operators may need.
 
-use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use crate::ids::TenantId;
-use crate::time::Timestamp;
+use crate::{ids::TenantId, time::Timestamp};
 
 /// Source of wall-clock time, in milliseconds since the Unix epoch.
 ///
@@ -70,17 +71,14 @@ impl StaticSecrets {
     /// Add a secret.
     #[must_use]
     pub fn with(mut self, tenant: &TenantId, name: &str, value: impl Into<String>) -> Self {
-        self.secrets
-            .insert((tenant.to_string(), name.to_owned()), value.into());
+        self.secrets.insert((tenant.to_string(), name.to_owned()), value.into());
         self
     }
 }
 
 impl SecretProvider for StaticSecrets {
     fn get(&self, tenant: &TenantId, name: &str) -> Option<String> {
-        self.secrets
-            .get(&(tenant.to_string(), name.to_owned()))
-            .cloned()
+        self.secrets.get(&(tenant.to_string(), name.to_owned())).cloned()
     }
 }
 
@@ -105,11 +103,7 @@ impl EnvSecrets {
                 })
                 .collect()
         };
-        format!(
-            "STREAMING_SECRET__{}__{}",
-            clean(tenant.as_str()),
-            clean(name)
-        )
+        format!("STREAMING_SECRET__{}__{}", clean(tenant.as_str()), clean(name))
     }
 }
 
@@ -128,10 +122,7 @@ mod tests {
         let acme = TenantId::new("acme").unwrap();
         let globex = TenantId::new("globex").unwrap();
         let secrets = StaticSecrets::new().with(&acme, "warp10-write", "s3cr3t");
-        assert_eq!(
-            secrets.get(&acme, "warp10-write").as_deref(),
-            Some("s3cr3t")
-        );
+        assert_eq!(secrets.get(&acme, "warp10-write").as_deref(), Some("s3cr3t"));
         assert_eq!(secrets.get(&globex, "warp10-write"), None);
         assert_eq!(
             EnvSecrets::variable(&acme, "warp10-write"),

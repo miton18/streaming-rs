@@ -2,8 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use moonpool_core::TokioProviders;
 use streaming_gossip::{Gossip, GossipConfig};
@@ -26,24 +25,16 @@ fn config(i: usize, addr: &str, seed: &str) -> GossipConfig {
     c
 }
 
-fn converged(
-    nodes: &[Gossip<TokioProviders>],
-    expect: &BTreeMap<String, BTreeMap<String, String>>,
-) -> bool {
+fn converged(nodes: &[Gossip<TokioProviders>], expect: &BTreeMap<String, BTreeMap<String, String>>) -> bool {
     nodes.iter().all(|g| {
         let live = g.live_members();
-        live.len() == expect.len()
-            && live
-                .iter()
-                .all(|m| expect.get(&m.node_id) == Some(&m.values))
+        live.len() == expect.len() && live.iter().all(|m| expect.get(&m.node_id) == Some(&m.values))
     })
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn three_nodes_converge_on_localhost() {
-    let addrs: Vec<String> = (0..3)
-        .map(|_| format!("127.0.0.1:{}", free_port()))
-        .collect();
+    let addrs: Vec<String> = (0..3).map(|_| format!("127.0.0.1:{}", free_port())).collect();
     let shutdown = CancellationToken::new();
     let mut nodes = Vec::new();
     for (i, addr) in addrs.iter().enumerate() {
@@ -64,11 +55,7 @@ async fn three_nodes_converge_on_localhost() {
         nodes
             .iter()
             .map(|g| {
-                let me = g
-                    .members()
-                    .into_iter()
-                    .find(|m| m.node_id == g.node_id())
-                    .unwrap();
+                let me = g.members().into_iter().find(|m| m.node_id == g.node_id()).unwrap();
                 (me.node_id, me.values)
             })
             .collect()
@@ -140,10 +127,7 @@ async fn three_nodes_converge_on_localhost() {
         if dead_everywhere {
             break;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "node-2 never seen dead"
-        );
+        assert!(tokio::time::Instant::now() < deadline, "node-2 never seen dead");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     shutdown.cancel();

@@ -16,21 +16,27 @@
 //! exact-equality check is only enforced on seeds without any (counts are
 //! printed by the test).
 
-use std::cell::Cell;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, Invariant, Process, RandomProvider,
-    SIM_FAULT_EVENT_NAME, SimContext, SimulationBuilder, SimulationError, SimulationResult,
-    TimeProvider, TraceQuery, Workload, assert_always, assert_sometimes,
+    Attrition, AttritionScope, Chaos, ChaosMode, Invariant, Process, RandomProvider, SIM_FAULT_EVENT_NAME, SimContext,
+    SimulationBuilder, SimulationError, SimulationResult, TimeProvider, TraceQuery, Workload, assert_always,
+    assert_sometimes,
 };
 use streaming_core::{Emit, EmitId, NodeId, Origin, Position, SinkConnector, SliceId, datum};
-use streaming_warp10::fake::{FakeWarp10, Fault, PointKey};
-use streaming_warp10::{Gts, GtsValue, Warp10Config, Warp10Sink};
+use streaming_warp10::{
+    Gts, GtsValue, Warp10Config, Warp10Sink,
+    fake::{FakeWarp10, Fault, PointKey},
+};
 
 const TOKEN: &str = "sim-write-token";
 const BATCHES: usize = 12;
@@ -271,21 +277,12 @@ impl Workload for Writer {
         let fake = self.world.fake();
         let fstats = fake.stats();
         let world = &self.world;
-        world
-            .total_attempts
-            .fetch_add(self.stats.attempts, Ordering::SeqCst);
-        world
-            .total_errors
-            .fetch_add(self.stats.errors, Ordering::SeqCst);
-        world
-            .total_batches
-            .fetch_add(BATCHES as u64, Ordering::SeqCst);
+        world.total_attempts.fetch_add(self.stats.attempts, Ordering::SeqCst);
+        world.total_errors.fetch_add(self.stats.errors, Ordering::SeqCst);
+        world.total_batches.fetch_add(BATCHES as u64, Ordering::SeqCst);
 
         assert_sometimes!(self.stats.errors > 0, "a write failed (outcome unknown)");
-        assert_sometimes!(
-            self.stats.attempts > BATCHES as u64,
-            "a batch had to be retried"
-        );
+        assert_sometimes!(self.stats.attempts > BATCHES as u64, "a batch had to be retried");
         assert_sometimes!(self.stats.status_errors > 0, "the sink saw an HTTP 503");
         assert_sometimes!(self.stats.timeouts > 0, "the sink timed out on a request");
         assert_sometimes!(
@@ -306,10 +303,7 @@ impl Workload for Writer {
         );
         let flips = world.bit_flips.load(Ordering::SeqCst);
         assert_sometimes!(flips > 0, "the simulator flipped bits on the wire");
-        assert_sometimes!(
-            flips == 0,
-            "a seed without wire corruption (strict check ran)"
-        );
+        assert_sometimes!(flips == 0, "a seed without wire corruption (strict check ran)");
 
         if flips > 0 {
             world.relaxed_seeds.fetch_add(1, Ordering::SeqCst);
@@ -326,16 +320,8 @@ impl Workload for Writer {
             { "held" => held.len(), "expected" => want.len(), "seed_client" => ctx.client_id() }
         );
         if !identical {
-            let missing: Vec<_> = want
-                .iter()
-                .filter(|(k, v)| held.get(*k) != Some(*v))
-                .take(3)
-                .collect();
-            let extra: Vec<_> = held
-                .keys()
-                .filter(|k| !want.contains_key(*k))
-                .take(3)
-                .collect();
+            let missing: Vec<_> = want.iter().filter(|(k, v)| held.get(*k) != Some(*v)).take(3).collect();
+            let extra: Vec<_> = held.keys().filter(|k| !want.contains_key(*k)).take(3).collect();
             return Err(SimulationError::InvalidState(format!(
                 "stored points differ: held {} expected {}; wrong or missing e.g. {missing:?}; extra e.g. {extra:?}",
                 held.len(),
@@ -348,8 +334,7 @@ impl Workload for Writer {
 
 fn run_sim(seeds: Vec<u64>) -> (moonpool_sim::SimulationReport, World) {
     let world = World::new();
-    let (w_reset, w_proc, w_inv, w_writer) =
-        (world.clone(), world.clone(), world.clone(), world.clone());
+    let (w_reset, w_proc, w_inv, w_writer) = (world.clone(), world.clone(), world.clone(), world.clone());
     let report = SimulationBuilder::new()
         .processes(1, move || {
             Box::new(FakeProcess {
@@ -405,11 +390,7 @@ fn assert_report(report: &moonpool_sim::SimulationReport, world: &World, check_c
             d.kind, d.pass_count, d.fail_count, d.msg
         );
     }
-    assert_eq!(
-        report.failed_runs, 0,
-        "failing seeds: {:?}",
-        report.seeds_failing
-    );
+    assert_eq!(report.failed_runs, 0, "failing seeds: {:?}", report.seeds_failing);
     assert!(
         report.assertion_violations.is_empty(),
         "{:?}",
@@ -431,10 +412,7 @@ fn warp10_sink_under_chaos_many_seeds() {
         .unwrap_or(100);
     let (report, world) = run_sim((1..=count).collect());
     assert_report(&report, &world, true);
-    assert!(
-        world.strict_seeds.load(Ordering::SeqCst) > 0,
-        "no strict seed ran"
-    );
+    assert!(world.strict_seeds.load(Ordering::SeqCst) > 0, "no strict seed ran");
 }
 
 /// A fixed seed, quick to replay when debugging.

@@ -4,18 +4,16 @@
 //! |---|---|---|---|
 //! | `std/kv-sink@1` | sink | `serde_json::Value` | `{"retain": 500}` |
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use moonpool_core::Providers;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::Value;
-use streaming_core::control::OutputRow;
-use streaming_core::ops::downcast;
 use streaming_core::{
-    DynKv, Emit, GraphKey, OpError, Registry, SinkConnector, SinkError, Timestamp, TypeTag, keys,
+    DynKv, Emit, GraphKey, OpError, Registry, SinkConnector, SinkError, Timestamp, TypeTag, control::OutputRow, keys,
+    ops::downcast,
 };
 
 fn default_retain() -> usize {
@@ -46,11 +44,10 @@ impl SinkConnector for KvSink {
     async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
         let err = |error: &dyn std::fmt::Display| SinkError(error.to_string());
         if self.known.lock().is_none() {
-            let existing: Vec<(String, OutputRow)> =
-                self.kv.hgetall_json(&self.key).await.map_err(|e| err(&e))?;
-            self.known.lock().get_or_insert_with(|| {
-                existing.into_iter().map(|(id, row)| (row.ts, id)).collect()
-            });
+            let existing: Vec<(String, OutputRow)> = self.kv.hgetall_json(&self.key).await.map_err(|e| err(&e))?;
+            self.known
+                .lock()
+                .get_or_insert_with(|| existing.into_iter().map(|(id, row)| (row.ts, id)).collect());
         }
         let mut entries = Vec::with_capacity(batch.len());
         for emit in batch {
@@ -61,15 +58,9 @@ impl SinkConnector for KvSink {
                 key: emit.key.as_ref().map(streaming_core::Key::display_lossy),
                 value: value.clone(),
             };
-            entries.push((
-                row.id.clone(),
-                serde_json::to_vec(&row).map_err(|e| err(&e))?,
-            ));
+            entries.push((row.id.clone(), serde_json::to_vec(&row).map_err(|e| err(&e))?));
         }
-        self.kv
-            .hset(&self.key, entries)
-            .await
-            .map_err(|e| err(&e))?;
+        self.kv.hset(&self.key, entries).await.map_err(|e| err(&e))?;
 
         let expired: Vec<String> = {
             let mut guard = self.known.lock();
@@ -85,10 +76,7 @@ impl SinkConnector for KvSink {
             expired
         };
         if !expired.is_empty() {
-            self.kv
-                .hdel(&self.key, expired)
-                .await
-                .map_err(|e| err(&e))?;
+            self.kv.hdel(&self.key, expired).await.map_err(|e| err(&e))?;
         }
         Ok(())
     }
@@ -106,8 +94,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, kv: DynKv) {
                     retain: default_retain(),
                 }
             } else {
-                serde_json::from_value(config.clone())
-                    .map_err(|e| OpError::Config(e.to_string()))?
+                serde_json::from_value(config.clone()).map_err(|e| OpError::Config(e.to_string()))?
             };
             let graph = GraphKey::new(context.tenant.clone(), context.graph.clone());
             Ok(Arc::new(KvSink {
@@ -120,11 +107,9 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, kv: DynKv) {
     );
     registry.with_params(
         "std/kv-sink@1",
-        [streaming_core::ParamSpec::new(
-            "retain",
-            "integer",
-            "How many of the most recent rows are kept.",
-        )
-        .default(500)],
+        [
+            streaming_core::ParamSpec::new("retain", "integer", "How many of the most recent rows are kept.")
+                .default(500),
+        ],
     );
 }

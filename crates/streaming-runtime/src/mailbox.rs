@@ -124,14 +124,12 @@ impl Outputs {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use futures::FutureExt;
 
+    use super::*;
+
     fn barrier(epoch: u64) -> Msg {
-        Msg::Barrier(Barrier {
-            epoch,
-            watermark: 0,
-        })
+        Msg::Barrier(Barrier { epoch, watermark: 0 })
     }
 
     #[test]
@@ -143,25 +141,16 @@ mod tests {
         a_tx.try_send(barrier(1)).unwrap();
         // Records of the next epoch on the already-aligned edge must wait.
         a_tx.try_send(Msg::Records(Vec::new())).unwrap();
-        assert!(
-            inputs.next().now_or_never().is_none(),
-            "barrier must wait for edge b"
-        );
+        assert!(inputs.next().now_or_never().is_none(), "barrier must wait for edge b");
 
         b_tx.try_send(Msg::Records(Vec::new())).unwrap();
-        assert!(matches!(
-            inputs.next().now_or_never(),
-            Some(Input::Records(_))
-        ));
+        assert!(matches!(inputs.next().now_or_never(), Some(Input::Records(_))));
         b_tx.try_send(barrier(1)).unwrap();
         assert!(matches!(
             inputs.next().now_or_never(),
             Some(Input::Barrier(Barrier { epoch: 1, .. }))
         ));
         // Edge a is readable again.
-        assert!(matches!(
-            inputs.next().now_or_never(),
-            Some(Input::Records(_))
-        ));
+        assert!(matches!(inputs.next().now_or_never(), Some(Input::Records(_))));
     }
 }

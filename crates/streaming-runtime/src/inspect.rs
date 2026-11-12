@@ -24,12 +24,10 @@ pub struct SliceHead {
 
 /// Read the last commit of a slice. `None` when it never committed.
 pub async fn slice_head(kv: &dyn Kv, slice: &SliceKey) -> Result<Option<SliceHead>, KvError> {
-    let log = state::read_log(kv, slice)
-        .await
-        .map_err(|error| match error {
-            StateError::Kv(error) => error,
-            StateError::Corrupt { slice, reason } => KvError::Malformed { key: slice, reason },
-        })?;
+    let log = state::read_log(kv, slice).await.map_err(|error| match error {
+        StateError::Kv(error) => error,
+        StateError::Corrupt { slice, reason } => KvError::Malformed { key: slice, reason },
+    })?;
     Ok(log.head().map(|head| SliceHead {
         epoch: head.epoch,
         position: head.position,
@@ -53,12 +51,7 @@ pub fn covers(position: Option<Position>, window: &streaming_core::Window) -> bo
 /// A slice never commits a change to a window that the emitter of its
 /// aggregate has already emitted: the emitter waits for the watermark of
 /// every slice, and a slice drops what arrives behind its watermark.
-pub async fn late_commit(
-    kv: &dyn Kv,
-    slice: &SliceKey,
-    field: &str,
-    value: &[u8],
-) -> Option<String> {
+pub async fn late_commit(kv: &dyn Kv, slice: &SliceKey, field: &str, value: &[u8]) -> Option<String> {
     let epoch = streaming_core::keys::parse_commit_field(field)?;
     let record: state::CommitRecord = postcard::from_bytes(value).ok()?;
     // A write at or below the seal is void: its writer is about to remove it.

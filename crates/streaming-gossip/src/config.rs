@@ -2,8 +2,7 @@
 
 use std::time::Duration;
 
-use crate::error::GossipError;
-use crate::wire;
+use crate::{error::GossipError, wire};
 
 /// Size limits enforced on the gossiped state.
 ///
@@ -73,9 +72,7 @@ impl Limits {
     /// Upper bound of the encoded size of one digest entry.
     #[must_use]
     pub fn max_digest_entry_bytes(&self) -> usize {
-        wire::varint_len(self.max_node_id_len as u64)
-            + self.max_node_id_len
-            + 4 * wire::MAX_VARINT_U64
+        wire::varint_len(self.max_node_id_len as u64) + self.max_node_id_len + 4 * wire::MAX_VARINT_U64
     }
 
     /// Upper bound of the encoded size of a digest describing `nodes` nodes.
@@ -171,16 +168,10 @@ impl GossipConfig {
             return bad(format!("node_id must be 1..={} bytes", l.max_node_id_len));
         }
         if self.advertise_addr.is_empty() || self.advertise_addr.len() > l.max_addr_len {
-            return bad(format!(
-                "advertise_addr must be 1..={} bytes",
-                l.max_addr_len
-            ));
+            return bad(format!("advertise_addr must be 1..={} bytes", l.max_addr_len));
         }
         if self.cluster_id.len() > l.max_node_id_len {
-            return bad(format!(
-                "cluster_id longer than {} bytes",
-                l.max_node_id_len
-            ));
+            return bad(format!("cluster_id longer than {} bytes", l.max_node_id_len));
         }
         if self.gossip_interval.is_zero() {
             return bad("gossip_interval must be > 0".into());
@@ -204,10 +195,8 @@ impl GossipConfig {
                 self.delta_budget_bytes
             ));
         }
-        let min_frame = wire::MESSAGE_OVERHEAD
-            + l.max_digest_bytes(l.max_nodes)
-            + self.delta_budget_bytes
-            + self.cluster_id.len();
+        let min_frame =
+            wire::MESSAGE_OVERHEAD + l.max_digest_bytes(l.max_nodes) + self.delta_budget_bytes + self.cluster_id.len();
         if self.max_frame_bytes < min_frame {
             return bad(format!(
                 "max_frame_bytes ({}) must hold a full digest of max_nodes plus a delta ({min_frame} bytes)",
@@ -230,9 +219,7 @@ mod tests {
 
     #[test]
     fn default_config_is_valid() {
-        GossipConfig::new("c", "n", 1, "127.0.0.1:7000")
-            .validate()
-            .unwrap();
+        GossipConfig::new("c", "n", 1, "127.0.0.1:7000").validate().unwrap();
     }
 
     #[test]

@@ -52,10 +52,7 @@ pub async fn conformance(kv: &dyn Kv) -> Result<(), String> {
 /// A description of the violated expectation.
 pub async fn conformance_incr_overflow(kv: &dyn Kv) -> Result<(), String> {
     let n = key("n");
-    ok(
-        "set max",
-        kv.set(&n, i64::MAX.to_string().into_bytes()).await,
-    )?;
+    ok("set max", kv.set(&n, i64::MAX.to_string().into_bytes()).await)?;
     let r = is_protocol("incr overflow", kv.incr(&n).await);
     ok("cleanup", kv.del(vec![n]).await)?;
     r
@@ -63,8 +60,7 @@ pub async fn conformance_incr_overflow(kv: &dyn Kv) -> Result<(), String> {
 
 async fn cleanup(kv: &dyn Kv) -> Result<(), String> {
     let names = [
-        "s", "bin", "empty", "big", "n", "h", "hb", "many", "wt-str", "wt-hash", "gone", "nx",
-        "dup", "noop",
+        "s", "bin", "empty", "big", "n", "h", "hb", "many", "wt-str", "wt-hash", "gone", "nx", "dup", "noop",
     ];
     let mut keys: Vec<String> = names.iter().map(|n| key(n)).collect();
     keys.extend((0..250).map(|i| key(&format!("bulk{i}"))));
@@ -80,10 +76,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
         "missing key must be None"
     );
     ok("set", kv.set(&s, b"hello".to_vec()).await)?;
-    ensure!(
-        ok("get", kv.get(&s).await)? == Some(b"hello".to_vec()),
-        "get after set"
-    );
+    ensure!(ok("get", kv.get(&s).await)? == Some(b"hello".to_vec()), "get after set");
     ok("overwrite", kv.set(&s, b"world".to_vec()).await)?;
     ensure!(
         ok("get", kv.get(&s).await)? == Some(b"world".to_vec()),
@@ -115,13 +108,9 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
     ok("del missing", kv.del(vec![key("never-existed")]).await)?;
     ok(
         "del mixed",
-        kv.del(vec![s.clone(), key("never-existed"), key("bin")])
-            .await,
+        kv.del(vec![s.clone(), key("never-existed"), key("bin")]).await,
     )?;
-    ensure!(
-        ok("get deleted", kv.get(&s).await)?.is_none(),
-        "del removes the key"
-    );
+    ensure!(ok("get deleted", kv.get(&s).await)?.is_none(), "del removes the key");
     ensure!(
         ok("get deleted", kv.get(&key("bin")).await)?.is_none(),
         "del removes every key"
@@ -141,10 +130,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
 
     // ---- incr ------------------------------------------------------------
     let n = key("n");
-    ensure!(
-        ok("incr 1", kv.incr(&n).await)? == 1,
-        "incr of a missing key is 1"
-    );
+    ensure!(ok("incr 1", kv.incr(&n).await)? == 1, "incr of a missing key is 1");
     ensure!(ok("incr 2", kv.incr(&n).await)? == 2, "incr again is 2");
     ensure!(
         ok("get counter", kv.get(&n).await)? == Some(b"2".to_vec()),
@@ -156,10 +142,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
         "incr continues from a string integer"
     );
     ok("set neg", kv.set(&n, b"-5".to_vec()).await)?;
-    ensure!(
-        ok("incr neg", kv.incr(&n).await)? == -4,
-        "incr of a negative number"
-    );
+    ensure!(ok("incr neg", kv.incr(&n).await)? == -4, "incr of a negative number");
     ok("set text", kv.set(&n, b"abc".to_vec()).await)?;
     is_protocol("incr of text", kv.incr(&n).await)?;
     ensure!(
@@ -174,10 +157,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
         "hsetnx creating a field returns true"
     );
     ensure!(
-        !ok(
-            "hsetnx dup",
-            kv.hsetnx(&nx, "c:1", b"second".to_vec()).await
-        )?,
+        !ok("hsetnx dup", kv.hsetnx(&nx, "c:1", b"second".to_vec()).await)?,
         "hsetnx on an existing field returns false"
     );
     ensure!(
@@ -185,10 +165,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
         "a refused hsetnx leaves the value untouched"
     );
     ensure!(
-        ok(
-            "hsetnx other field",
-            kv.hsetnx(&nx, "c:2", b"v".to_vec()).await
-        )?,
+        ok("hsetnx other field", kv.hsetnx(&nx, "c:2", b"v".to_vec()).await)?,
         "another field is created"
     );
     ensure!(
@@ -196,10 +173,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
         "empty value is created"
     );
     ensure!(
-        !ok(
-            "hsetnx empty exists",
-            kv.hsetnx(&nx, "e", b"x".to_vec()).await
-        )?,
+        !ok("hsetnx empty exists", kv.hsetnx(&nx, "e", b"x".to_vec()).await)?,
         "an empty value still counts as existing"
     );
     ok(
@@ -207,18 +181,12 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
         kv.hset(&nx, vec![("c:1".into(), b"third".to_vec())]).await,
     )?;
     ensure!(
-        !ok(
-            "hsetnx after hset",
-            kv.hsetnx(&nx, "c:1", b"fourth".to_vec()).await
-        )?,
+        !ok("hsetnx after hset", kv.hsetnx(&nx, "c:1", b"fourth".to_vec()).await)?,
         "hsetnx still false after hset"
     );
     ok("hdel field", kv.hdel(&nx, vec!["c:1".into()]).await)?;
     ensure!(
-        ok(
-            "hsetnx after hdel",
-            kv.hsetnx(&nx, "c:1", b"fifth".to_vec()).await
-        )?,
+        ok("hsetnx after hdel", kv.hsetnx(&nx, "c:1", b"fifth".to_vec()).await)?,
         "hsetnx true again once the field is deleted"
     );
 
@@ -240,19 +208,13 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
     );
     ok(
         "hset",
-        kv.hset(
-            &h,
-            vec![("a".into(), b"1".to_vec()), ("b".into(), b"2".to_vec())],
-        )
-        .await,
+        kv.hset(&h, vec![("a".into(), b"1".to_vec()), ("b".into(), b"2".to_vec())])
+            .await,
     )?;
     ok(
         "hset overwrite",
-        kv.hset(
-            &h,
-            vec![("a".into(), b"one".to_vec()), ("c".into(), b"3".to_vec())],
-        )
-        .await,
+        kv.hset(&h, vec![("a".into(), b"one".to_vec()), ("c".into(), b"3".to_vec())])
+            .await,
     )?;
     ensure!(
         ok("hget a", kv.hget(&h, "a").await)? == Some(b"one".to_vec()),
@@ -300,10 +262,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
     got.sort();
     let mut want = weird.clone();
     want.sort();
-    ensure!(
-        got == want,
-        "binary values and odd field names must round trip"
-    );
+    ensure!(got == want, "binary values and odd field names must round trip");
     for (f, v) in &weird {
         ensure!(
             ok("hget weird", kv.hget(&hb, f).await)?.as_ref() == Some(v),
@@ -312,10 +271,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
     }
 
     // A hash losing its last field disappears (so the key is free again).
-    ok(
-        "hdel some",
-        kv.hdel(&h, vec!["a".into(), "zzz".into()]).await,
-    )?;
+    ok("hdel some", kv.hdel(&h, vec!["a".into(), "zzz".into()]).await)?;
     ensure!(
         ok("hgetall after hdel", kv.hgetall(&h).await)?.len() == 2,
         "hdel removes only named fields"
@@ -335,20 +291,11 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
     let many = key("many");
     let total = 5000usize;
     let entries: Vec<(String, Vec<u8>)> = (0..total)
-        .map(|i| {
-            (
-                format!("field-{i:05}"),
-                format!("value-{i}\r\n").into_bytes(),
-            )
-        })
+        .map(|i| (format!("field-{i:05}"), format!("value-{i}\r\n").into_bytes()))
         .collect();
     ok("hset 5000", kv.hset(&many, entries.clone()).await)?;
     let all = ok("hgetall 5000", kv.hgetall(&many).await)?;
-    ensure!(
-        all.len() == total,
-        "hgetall returned {} of {total} fields",
-        all.len()
-    );
+    ensure!(all.len() == total, "hgetall returned {} of {total} fields", all.len());
     let map: BTreeMap<_, _> = all.into_iter().collect();
     ensure!(map.len() == total, "hgetall returned duplicate fields");
     for (f, v) in &entries {
@@ -357,8 +304,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
     let (gone, kept) = entries.split_at(4990);
     ok(
         "hdel 4990",
-        kv.hdel(&many, gone.iter().map(|(f, _)| f.clone()).collect())
-            .await,
+        kv.hdel(&many, gone.iter().map(|(f, _)| f.clone()).collect()).await,
     )?;
     ensure!(
         ok("hgetall rest", kv.hgetall(&many).await)?.len() == 10,
@@ -366,8 +312,7 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
     );
     ok(
         "hdel last",
-        kv.hdel(&many, kept.iter().map(|(f, _)| f.clone()).collect())
-            .await,
+        kv.hdel(&many, kept.iter().map(|(f, _)| f.clone()).collect()).await,
     )?;
     ensure!(
         ok("get emptied", kv.get(&many).await)?.is_none(),
@@ -378,16 +323,10 @@ async fn run(kv: &dyn Kv) -> Result<(), String> {
     let ws = key("wt-str");
     let wh = key("wt-hash");
     ok("set", kv.set(&ws, b"x".to_vec()).await)?;
-    ok(
-        "hset",
-        kv.hset(&wh, vec![("f".into(), b"v".to_vec())]).await,
-    )?;
+    ok("hset", kv.hset(&wh, vec![("f".into(), b"v".to_vec())]).await)?;
     is_protocol("hget on string", kv.hget(&ws, "f").await)?;
     is_protocol("hgetall on string", kv.hgetall(&ws).await)?;
-    is_protocol(
-        "hset on string",
-        kv.hset(&ws, vec![("f".into(), b"v".to_vec())]).await,
-    )?;
+    is_protocol("hset on string", kv.hset(&ws, vec![("f".into(), b"v".to_vec())]).await)?;
     is_protocol("hsetnx on string", kv.hsetnx(&ws, "f", b"v".to_vec()).await)?;
     is_protocol("hdel on string", kv.hdel(&ws, vec!["f".into()]).await)?;
     is_protocol("get on hash", kv.get(&wh).await)?;

@@ -4,8 +4,12 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::FutureExt;
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::{
+    FutureExt,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+};
+#[cfg(feature = "tls")]
+use futures_rustls::{TlsConnector, rustls::pki_types::ServerName};
 use moonpool_core::{NetworkProvider, Providers, TimeProvider};
 use parking_lot::Mutex;
 use streaming_core::{Kv, KvError};
@@ -15,8 +19,10 @@ use tokio::sync::Semaphore;
 use crate::config::config_error;
 #[cfg(not(feature = "tls"))]
 use crate::config::tls_unavailable;
-use crate::config::{MAX_KEY_BYTES, RedisConfig};
-use crate::resp::{Decoder, Value, encode_command};
+use crate::{
+    config::{MAX_KEY_BYTES, RedisConfig},
+    resp::{Decoder, Value, encode_command},
+};
 
 /// Object-safe alias for the byte streams a connection runs over.
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -54,10 +60,7 @@ impl Conn {
             .write_all(&self.out)
             .await
             .map_err(|e| format!("write failed: {e}"))?;
-        self.io
-            .flush()
-            .await
-            .map_err(|e| format!("flush failed: {e}"))?;
+        self.io.flush().await.map_err(|e| format!("flush failed: {e}"))?;
         loop {
             if let Some(value) = self.decoder.next_value().map_err(|e| e.to_string())? {
                 if self.decoder.buffered() > 0 {
@@ -206,11 +209,7 @@ impl<P: Providers> RedisKv<P> {
         let auth: Option<Vec<&[u8]>> = match (&self.config.username, &self.config.password) {
             (None, None) => None,
             (None, Some(p)) => Some(vec![b"AUTH", p.as_bytes()]),
-            (Some(u), p) => Some(vec![
-                b"AUTH",
-                u.as_bytes(),
-                p.as_deref().unwrap_or("").as_bytes(),
-            ]),
+            (Some(u), p) => Some(vec![b"AUTH", u.as_bytes(), p.as_deref().unwrap_or("").as_bytes()]),
         };
         if let Some(args) = auth {
             match conn.call(&args).await {
@@ -231,8 +230,6 @@ impl<P: Providers> RedisKv<P> {
         setup: &TlsSetup,
         stream: <P::Network as NetworkProvider>::TcpStream,
     ) -> Result<Box<dyn Io>, KvError> {
-        use futures_rustls::TlsConnector;
-        use futures_rustls::rustls::pki_types::ServerName;
         let name = ServerName::try_from(self.config.host().to_owned())
             .map_err(|e| config_error(format!("invalid TLS server name: {e}")))?;
         let tls = TlsConnector::from(setup.clone())
@@ -256,11 +253,7 @@ impl<P: Providers> RedisKv<P> {
     ///
     /// `parse` maps the reply; failing there means the server answered
     /// something we do not understand, so the connection is dropped.
-    async fn exec<T>(
-        &self,
-        args: &[&[u8]],
-        parse: impl FnOnce(Value) -> Result<T, String>,
-    ) -> Result<T, KvError> {
+    async fn exec<T>(&self, args: &[&[u8]], parse: impl FnOnce(Value) -> Result<T, String>) -> Result<T, KvError> {
         let time = self.providers.time();
         let cmd_timeout = self.config.command_timeout;
 
@@ -298,9 +291,7 @@ impl<P: Providers> RedisKv<P> {
             Ok(Ok(reply)) => reply,
             Ok(Err(e)) => return Err(unavailable(e)),
             Err(_) => {
-                return Err(unavailable(format!(
-                    "command timed out after {cmd_timeout:?}"
-                )));
+                return Err(unavailable(format!("command timed out after {cmd_timeout:?}")));
             }
         };
         // A well-formed exchange: the connection stays usable.
@@ -401,8 +392,7 @@ impl<P: Providers> Kv for RedisKv<P> {
     async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> {
         Self::check_key(key)?;
         self.check_value(&value)?;
-        self.exec(&[b"SET", key.as_bytes(), &value], expect_ok)
-            .await
+        self.exec(&[b"SET", key.as_bytes(), &value], expect_ok).await
     }
 
     /// Splits into several `DEL` commands above `max_keys_per_del`; such a
@@ -430,14 +420,11 @@ impl<P: Providers> Kv for RedisKv<P> {
         self.check_value(&value)?;
         // The boolean is exactly Redis' integer reply; anything else is a
         // protocol error, never guessed.
-        self.exec(
-            &[b"HSETNX", key.as_bytes(), field.as_bytes(), &value],
-            |v| match v {
-                Value::Integer(1) => Ok(true),
-                Value::Integer(0) => Ok(false),
-                other => Err(format!("HSETNX: unexpected reply {other:?}")),
-            },
-        )
+        self.exec(&[b"HSETNX", key.as_bytes(), field.as_bytes(), &value], |v| match v {
+            Value::Integer(1) => Ok(true),
+            Value::Integer(0) => Ok(false),
+            other => Err(format!("HSETNX: unexpected reply {other:?}")),
+        })
         .await
     }
 
@@ -477,11 +464,8 @@ impl<P: Providers> Kv for RedisKv<P> {
 
     async fn hget(&self, key: &str, field: &str) -> Result<Option<Vec<u8>>, KvError> {
         Self::check_key(key)?;
-        self.exec(
-            &[b"HGET", key.as_bytes(), field.as_bytes()],
-            expect_opt_bulk,
-        )
-        .await
+        self.exec(&[b"HGET", key.as_bytes(), field.as_bytes()], expect_opt_bulk)
+            .await
     }
 
     /// Pages through `HSCAN` (`scan_count` per page), merging pages by field.
@@ -496,13 +480,7 @@ impl<P: Providers> Kv for RedisKv<P> {
         loop {
             let (next, pairs) = self
                 .exec(
-                    &[
-                        b"HSCAN",
-                        key.as_bytes(),
-                        &cursor,
-                        b"COUNT",
-                        count.as_bytes(),
-                    ],
+                    &[b"HSCAN", key.as_bytes(), &cursor, b"COUNT", count.as_bytes()],
                     expect_scan,
                 )
                 .await?;

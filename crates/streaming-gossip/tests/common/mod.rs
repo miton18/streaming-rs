@@ -4,14 +4,12 @@
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimProviders, SimTimeProvider, SimulationBuilder, SimulationError,
-    SimulationReport, SimulationResult, TimeProvider,
+    Process, SimContext, SimProviders, SimTimeProvider, SimulationBuilder, SimulationError, SimulationReport,
+    SimulationResult, TimeProvider,
 };
 use parking_lot::Mutex;
 use streaming_gossip::{Gossip, GossipConfig, GossipStats, Limits};
@@ -192,12 +190,9 @@ impl Process for GossipProcess {
         let generation = u64::try_from(now.as_millis()).unwrap_or(u64::MAX) + 1;
         let all = all_process_ips_with_self(ctx);
         let seed_ip = all[0].clone();
-        let mut config = self.params.config(
-            &node_id_for(&ip),
-            generation,
-            &addr_for(&ip),
-            &addr_for(&seed_ip),
-        );
+        let mut config = self
+            .params
+            .config(&node_id_for(&ip), generation, &addr_for(&ip), &addr_for(&seed_ip));
         if self.params.foreign_last && all.last() == Some(&ip) {
             config.cluster_id = FOREIGN_CLUSTER.to_string();
         }
@@ -213,16 +208,10 @@ impl Process for GossipProcess {
             .await
             .map_err(|e| fail(format!("gossip start on {ip}: {e}")))?;
         gossip.set("addr", &addr_for(&ip)).map_err(err)?;
-        gossip
-            .set("incarnation", &generation.to_string())
-            .map_err(err)?;
-        gossip
-            .set(&format!("only-{generation}"), "x")
-            .map_err(err)?;
+        gossip.set("incarnation", &generation.to_string()).map_err(err)?;
+        gossip.set(&format!("only-{generation}"), "x").map_err(err)?;
         for i in 0..self.params.filler_keys {
-            let v: String =
-                std::iter::repeat_n(char::from(b'a' + (i % 26) as u8), self.params.filler_len)
-                    .collect();
+            let v: String = std::iter::repeat_n(char::from(b'a' + (i % 26) as u8), self.params.filler_len).collect();
             gossip.set(&format!("filler-{i:03}"), &v).map_err(err)?;
         }
         {
@@ -261,9 +250,7 @@ pub fn fail(msg: String) -> SimulationError {
 }
 
 /// Ground truth: each live node's own values.
-pub fn ground_truth(
-    nodes: &[(String, Gossip<SimProviders>)],
-) -> BTreeMap<String, (u64, BTreeMap<String, String>)> {
+pub fn ground_truth(nodes: &[(String, Gossip<SimProviders>)]) -> BTreeMap<String, (u64, BTreeMap<String, String>)> {
     nodes
         .iter()
         .map(|(_, g)| {
@@ -280,15 +267,9 @@ pub fn ground_truth(
 /// `None` when every live node sees exactly the live nodes, all alive, with
 /// the owners' generations and values; otherwise a description of the first
 /// difference.
-pub fn convergence_gap(
-    nodes: &[(String, Gossip<SimProviders>)],
-    expected: usize,
-) -> Option<String> {
+pub fn convergence_gap(nodes: &[(String, Gossip<SimProviders>)], expected: usize) -> Option<String> {
     if nodes.len() != expected {
-        return Some(format!(
-            "{} live incarnations, expected {expected}",
-            nodes.len()
-        ));
+        return Some(format!("{} live incarnations, expected {expected}", nodes.len()));
     }
     let truth = ground_truth(nodes);
     for (ip, g) in nodes {
@@ -331,10 +312,7 @@ pub fn convergence_gap(
 /// `GOSSIP_SIM_ITERATIONS` / `GOSSIP_SIM_SEED_BASE` override the default
 /// range `base..base+default_iterations`.
 pub fn seeds(default_iterations: u64) -> Vec<u64> {
-    if let Some(s) = std::env::var("GOSSIP_SIM_SEED")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
+    if let Some(s) = std::env::var("GOSSIP_SIM_SEED").ok().and_then(|v| v.parse().ok()) {
         return vec![s];
     }
     let n = std::env::var("GOSSIP_SIM_ITERATIONS")
@@ -348,12 +326,7 @@ pub fn seeds(default_iterations: u64) -> Vec<u64> {
     (base..base + n).collect()
 }
 
-pub fn builder_with(
-    registry: &Registry,
-    processes: usize,
-    params: NodeParams,
-    seeds: Vec<u64>,
-) -> SimulationBuilder {
+pub fn builder_with(registry: &Registry, processes: usize, params: NodeParams, seeds: Vec<u64>) -> SimulationBuilder {
     let reg_factory = registry.clone();
     let reg_reset = registry.clone();
     let iterations = seeds.len();

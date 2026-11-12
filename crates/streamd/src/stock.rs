@@ -14,6 +14,8 @@ use moonpool_core::Providers;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use streaming_core::{Registry, Windowed};
+#[cfg(feature = "pulsar")]
+use streaming_pulsar::{PulsarMessage, PulsarOutput};
 use streaming_warp10::Gts;
 
 fn default_label() -> String {
@@ -61,7 +63,6 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
     );
     #[cfg(feature = "pulsar")]
     {
-        use streaming_pulsar::{PulsarMessage, PulsarOutput};
         registry.register_key(
             "std/pulsar-key@1",
             "Groups Pulsar messages by their message key (empty when absent).",
@@ -84,8 +85,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
         "std/count-to-gts@1",
         [
             streaming_core::ParamSpec::new("class", "text", "Class of the series.").required(),
-            streaming_core::ParamSpec::new("label", "text", "Label that carries the key.")
-                .default("key"),
+            streaming_core::ParamSpec::new("label", "text", "Label that carries the key.").default("key"),
         ],
     );
 }

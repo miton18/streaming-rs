@@ -134,7 +134,7 @@ notice it.
 ## Verifying
 
 ```sh
-cargo fmt --all
+cargo +nightly fmt --all                                  # rustfmt.toml uses nightly-only options
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p streaming-sim --features mutants --all-targets -- -D warnings
 cargo test --workspace                                   # every crate, a few minutes

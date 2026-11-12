@@ -1,14 +1,12 @@
 //! Configuration of the sink.
 
-use std::fmt;
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use serde::Deserialize;
 use serde_json::Value;
 use streaming_core::{OpError, parse_duration};
 
-use crate::gts::TimeUnit;
-use crate::http::Endpoint;
+use crate::{gts::TimeUnit, http::Endpoint};
 
 /// Default request timeout.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -98,15 +96,14 @@ impl Warp10Config {
         config: &Value,
         resolve_token: impl FnOnce(&Value) -> Result<String, OpError>,
     ) -> Result<Self, OpError> {
-        let raw: RawConfig = serde_json::from_value(config.clone())
-            .map_err(|e| OpError::Config(format!("std/warp10-sink@1: {e}")))?;
+        let raw: RawConfig =
+            serde_json::from_value(config.clone()).map_err(|e| OpError::Config(format!("std/warp10-sink@1: {e}")))?;
         let mut out = Self::new(&raw.endpoint, resolve_token(&raw.token)?)?;
         if let Some(unit) = raw.time_unit {
             out.time_unit = TimeUnit::parse(&unit).map_err(OpError::Config)?;
         }
         if let Some(timeout) = raw.timeout {
-            out.timeout =
-                parse_duration(&timeout).map_err(|e| OpError::Config(format!("timeout: {e}")))?;
+            out.timeout = parse_duration(&timeout).map_err(|e| OpError::Config(format!("timeout: {e}")))?;
         }
         if let Some(max) = raw.max_batch_bytes {
             out.max_batch_bytes = max;
@@ -128,9 +125,7 @@ impl Warp10Config {
             return Err(OpError::Config("the write token is empty".into()));
         }
         if self.token.contains(['\r', '\n', '\0']) {
-            return Err(OpError::Config(
-                "the write token contains a control character".into(),
-            ));
+            return Err(OpError::Config("the write token contains a control character".into()));
         }
         if self.timeout.is_zero() {
             return Err(OpError::Config("timeout must be positive".into()));
@@ -183,29 +178,21 @@ mod tests {
 
     #[test]
     fn the_token_resolver_receives_the_raw_value() {
-        let c = Warp10Config::from_json(
-            &json!({"endpoint": "http://h/", "token": {"secret": "w"}}),
-            |v| {
-                assert_eq!(v, &json!({"secret": "w"}));
-                Ok("resolved".into())
-            },
-        )
+        let c = Warp10Config::from_json(&json!({"endpoint": "http://h/", "token": {"secret": "w"}}), |v| {
+            assert_eq!(v, &json!({"secret": "w"}));
+            Ok("resolved".into())
+        })
         .unwrap();
         assert_eq!(c.token, "resolved");
         // an unresolvable secret is a configuration error
-        assert!(
-            Warp10Config::from_json(&json!({"endpoint": "http://h/", "token": 1}), literal)
-                .is_err()
-        );
+        assert!(Warp10Config::from_json(&json!({"endpoint": "http://h/", "token": 1}), literal).is_err());
     }
 
     #[test]
     fn invalid_configurations() {
         let base = |extra: Value| {
             let mut v = json!({"endpoint": "http://h/", "token": "t"});
-            v.as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             Warp10Config::from_json(&v, literal)
         };
         assert!(base(json!({"time_unit": "s"})).is_err());

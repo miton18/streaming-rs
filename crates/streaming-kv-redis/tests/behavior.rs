@@ -3,16 +3,22 @@
 
 mod common;
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use moonpool_core::TokioProviders;
 use streaming_core::{Kv, KvError};
 use streaming_kv_redis::{FakeRedis, RedisConfig, RedisKv};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
 use tokio_util::sync::CancellationToken;
 
 async fn start_fake(fake: FakeRedis) -> (String, CancellationToken) {
@@ -20,9 +26,7 @@ async fn start_fake(fake: FakeRedis) -> (String, CancellationToken) {
     let token = CancellationToken::new();
     let (a, t) = (addr.clone(), token.clone());
     tokio::spawn(async move {
-        fake.serve(TokioProviders::new(), &a, t)
-            .await
-            .expect("serve");
+        fake.serve(TokioProviders::new(), &a, t).await.expect("serve");
     });
     for _ in 0..200 {
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
@@ -55,9 +59,7 @@ async fn hset_hdel_del_are_chunked_only_above_the_threshold() {
             ..cfg(&addr)
         },
     );
-    let entries = |n: usize| -> Vec<(String, Vec<u8>)> {
-        (0..n).map(|i| (format!("f{i}"), b"v".to_vec())).collect()
-    };
+    let entries = |n: usize| -> Vec<(String, Vec<u8>)> { (0..n).map(|i| (format!("f{i}"), b"v".to_vec())).collect() };
 
     // Exactly the default threshold (1000 fields): one single command.
     kv.hset("h1", entries(1000)).await.unwrap();
@@ -117,20 +119,12 @@ async fn hset_is_split_above_eight_mebibytes() {
     let third = || vec![1u8; 3 * MIB];
     kv.hset(
         "h3",
-        vec![
-            ("a".into(), third()),
-            ("b".into(), third()),
-            ("c".into(), third()),
-        ],
+        vec![("a".into(), third()), ("b".into(), third()), ("c".into(), third())],
     )
     .await
     .unwrap();
     assert_eq!(fake.command_count("HSET"), 5);
-    for (key, field, len) in [
-        ("h1", "b", 4 * MIB - 1),
-        ("h2", "b", 4 * MIB),
-        ("h3", "c", 3 * MIB),
-    ] {
+    for (key, field, len) in [("h1", "b", 4 * MIB - 1), ("h2", "b", 4 * MIB), ("h3", "c", 3 * MIB)] {
         assert_eq!(fake.peek_field(key, field).map(|v| v.len()), Some(len));
     }
     // Keys of exactly the limit are accepted.
@@ -172,11 +166,7 @@ async fn too_large_values_are_refused_before_sending() {
         fake.command_count("SET") + fake.command_count("HSET") + fake.command_count("HSETNX"),
         0
     );
-    assert_eq!(
-        fake.connections_accepted(),
-        base,
-        "nothing was even connected"
-    );
+    assert_eq!(fake.connections_accepted(), base, "nothing was even connected");
     // Exactly at the limit is fine.
     kv.set("k", vec![1u8; 1024]).await.unwrap();
 }
@@ -220,9 +210,7 @@ async fn concurrent_commands_share_a_bounded_pool() {
     let mut tasks = Vec::new();
     for _ in 0..40 {
         let kv = kv.clone();
-        tasks.push(tokio::spawn(
-            async move { kv.incr("counter").await.unwrap() },
-        ));
+        tasks.push(tokio::spawn(async move { kv.incr("counter").await.unwrap() }));
     }
     let mut seen = HashSet::new();
     for t in tasks {

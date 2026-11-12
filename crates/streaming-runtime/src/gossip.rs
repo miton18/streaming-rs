@@ -8,8 +8,7 @@
 
 use async_trait::async_trait;
 use moonpool_core::Providers;
-use streaming_core::control::MemberInfo;
-use streaming_core::{DynKv, Timestamp, WorkerId, keys};
+use streaming_core::{DynKv, Timestamp, WorkerId, control::MemberInfo, keys};
 use streaming_gossip::Gossip;
 pub use streaming_gossip::{GossipConfig, GossipError};
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -61,11 +60,7 @@ impl<P: Providers> Membership for GossipMembership<P> {
             }
             Err(error) => tracing::warn!(%error, "cannot encode membership"),
         }
-        if let Err(error) = self
-            .kv
-            .hset_json(keys::CLUSTER_MEMBERS, me.worker.as_str(), me)
-            .await
-        {
+        if let Err(error) = self.kv.hset_json(keys::CLUSTER_MEMBERS, me.worker.as_str(), me).await {
             tracing::debug!(%error, worker = %me.worker, "cannot mirror membership into the KV");
         }
     }
@@ -83,9 +78,6 @@ impl<P: Providers> Membership for GossipMembership<P> {
 
     async fn leave(&self, worker: &WorkerId) {
         self.gossip.shutdown();
-        let _ = self
-            .kv
-            .hdel(keys::CLUSTER_MEMBERS, vec![worker.to_string()])
-            .await;
+        let _ = self.kv.hdel(keys::CLUSTER_MEMBERS, vec![worker.to_string()]).await;
     }
 }

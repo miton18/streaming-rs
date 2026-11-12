@@ -21,17 +21,20 @@
 //! the checks that corruption can legitimately fool are only enforced on
 //! seeds without any (reported in the test output).
 
-use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, Invariant, Process, RandomProvider,
-    SIM_FAULT_EVENT_NAME, SimContext, SimulationBuilder, SimulationResult, TimeProvider,
-    TraceQuery, Workload, assert_always, assert_sometimes,
+    Attrition, AttritionScope, Chaos, ChaosMode, Invariant, Process, RandomProvider, SIM_FAULT_EVENT_NAME, SimContext,
+    SimulationBuilder, SimulationResult, TimeProvider, TraceQuery, Workload, assert_always, assert_sometimes,
 };
 use parking_lot::Mutex;
 use streaming_core::{Kv, KvError};
@@ -187,12 +190,7 @@ impl Client {
         }
     }
 
-    async fn round(
-        &mut self,
-        ctx: &SimContext,
-        kv: &RedisKv<moonpool_sim::SimProviders>,
-        round: usize,
-    ) {
+    async fn round(&mut self, ctx: &SimContext, kv: &RedisKv<moonpool_sim::SimProviders>, round: usize) {
         let key = format!("race:{round}");
         let mut order: Vec<usize> = (0..FIELDS_PER_ROUND).collect();
         // Deterministic per-seed shuffle through the provider.
@@ -268,13 +266,7 @@ impl Client {
     }
 
     /// One raced `HSETNX`, retried blindly on error like a naive caller would.
-    async fn race(
-        &mut self,
-        ctx: &SimContext,
-        kv: &RedisKv<moonpool_sim::SimProviders>,
-        slot: &Slot,
-        pad: usize,
-    ) {
+    async fn race(&mut self, ctx: &SimContext, kv: &RedisKv<moonpool_sim::SimProviders>, slot: &Slot, pad: usize) {
         for attempt in 0..3u32 {
             let value = encode_value(self.id, slot, attempt, pad);
             match kv.hsetnx(&slot.0, &slot.1, value).await {
@@ -352,17 +344,11 @@ impl Workload for Client {
 
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // Sometimes-assertions are per client: prove the failure paths ran.
-        assert_sometimes!(
-            self.stats.errors > 0,
-            "client saw an error (outcome unknown)"
-        );
+        assert_sometimes!(self.stats.errors > 0, "client saw an error (outcome unknown)");
         assert_sometimes!(self.stats.timeouts > 0, "client saw a command timeout");
         assert_sometimes!(self.stats.trues > 0, "hsetnx returned true");
         assert_sometimes!(self.stats.falses > 0, "hsetnx returned false");
-        assert_sometimes!(
-            self.stats.multi_page_scans > 0,
-            "hgetall paged over several HSCANs"
-        );
+        assert_sometimes!(self.stats.multi_page_scans > 0, "hgetall paged over several HSCANs");
 
         if ctx.client_id() != 0 {
             return Ok(());
@@ -380,10 +366,7 @@ impl Workload for Client {
         );
         let flips = world.bit_flips.load(Ordering::SeqCst);
         assert_sometimes!(flips > 0, "the simulator flipped bits on the wire");
-        assert_sometimes!(
-            flips == 0,
-            "a seed without wire corruption (strict checks ran)"
-        );
+        assert_sometimes!(flips == 0, "a seed without wire corruption (strict checks ran)");
         if flips > 0 {
             world.relaxed_seeds.fetch_add(1, Ordering::SeqCst);
             return Ok(());
@@ -450,14 +433,9 @@ impl Workload for Client {
 
 fn run_sim(seeds: Vec<u64>) -> (moonpool_sim::SimulationReport, World) {
     let world = World::new();
-    let (w_reset, w_proc, w_cli, w_inv) =
-        (world.clone(), world.clone(), world.clone(), world.clone());
+    let (w_reset, w_proc, w_cli, w_inv) = (world.clone(), world.clone(), world.clone(), world.clone());
     let report = SimulationBuilder::new()
-        .processes(1, move || {
-            Box::new(FakeRedisProcess {
-                world: w_proc.clone(),
-            })
-        })
+        .processes(1, move || Box::new(FakeRedisProcess { world: w_proc.clone() }))
         .workloads(moonpool_sim::WorkloadCount::Fixed(CLIENTS), move |id| {
             Box::new(Client {
                 id,
@@ -507,11 +485,7 @@ fn assert_report(report: &moonpool_sim::SimulationReport, world: &World, check_c
             d.kind, d.pass_count, d.fail_count, d.msg
         );
     }
-    assert_eq!(
-        report.failed_runs, 0,
-        "failing seeds: {:?}",
-        report.seeds_failing
-    );
+    assert_eq!(report.failed_runs, 0, "failing seeds: {:?}", report.seeds_failing);
     assert!(
         report.assertion_violations.is_empty(),
         "{:?}",
@@ -535,10 +509,7 @@ fn redis_client_under_chaos_many_seeds() {
     let seeds: Vec<u64> = (1..=count).collect();
     let (report, world) = run_sim(seeds);
     assert_report(&report, &world, true);
-    assert!(
-        world.strict_seeds.load(Ordering::SeqCst) > 0,
-        "no strict seed ran"
-    );
+    assert!(world.strict_seeds.load(Ordering::SeqCst) > 0, "no strict seed ran");
 }
 
 /// A fixed seed, quick to replay when debugging.

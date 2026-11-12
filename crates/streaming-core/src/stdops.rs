@@ -7,17 +7,18 @@
 //! | `std/count@1` | aggregate | none; emits `Windowed<u64>` |
 //! | `std/identity@1` | map | none |
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use moonpool_core::Providers;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::data::{Datum, Key, Windowed, datum};
-use crate::ops::{DynAcc, DynAggregator, DynMap, OpError, WindowAssigner};
-use crate::registry::{OpDescriptor, OpFactory, OpKind, Registry, TypeTag};
-use crate::time::{Timestamp, Window, duration_str};
+use crate::{
+    data::{Datum, Key, Windowed, datum},
+    ops::{DynAcc, DynAggregator, DynMap, OpError, WindowAssigner},
+    registry::{OpDescriptor, OpFactory, OpKind, Registry, TypeTag},
+    time::{Timestamp, Window, duration_str},
+};
 
 fn zero() -> Duration {
     Duration::ZERO
@@ -112,18 +113,14 @@ impl DynAggregator for Count {
     }
 
     fn add(&self, acc: &mut DynAcc, _item: &Datum) -> Result<(), OpError> {
-        let count = acc
-            .downcast_mut::<u64>()
-            .ok_or(OpError::Type { expected: "u64" })?;
+        let count = acc.downcast_mut::<u64>().ok_or(OpError::Type { expected: "u64" })?;
         *count += 1;
         Ok(())
     }
 
     fn merge(&self, into: &mut DynAcc, other: &DynAcc) -> Result<(), OpError> {
         let other = Self::get(other)?;
-        let count = into
-            .downcast_mut::<u64>()
-            .ok_or(OpError::Type { expected: "u64" })?;
+        let count = into.downcast_mut::<u64>().ok_or(OpError::Type { expected: "u64" })?;
         *count += other;
         Ok(())
     }
@@ -194,9 +191,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
             description: "Forwards every element unchanged.".to_owned(),
             params: Vec::new(),
         },
-        OpFactory::Map(Arc::new(|_config: &Value| {
-            Ok(Arc::new(Identity) as Arc<dyn DynMap>)
-        })),
+        OpFactory::Map(Arc::new(|_config: &Value| Ok(Arc::new(Identity) as Arc<dyn DynMap>))),
     );
     let lateness = || {
         crate::ParamSpec::new(
@@ -233,10 +228,7 @@ mod tests {
         let mut out = Vec::new();
         assigner.assign(301_000, &mut out);
         assigner.assign(-1, &mut out);
-        assert_eq!(
-            out,
-            vec![Window::new(300_000, 600_000), Window::new(-300_000, 0)]
-        );
+        assert_eq!(out, vec![Window::new(300_000, 600_000), Window::new(-300_000, 0)]);
     }
 
     #[test]
@@ -248,27 +240,19 @@ mod tests {
         };
         let mut out = Vec::new();
         assigner.assign(12_000, &mut out);
-        assert_eq!(
-            out,
-            vec![Window::new(10_000, 20_000), Window::new(5_000, 15_000)]
-        );
+        assert_eq!(out, vec![Window::new(10_000, 20_000), Window::new(5_000, 15_000)]);
         assert!(out.iter().all(|w| w.contains(12_000)));
 
         // On a window boundary, the window ending there is not included.
         out.clear();
         assigner.assign(10_000, &mut out);
-        assert_eq!(
-            out,
-            vec![Window::new(10_000, 20_000), Window::new(5_000, 15_000)]
-        );
+        assert_eq!(out, vec![Window::new(10_000, 20_000), Window::new(5_000, 15_000)]);
     }
 
     #[test]
     fn window_configs_are_validated() {
         let registry = crate::registry::Registry::<moonpool_core::TokioProviders>::standard();
-        let check = |op: &str, config: serde_json::Value| match registry
-            .get(&crate::ids::OpRef::new(op).unwrap())
-        {
+        let check = |op: &str, config: serde_json::Value| match registry.get(&crate::ids::OpRef::new(op).unwrap()) {
             Some((_, crate::registry::OpFactory::Window(factory))) => factory(&config).is_ok(),
             _ => panic!("{op} is not a window"),
         };

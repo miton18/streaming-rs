@@ -11,9 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::data::Position;
-use crate::ids::{GraphId, NodeId, OpRef, SliceId, SliceKey, TenantId, WorkerId};
-use crate::time::Timestamp;
+use crate::{
+    data::Position,
+    ids::{GraphId, NodeId, OpRef, SliceId, SliceKey, TenantId, WorkerId},
+    time::Timestamp,
+};
 
 /// Resource usage of a worker process. Ratios are in `0.0..=1.0`.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -401,10 +403,7 @@ mod tests {
             WorkerId::new("worker-a").unwrap(),
         );
         let json = serde_json::to_string(&placement).unwrap();
-        assert!(
-            json.contains("\"acme/g/src.events.0\":\"worker-a\""),
-            "{json}"
-        );
+        assert!(json.contains("\"acme/g/src.events.0\":\"worker-a\""), "{json}");
         assert_eq!(serde_json::from_str::<Placement>(&json).unwrap(), placement);
     }
 

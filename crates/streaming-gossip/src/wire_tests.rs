@@ -78,9 +78,7 @@ fn all_messages() -> Vec<Message> {
             digest: sample_digest(),
             delta: sample_delta(),
         },
-        Message::Ack {
-            delta: sample_delta(),
-        },
+        Message::Ack { delta: sample_delta() },
         Message::Ack {
             delta: Delta::default(),
         },
@@ -98,14 +96,7 @@ fn crc32_known_vector() {
 
 #[test]
 fn varint_len_matches_leb128() {
-    for (v, l) in [
-        (0u64, 1),
-        (127, 1),
-        (128, 2),
-        (16_383, 2),
-        (16_384, 3),
-        (u64::MAX, 10),
-    ] {
+    for (v, l) in [(0u64, 1), (127, 1), (128, 2), (16_383, 2), (16_384, 3), (u64::MAX, 10)] {
         assert_eq!(varint_len(v), l, "{v}");
         let enc = postcard::to_allocvec(&v).unwrap();
         assert_eq!(enc.len(), l);
@@ -117,10 +108,7 @@ fn size_functions_are_exact() {
     let d = sample_delta();
     assert_eq!(delta_size(&d), postcard::to_allocvec(&d).unwrap().len());
     for nd in &d.nodes {
-        assert_eq!(
-            node_delta_size(nd),
-            postcard::to_allocvec(nd).unwrap().len()
-        );
+        assert_eq!(node_delta_size(nd), postcard::to_allocvec(nd).unwrap().len());
     }
     let g = sample_digest();
     assert_eq!(digest_size(&g), postcard::to_allocvec(&g).unwrap().len());
@@ -147,10 +135,7 @@ fn malformed_frames_are_rejected() {
     // Oversized announced length, rejected from the header alone.
     let mut big = frame.clone();
     big[..4].copy_from_slice(&u32::MAX.to_be_bytes());
-    assert!(matches!(
-        decode_frame(&big, max),
-        Err(WireError::FrameTooLarge { .. })
-    ));
+    assert!(matches!(decode_frame(&big, max), Err(WireError::FrameTooLarge { .. })));
     let small_limit = frame.len() - FRAME_HEADER_LEN - 1;
     assert!(matches!(
         decode_frame(&frame, small_limit),
@@ -162,10 +147,7 @@ fn malformed_frames_are_rejected() {
         for bit in 0..8 {
             let mut f = frame.clone();
             f[i] ^= 1 << bit;
-            assert!(
-                decode_frame(&f, max).is_err(),
-                "flip at byte {i} bit {bit} undetected"
-            );
+            assert!(decode_frame(&f, max).is_err(), "flip at byte {i} bit {bit} undetected");
         }
     }
     // Flip in the CRC itself.
@@ -222,10 +204,7 @@ fn async_framing_over_a_byte_stream() {
             let (got, _) = read_frame(&mut buf, 1 << 20).await.unwrap();
             assert_eq!(got, m);
         }
-        assert!(matches!(
-            read_frame(&mut buf, 1 << 20).await,
-            Err(WireError::Io(_))
-        ));
+        assert!(matches!(read_frame(&mut buf, 1 << 20).await, Err(WireError::Io(_))));
 
         // Oversized frame rejected before reading the payload.
         let frame = encode_frame(&all_messages()[1]).unwrap();

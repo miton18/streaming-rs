@@ -1,20 +1,25 @@
 //! Integration tests: the real router over a `MemKv`.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
 
-use axum::Router;
-use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::{
+    Router,
+    body::Body,
+    http::{Method, Request, StatusCode, header},
+};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use streaming_api::{ApiConfig, ApiState, router};
-use streaming_core::control::{
-    ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, Load, MemberInfo,
-    OutputRow, Placement, RunState, SliceSnapshot, TenantUsage, WorkerSnapshot,
-};
 use streaming_core::{
-    DynKv, GraphKey, MemKv, OpDescriptor, OpKind, OpRef, Registry, TypeTag, keys,
+    DynKv, GraphKey, MemKv, OpDescriptor, OpKind, OpRef, Registry, TypeTag,
+    control::{
+        ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, Load, MemberInfo, OutputRow, Placement,
+        RunState, SliceSnapshot, TenantUsage, WorkerSnapshot,
+    },
+    keys,
 };
 use tower::ServiceExt;
 
@@ -95,12 +100,7 @@ impl Env {
             }
             None => Body::empty(),
         };
-        let response = self
-            .app
-            .clone()
-            .oneshot(request.body(body).unwrap())
-            .await
-            .unwrap();
+        let response = self.app.clone().oneshot(request.body(body).unwrap()).await.unwrap();
         let (parts, body) = response.into_parts();
         let bytes = body.collect().await.unwrap().to_bytes().to_vec();
         (parts.status, parts.headers, bytes)
@@ -147,12 +147,7 @@ fn gk(graph: &str) -> GraphKey {
     GraphKey::new("acme".parse().unwrap(), graph.parse().unwrap())
 }
 
-async fn publish_worker(
-    env: &Env,
-    worker: &str,
-    heartbeat_ms: i64,
-    snapshot: Option<WorkerSnapshot>,
-) {
+async fn publish_worker(env: &Env, worker: &str, heartbeat_ms: i64, snapshot: Option<WorkerSnapshot>) {
     let member = MemberInfo {
         worker: worker.parse().unwrap(),
         generation: 7,
@@ -167,10 +162,7 @@ async fn publish_worker(
         api_addr: Some("127.0.0.1:8080".into()),
         version: "0.1.0".into(),
     };
-    env.kv
-        .hset_json(keys::CLUSTER_MEMBERS, worker, &member)
-        .await
-        .unwrap();
+    env.kv.hset_json(keys::CLUSTER_MEMBERS, worker, &member).await.unwrap();
     if let Some(snapshot) = snapshot {
         env.kv
             .set_json(&keys::worker_metrics(&worker.parse().unwrap()), &snapshot)
@@ -254,28 +246,15 @@ async fn healthz() {
 #[tokio::test]
 async fn cluster_lists_workers_placement_and_kv_stats() {
     let env = Env::new().await;
-    publish_worker(
-        &env,
-        "worker-a",
-        NOW,
-        Some(worker_snapshot("worker-a", "g")),
-    )
-    .await;
+    publish_worker(&env, "worker-a", NOW, Some(worker_snapshot("worker-a", "g"))).await;
     publish_worker(&env, "worker-b", NOW - 5001, None).await;
     let placement = Placement {
         version: 3,
         computed_by: Some("worker-a".parse().unwrap()),
         computed_ms: NOW,
-        assignments: [(
-            "acme/g/src.events.0".parse().unwrap(),
-            "worker-a".parse().unwrap(),
-        )]
-        .into(),
+        assignments: [("acme/g/src.events.0".parse().unwrap(), "worker-a".parse().unwrap())].into(),
     };
-    env.kv
-        .set_json(keys::CLUSTER_PLACEMENT, &placement)
-        .await
-        .unwrap();
+    env.kv.set_json(keys::CLUSTER_PLACEMENT, &placement).await.unwrap();
     env.put_graph("g").await;
 
     let (status, body) = env.get("/api/v1/cluster").await;
@@ -293,10 +272,7 @@ async fn cluster_lists_workers_placement_and_kv_stats() {
     assert_eq!(workers[1]["alive"], false);
     assert_eq!(workers[1]["tenants"], json!({}));
     assert_eq!(body["placement"]["version"], 3);
-    assert_eq!(
-        body["placement"]["assignments"]["acme/g/src.events.0"],
-        "worker-a"
-    );
+    assert_eq!(body["placement"]["assignments"]["acme/g/src.events.0"], "worker-a");
     assert!(body["kv"]["keys"].as_u64().unwrap() > 0);
 }
 
@@ -352,28 +328,11 @@ async fn put_creates_then_bumps_the_version_and_the_epoch() {
     assert_eq!(env.epoch().await, 1);
 
     // Everything the contract says was written.
-    let spec: Value = serde_json::from_slice(
-        &env.kv
-            .get(&keys::graph_spec(&gk("g")))
-            .await
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
+    let spec: Value = serde_json::from_slice(&env.kv.get(&keys::graph_spec(&gk("g"))).await.unwrap().unwrap()).unwrap();
     assert_eq!(spec["version"], 1);
-    let desired: DesiredState = env
-        .kv
-        .get_json(&keys::graph_desired(&gk("g")))
-        .await
-        .unwrap()
-        .unwrap();
+    let desired: DesiredState = env.kv.get_json(&keys::graph_desired(&gk("g"))).await.unwrap().unwrap();
     assert_eq!(desired.state, RunState::Running);
-    let entry: GraphIndexEntry = env
-        .kv
-        .hget_json(keys::CLUSTER_GRAPHS, "acme/g")
-        .await
-        .unwrap()
-        .unwrap();
+    let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
     assert_eq!((entry.version, entry.deleting), (1, false));
 
     // An existing desired state is kept.
@@ -386,19 +345,9 @@ async fn put_creates_then_bumps_the_version_and_the_epoch() {
     env.clock.store(NOW + 10, Ordering::SeqCst);
     let (_, body) = env.put_graph("g").await;
     assert_eq!(body, json!({"version": 2}));
-    let desired: DesiredState = env
-        .kv
-        .get_json(&keys::graph_desired(&gk("g")))
-        .await
-        .unwrap()
-        .unwrap();
+    let desired: DesiredState = env.kv.get_json(&keys::graph_desired(&gk("g"))).await.unwrap().unwrap();
     assert_eq!(desired.state, RunState::Paused);
-    let entry: GraphIndexEntry = env
-        .kv
-        .hget_json(keys::CLUSTER_GRAPHS, "acme/g")
-        .await
-        .unwrap()
-        .unwrap();
+    let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
     assert_eq!((entry.version, entry.updated_ms), (2, NOW + 10));
     assert_eq!(env.epoch().await, 3);
 }
@@ -409,9 +358,7 @@ async fn put_rejects_invalid_input_with_a_message() {
     // Unknown operator.
     let mut body = graph_body("g");
     body["nodes"][0]["op"] = json!("t/nope@1");
-    let (status, answer) = env
-        .call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body))
-        .await;
+    let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let message = answer["error"].as_str().unwrap();
     assert!(message.contains("unknown operator `t/nope@1`"), "{message}");
@@ -419,97 +366,51 @@ async fn put_rejects_invalid_input_with_a_message() {
     // Wiring error.
     let mut body = graph_body("g");
     body["edges"] = json!([["events", "key"]]);
-    let (status, answer) = env
-        .call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body))
-        .await;
+    let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        answer["error"].as_str().unwrap().contains("key"),
-        "{answer}"
-    );
+    assert!(answer["error"].as_str().unwrap().contains("key"), "{answer}");
 
     // Body for another graph, another tenant.
     let (status, answer) = env
-        .call(
-            Method::PUT,
-            "/api/v1/tenants/acme/graphs/other",
-            Some(graph_body("g")),
-        )
+        .call(Method::PUT, "/api/v1/tenants/acme/graphs/other", Some(graph_body("g")))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        answer["error"].as_str().unwrap().contains("acme/g"),
-        "{answer}"
-    );
+    assert!(answer["error"].as_str().unwrap().contains("acme/g"), "{answer}");
     let (status, _) = env
-        .call(
-            Method::PUT,
-            "/api/v1/tenants/globex/graphs/g",
-            Some(graph_body("g")),
-        )
+        .call(Method::PUT, "/api/v1/tenants/globex/graphs/g", Some(graph_body("g")))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Not a description at all / invalid id inside it.
     let (status, answer) = env
-        .call(
-            Method::PUT,
-            "/api/v1/tenants/acme/graphs/g",
-            Some(json!({"x": 1})),
-        )
+        .call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(json!({"x": 1})))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(answer["error"].is_string());
     let mut body = graph_body("g");
     body["nodes"][0]["id"] = json!("bad id");
-    let (status, _) = env
-        .call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body))
-        .await;
+    let (status, _) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Invalid id in the path.
     let (status, answer) = env
-        .call(
-            Method::PUT,
-            "/api/v1/tenants/acme/graphs/bad.id",
-            Some(graph_body("g")),
-        )
+        .call(Method::PUT, "/api/v1/tenants/acme/graphs/bad.id", Some(graph_body("g")))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        answer["error"].as_str().unwrap().contains("graph id"),
-        "{answer}"
-    );
+    assert!(answer["error"].as_str().unwrap().contains("graph id"), "{answer}");
 
     // Nothing was written.
     assert_eq!(env.epoch().await, 0);
-    assert!(
-        env.mem
-            .keys()
-            .iter()
-            .all(|k| k.starts_with("cluster:catalog"))
-    );
+    assert!(env.mem.keys().iter().all(|k| k.starts_with("cluster:catalog")));
 }
 
 #[tokio::test]
 async fn graph_detail_joins_snapshots_and_computes_the_bottleneck() {
     let env = Env::new().await;
     env.put_graph("g").await;
-    publish_worker(
-        &env,
-        "worker-a",
-        NOW,
-        Some(worker_snapshot("worker-a", "g")),
-    )
-    .await;
+    publish_worker(&env, "worker-a", NOW, Some(worker_snapshot("worker-a", "g"))).await;
     // A dead worker's snapshot must not count.
-    publish_worker(
-        &env,
-        "worker-b",
-        NOW - 60_000,
-        Some(worker_snapshot("worker-b", "g")),
-    )
-    .await;
+    publish_worker(&env, "worker-b", NOW - 60_000, Some(worker_snapshot("worker-b", "g"))).await;
     env.kv
         .set_json(
             keys::CLUSTER_PLACEMENT,
@@ -517,11 +418,7 @@ async fn graph_detail_joins_snapshots_and_computes_the_bottleneck() {
                 version: 1,
                 computed_by: None,
                 computed_ms: NOW,
-                assignments: [(
-                    "acme/g/src.events.0".parse().unwrap(),
-                    "worker-a".parse().unwrap(),
-                )]
-                .into(),
+                assignments: [("acme/g/src.events.0".parse().unwrap(), "worker-a".parse().unwrap())].into(),
             },
         )
         .await
@@ -552,10 +449,7 @@ async fn graph_detail_joins_snapshots_and_computes_the_bottleneck() {
     assert_eq!(nodes[1]["state"], "pending");
     assert_eq!(nodes[0]["kind"], "source");
     assert_eq!(nodes[0]["paused"], false);
-    assert_eq!(
-        body["edges"][2],
-        json!({"from": "win", "to": "count", "fill": 0.5})
-    );
+    assert_eq!(body["edges"][2], json!({"from": "win", "to": "count", "fill": 0.5}));
     let slices = body["slices"].as_array().unwrap();
     assert_eq!(slices.len(), 1);
     assert_eq!(slices[0]["worker"], "worker-a");
@@ -580,13 +474,7 @@ async fn graph_list_and_tenants() {
         }),
     )
     .await;
-    publish_worker(
-        &env,
-        "worker-a",
-        NOW,
-        Some(worker_snapshot("worker-a", "g")),
-    )
-    .await;
+    publish_worker(&env, "worker-a", NOW, Some(worker_snapshot("worker-a", "g"))).await;
 
     let (status, body) = env.get("/api/v1/tenants").await;
     assert_eq!(status, StatusCode::OK);
@@ -636,14 +524,8 @@ async fn unknown_resources_are_404_and_bad_ids_400() {
     }
     for (method, uri) in [
         (Method::POST, "/api/v1/tenants/acme/graphs/nope/state"),
-        (
-            Method::POST,
-            "/api/v1/tenants/acme/graphs/nope/nodes/out/pause",
-        ),
-        (
-            Method::PATCH,
-            "/api/v1/tenants/acme/graphs/nope/nodes/out/config",
-        ),
+        (Method::POST, "/api/v1/tenants/acme/graphs/nope/nodes/out/pause"),
+        (Method::PATCH, "/api/v1/tenants/acme/graphs/nope/nodes/out/config"),
         (Method::DELETE, "/api/v1/tenants/acme/graphs/nope"),
     ] {
         let body = match method {
@@ -749,30 +631,23 @@ async fn pause_and_resume_nodes() {
     let env = Env::new().await;
     env.put_graph("g").await;
     let base = "/api/v1/tenants/acme/graphs/g/nodes";
-    let (status, _) = env
-        .call(Method::POST, &format!("{base}/count/pause"), None)
-        .await;
+    let (status, _) = env.call(Method::POST, &format!("{base}/count/pause"), None).await;
     assert_eq!(status, StatusCode::OK);
     let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
     assert_eq!(detail["desired"]["paused_nodes"], json!(["count"]));
     assert_eq!(detail["nodes"][3]["paused"], true);
     assert_eq!(detail["nodes"][0]["paused"], false);
     // Idempotent.
-    env.call(Method::POST, &format!("{base}/count/pause"), None)
-        .await;
+    env.call(Method::POST, &format!("{base}/count/pause"), None).await;
     let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
     assert_eq!(detail["desired"]["paused_nodes"], json!(["count"]));
 
-    let (status, _) = env
-        .call(Method::POST, &format!("{base}/count/resume"), None)
-        .await;
+    let (status, _) = env.call(Method::POST, &format!("{base}/count/resume"), None).await;
     assert_eq!(status, StatusCode::OK);
     let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
     assert_eq!(detail["desired"]["paused_nodes"], json!([]));
 
-    let (status, body) = env
-        .call(Method::POST, &format!("{base}/ghost/pause"), None)
-        .await;
+    let (status, body) = env.call(Method::POST, &format!("{base}/ghost/pause"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body["error"].as_str().unwrap().contains("ghost"));
     assert_eq!(env.epoch().await, 1 + 2 + 1);
@@ -798,11 +673,7 @@ async fn state_changes() {
     assert_eq!(env.epoch().await, 5);
     for bad in [json!({"state": "exploding"}), json!({}), json!("running")] {
         let (status, body) = env
-            .call(
-                Method::POST,
-                "/api/v1/tenants/acme/graphs/g/state",
-                Some(bad),
-            )
+            .call(Method::POST, "/api/v1/tenants/acme/graphs/g/state", Some(bad))
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body["error"].is_string());
@@ -815,34 +686,16 @@ async fn delete_marks_the_graph_deleting() {
     let env = Env::new().await;
     env.put_graph("g").await;
     env.clock.store(NOW + 99, Ordering::SeqCst);
-    let (status, _) = env
-        .call(Method::DELETE, "/api/v1/tenants/acme/graphs/g", None)
-        .await;
+    let (status, _) = env.call(Method::DELETE, "/api/v1/tenants/acme/graphs/g", None).await;
     assert_eq!(status, StatusCode::OK);
-    let desired: DesiredState = env
-        .kv
-        .get_json(&keys::graph_desired(&gk("g")))
-        .await
-        .unwrap()
-        .unwrap();
+    let desired: DesiredState = env.kv.get_json(&keys::graph_desired(&gk("g"))).await.unwrap().unwrap();
     assert_eq!(desired.state, RunState::Stopped);
-    let entry: GraphIndexEntry = env
-        .kv
-        .hget_json(keys::CLUSTER_GRAPHS, "acme/g")
-        .await
-        .unwrap()
-        .unwrap();
+    let entry: GraphIndexEntry = env.kv.hget_json(keys::CLUSTER_GRAPHS, "acme/g").await.unwrap().unwrap();
     assert!(entry.deleting);
     assert_eq!(entry.updated_ms, NOW + 99);
     assert_eq!(env.epoch().await, 2);
     // The spec is still there for the controller.
-    assert!(
-        env.kv
-            .get(&keys::graph_spec(&gk("g")))
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(env.kv.get(&keys::graph_spec(&gk("g"))).await.unwrap().is_some());
 
     // A deleting graph cannot be reconfigured.
     let (status, body) = env.put_graph("g").await;
@@ -879,10 +732,7 @@ async fn outputs_are_sorted_and_limited() {
         env.kv.hset_json(&out, id, &row).await.unwrap();
     }
     // A malformed row is skipped.
-    env.kv
-        .hset(&out, vec![("junk".into(), b"{".to_vec())])
-        .await
-        .unwrap();
+    env.kv.hset(&out, vec![("junk".into(), b"{".to_vec())]).await.unwrap();
 
     let base = "/api/v1/tenants/acme/graphs/g/outputs/out";
     let (status, body) = env.get(base).await;
@@ -934,9 +784,7 @@ async fn outputs_are_sorted_and_limited() {
 async fn dot_is_graphviz() {
     let env = Env::new().await;
     env.put_graph("g").await;
-    let (status, headers, body) = env
-        .raw(Method::GET, "/api/v1/tenants/acme/graphs/g/dot", None)
-        .await;
+    let (status, headers, body) = env.raw(Method::GET, "/api/v1/tenants/acme/graphs/g/dot", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         headers[header::CONTENT_TYPE]
@@ -946,10 +794,7 @@ async fn dot_is_graphviz() {
     );
     let text = String::from_utf8(body).unwrap();
     assert!(text.starts_with("digraph"));
-    assert!(
-        text.contains("\"count\" [label=\"count\\nt/count@1\"];"),
-        "{text}"
-    );
+    assert!(text.contains("\"count\" [label=\"count\\nt/count@1\"];"), "{text}");
     assert!(text.contains("\"win\" -> \"count\";"), "{text}");
 }
 
@@ -972,19 +817,11 @@ async fn every_write_bumps_the_epoch() {
     )
     .await;
     check!("patch");
-    env.call(
-        Method::POST,
-        "/api/v1/tenants/acme/graphs/g/nodes/out/pause",
-        None,
-    )
-    .await;
+    env.call(Method::POST, "/api/v1/tenants/acme/graphs/g/nodes/out/pause", None)
+        .await;
     check!("pause");
-    env.call(
-        Method::POST,
-        "/api/v1/tenants/acme/graphs/g/nodes/out/resume",
-        None,
-    )
-    .await;
+    env.call(Method::POST, "/api/v1/tenants/acme/graphs/g/nodes/out/resume", None)
+        .await;
     check!("resume");
     env.call(
         Method::POST,
@@ -993,8 +830,7 @@ async fn every_write_bumps_the_epoch() {
     )
     .await;
     check!("state");
-    env.call(Method::DELETE, "/api/v1/tenants/acme/graphs/g", None)
-        .await;
+    env.call(Method::DELETE, "/api/v1/tenants/acme/graphs/g", None).await;
     check!("delete");
     // Reads do not.
     env.get("/api/v1/cluster").await;
@@ -1007,12 +843,7 @@ async fn ui_is_served_with_a_spa_fallback() {
     let env = Env::new().await;
     let (status, headers, index) = env.raw(Method::GET, "/", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        headers[header::CONTENT_TYPE]
-            .to_str()
-            .unwrap()
-            .starts_with("text/html")
-    );
+    assert!(headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
     assert_eq!(headers[header::CACHE_CONTROL], "no-cache");
     assert!(String::from_utf8_lossy(&index).contains("<title>"));
 
@@ -1053,10 +884,7 @@ async fn cors_is_permissive() {
 async fn kv_failures_are_503() {
     // A key holding the wrong type makes MemKv fail like a broken store.
     let env = Env::new().await;
-    env.kv
-        .set(keys::CLUSTER_MEMBERS, b"x".to_vec())
-        .await
-        .unwrap();
+    env.kv.set(keys::CLUSTER_MEMBERS, b"x".to_vec()).await.unwrap();
     let (status, body) = env.get("/api/v1/cluster").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body["error"].is_string());

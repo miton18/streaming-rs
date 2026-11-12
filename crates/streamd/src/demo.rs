@@ -7,10 +7,14 @@
 //! | `demo/by-user@1` | key_by | `Event` | |
 //! | `demo/slow-sink@1` | sink | any | `{"latency_ms": 0}` |
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider};
@@ -18,8 +22,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use streaming_core::{
-    Clock, Emit, GraphSpec, OpError, Registry, SinkConnector, SinkError, SourceConnector,
-    SystemClock, TypeTag, datum,
+    Clock, Emit, GraphSpec, OpError, Registry, SinkConnector, SinkError, SourceConnector, SystemClock, TypeTag, datum,
 };
 use streaming_runtime::memlog::MemLog;
 
@@ -121,8 +124,7 @@ impl<P: Providers> SinkConnector for SlowSink<P> {
         if !self.latency.is_zero() {
             let _ = self.providers.time().sleep(self.latency).await;
         }
-        self.written
-            .fetch_add(batch.len() as u64, Ordering::Relaxed);
+        self.written.fetch_add(batch.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -134,11 +136,7 @@ struct SlowSinkConfig {
 }
 
 fn parse<C: for<'de> Deserialize<'de>>(config: &Value) -> Result<C, OpError> {
-    let config = if config.is_null() {
-        json!({})
-    } else {
-        config.clone()
-    };
+    let config = if config.is_null() { json!({}) } else { config.clone() };
     serde_json::from_value(config).map_err(|error| OpError::Config(error.to_string()))
 }
 
@@ -150,14 +148,10 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
         move |context, config| {
             let config: GeneratorConfig = parse(config)?;
             if config.partitions == 0 || config.partitions > 64 {
-                return Err(OpError::Config(
-                    "`partitions` must be between 1 and 64".into(),
-                ));
+                return Err(OpError::Config("`partitions` must be between 1 and 64".into()));
             }
             if config.rate_per_sec > 200_000 {
-                return Err(OpError::Config(
-                    "`rate_per_sec` must be at most 200000".into(),
-                ));
+                return Err(OpError::Config("`rate_per_sec` must be at most 200000".into()));
             }
             let topic = format!(
                 "{}/{}/{}/{}",
@@ -177,9 +171,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
                     })
                 })
                 .clone();
-            generator
-                .rate_per_sec
-                .store(config.rate_per_sec, Ordering::Relaxed);
+            generator.rate_per_sec.store(config.rate_per_sec, Ordering::Relaxed);
             generator.keys.store(config.keys.max(1), Ordering::Relaxed);
             if !generator.started.swap(true, Ordering::Relaxed) {
                 drop(context.providers.task().spawn_task(
@@ -190,16 +182,12 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
             Ok(generator.log.source(context.providers.clone()) as Arc<dyn SourceConnector>)
         },
     );
-    registry.register_map(
-        "demo/decode@1",
-        "Decodes a JSON event.",
-        |bytes: &Vec<u8>| serde_json::from_slice::<Event>(bytes).ok(),
-    );
-    registry.register_key(
-        "demo/by-user@1",
-        "Groups events by user.",
-        |event: &Event| event.user.clone(),
-    );
+    registry.register_map("demo/decode@1", "Decodes a JSON event.", |bytes: &Vec<u8>| {
+        serde_json::from_slice::<Event>(bytes).ok()
+    });
+    registry.register_key("demo/by-user@1", "Groups events by user.", |event: &Event| {
+        event.user.clone()
+    });
     registry.register_sink(
         "demo/slow-sink@1",
         "Discards what it receives after a configurable delay per batch.",
@@ -219,22 +207,14 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
     registry.with_params(
         "demo/generator@1",
         [
-            streaming_core::ParamSpec::new("partitions", "integer", "Number of partitions.")
-                .default(4),
-            streaming_core::ParamSpec::new("rate_per_sec", "integer", "Events per second.")
-                .default(2000),
-            streaming_core::ParamSpec::new("keys", "integer", "Number of distinct users.")
-                .default(50),
+            streaming_core::ParamSpec::new("partitions", "integer", "Number of partitions.").default(4),
+            streaming_core::ParamSpec::new("rate_per_sec", "integer", "Events per second.").default(2000),
+            streaming_core::ParamSpec::new("keys", "integer", "Number of distinct users.").default(50),
         ],
     );
     registry.with_params(
         "demo/slow-sink@1",
-        [streaming_core::ParamSpec::new(
-            "latency_ms",
-            "integer",
-            "Delay of each write, in milliseconds.",
-        )
-        .default(0)],
+        [streaming_core::ParamSpec::new("latency_ms", "integer", "Delay of each write, in milliseconds.").default(0)],
     );
 }
 
@@ -301,17 +281,16 @@ pub fn graphs() -> Vec<GraphSpec> {
     ];
     specs
         .into_iter()
-        .map(|spec| {
-            serde_json::from_value(spec).unwrap_or_else(|error| panic!("demo graph: {error}"))
-        })
+        .map(|spec| serde_json::from_value(spec).unwrap_or_else(|error| panic!("demo graph: {error}")))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use moonpool_core::TokioProviders;
     use streaming_core::Topology;
+
+    use super::*;
 
     #[test]
     fn demo_graphs_are_valid() {
@@ -322,13 +301,8 @@ mod tests {
         register(&mut registry, Arc::new(Generators::default()));
         let catalog = registry.catalog();
         for spec in graphs() {
-            let topology = Topology::build(&spec, &catalog)
-                .unwrap_or_else(|error| panic!("{}: {error}", spec.key()));
-            assert!(
-                !topology
-                    .nodes_of(streaming_core::OpKind::Aggregate)
-                    .is_empty()
-            );
+            let topology = Topology::build(&spec, &catalog).unwrap_or_else(|error| panic!("{}: {error}", spec.key()));
+            assert!(!topology.nodes_of(streaming_core::OpKind::Aggregate).is_empty());
         }
     }
 }

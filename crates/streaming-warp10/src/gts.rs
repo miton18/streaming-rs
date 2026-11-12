@@ -21,8 +21,7 @@
 //! The inverse, [`parse_line`], is used by the fake ingress and by the tests to
 //! check that what is emitted reads back.
 
-use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 /// A Geo Time Series point: one value of one series at one instant.
 ///
@@ -145,9 +144,7 @@ impl TimeUnit {
             "ms" => Ok(Self::Ms),
             "us" => Ok(Self::Us),
             "ns" => Ok(Self::Ns),
-            other => Err(format!(
-                "unknown time unit `{other}` (expected `ms`, `us` or `ns`)"
-            )),
+            other => Err(format!("unknown time unit `{other}` (expected `ms`, `us` or `ns`)")),
         }
     }
 
@@ -290,13 +287,13 @@ pub fn encode_line(gts: &Gts, unit: TimeUnit, out: &mut String) -> Result<(), En
             value: d,
         });
     }
-    let ts =
-        gts.ts_ms
-            .checked_mul(unit.per_ms())
-            .ok_or_else(|| EncodeError::TimestampOverflow {
-                class: gts.class.clone(),
-                ts_ms: gts.ts_ms,
-            })?;
+    let ts = gts
+        .ts_ms
+        .checked_mul(unit.per_ms())
+        .ok_or_else(|| EncodeError::TimestampOverflow {
+            class: gts.class.clone(),
+            ts_ms: gts.ts_ms,
+        })?;
 
     let start = out.len();
     let _ = write!(out, "{ts}// ");
@@ -383,9 +380,7 @@ pub fn parse_line(line: &str) -> Result<ParsedLine, String> {
     let label_part = &rest[open + 1..close];
     if !label_part.is_empty() {
         for pair in label_part.split(',') {
-            let (k, v) = pair
-                .split_once('=')
-                .ok_or_else(|| format!("bad label `{pair}`"))?;
+            let (k, v) = pair.split_once('=').ok_or_else(|| format!("bad label `{pair}`"))?;
             let (k, v) = (percent_decode(k)?, percent_decode(v)?);
             if k.is_empty() {
                 return Err("empty label name".to_owned());
@@ -445,10 +440,7 @@ mod tests {
             .label("host", "a")
             .at(1_700_000_000_123)
             .value(42);
-        assert_eq!(
-            enc(&g, TimeUnit::Us),
-            "1700000000123000// os.cpu{host=a,zone=eu} 42"
-        );
+        assert_eq!(enc(&g, TimeUnit::Us), "1700000000123000// os.cpu{host=a,zone=eu} 42");
     }
 
     #[test]
@@ -509,15 +501,8 @@ mod tests {
 
     #[test]
     fn names_and_labels_are_escaped() {
-        let g = Gts::new("a b{c}")
-            .label("k=1", "v,2")
-            .label("é", "x+y")
-            .at(0)
-            .value(1);
-        assert_eq!(
-            enc(&g, TimeUnit::Ms),
-            "0// a%20b%7Bc%7D{k%3D1=v%2C2,%C3%A9=x%2By} 1"
-        );
+        let g = Gts::new("a b{c}").label("k=1", "v,2").label("é", "x+y").at(0).value(1);
+        assert_eq!(enc(&g, TimeUnit::Ms), "0// a%20b%7Bc%7D{k%3D1=v%2C2,%C3%A9=x%2By} 1");
     }
 
     #[test]

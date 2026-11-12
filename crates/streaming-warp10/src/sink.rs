@@ -2,13 +2,16 @@
 
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+#[cfg(feature = "tls")]
+use futures_rustls::{TlsConnector, rustls::pki_types::ServerName};
 use moonpool_core::{NetworkProvider, Providers, TimeProvider};
-use streaming_core::ops::downcast;
-use streaming_core::{Emit, OpError, SinkConnector, SinkError};
+use streaming_core::{Emit, OpError, SinkConnector, SinkError, ops::downcast};
 
-use crate::config::Warp10Config;
-use crate::gts::{Gts, encode_line};
-use crate::http::{Limits, Response, build_request, read_response};
+use crate::{
+    config::Warp10Config,
+    gts::{Gts, encode_line},
+    http::{Limits, Response, build_request, read_response},
+};
 
 /// Longest excerpt of an error body put in a [`SinkError`], in characters.
 const EXCERPT_CHARS: usize = 200;
@@ -105,8 +108,6 @@ impl<P: Providers> Warp10Sink<P> {
 
         #[cfg(feature = "tls")]
         if let Some(tls) = &self.tls {
-            use futures_rustls::TlsConnector;
-            use futures_rustls::rustls::pki_types::ServerName;
             let name = ServerName::try_from(self.config.endpoint.host.clone())
                 .map_err(|e| format!("invalid TLS server name: {e}"))?;
             let mut stream = TlsConnector::from(tls.clone())
@@ -126,10 +127,7 @@ impl<P: Providers> Warp10Sink<P> {
             "POST",
             &endpoint.path,
             &endpoint.host_header(),
-            &[
-                ("X-Warp10-Token", &self.config.token),
-                ("Content-Type", "text/plain"),
-            ],
+            &[("X-Warp10-Token", &self.config.token), ("Content-Type", "text/plain")],
             body.as_bytes(),
         )
         .map_err(|e| SinkError(format!("warp10: cannot build the request: {e}")))?;
@@ -197,11 +195,7 @@ fn excerpt(body: &[u8], token: &str) -> String {
         out.push_str("...");
     }
     let out = out.trim().to_owned();
-    if out.is_empty() {
-        "<empty body>".to_owned()
-    } else {
-        out
-    }
+    if out.is_empty() { "<empty body>".to_owned() } else { out }
 }
 
 #[async_trait]
@@ -249,12 +243,7 @@ mod tests {
     #[test]
     fn bodies_are_split_at_the_limit_and_keep_order() {
         let points: Vec<Emit> = (0..5)
-            .map(|i| {
-                emit(
-                    i,
-                    datum(Gts::new("m").at(i64::try_from(i).unwrap()).value(1)),
-                )
-            })
+            .map(|i| emit(i, datum(Gts::new("m").at(i64::try_from(i).unwrap()).value(1))))
             .collect();
         // "0// m{} 1\n" is 10 bytes
         let one = sink(1_000, TimeUnit::Ms).bodies(&points).unwrap();
@@ -262,10 +251,7 @@ mod tests {
         assert_eq!(one[0].lines().count(), 5);
 
         let split = sink(25, TimeUnit::Ms).bodies(&points).unwrap();
-        assert_eq!(
-            split.iter().map(|b| b.lines().count()).collect::<Vec<_>>(),
-            [2, 2, 1]
-        );
+        assert_eq!(split.iter().map(|b| b.lines().count()).collect::<Vec<_>>(), [2, 2, 1]);
         assert!(split.iter().all(|b| b.len() <= 25 && b.ends_with('\n')));
         assert_eq!(split.concat(), one[0]);
 

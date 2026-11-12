@@ -11,12 +11,10 @@
 //! last writer wins.
 
 use serde_json::{Map, Value};
-use streaming_core::control::{
-    DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState, WorkerSnapshot,
-};
-use streaming_core::keys;
 use streaming_core::{
     Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, OpDescriptor, Topology,
+    control::{DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState, WorkerSnapshot},
+    keys,
 };
 
 /// Why a control operation failed.
@@ -37,10 +35,7 @@ pub enum ControlError {
 /// descriptors are skipped.
 pub async fn load_catalog(kv: &dyn Kv) -> Result<Catalog, ControlError> {
     let mut catalog = Catalog::default();
-    for (_, descriptor) in kv
-        .hgetall_json::<OpDescriptor>(keys::CLUSTER_CATALOG)
-        .await?
-    {
+    for (_, descriptor) in kv.hgetall_json::<OpDescriptor>(keys::CLUSTER_CATALOG).await? {
         catalog.insert(descriptor);
     }
     Ok(catalog)
@@ -76,13 +71,8 @@ pub async fn load_index(kv: &dyn Kv) -> Result<Vec<GraphIndexEntry>, ControlErro
 }
 
 /// One graph's index entry, if it exists.
-pub async fn load_index_entry(
-    kv: &dyn Kv,
-    graph: &GraphKey,
-) -> Result<Option<GraphIndexEntry>, ControlError> {
-    Ok(kv
-        .hget_json(keys::CLUSTER_GRAPHS, &graph.to_string())
-        .await?)
+pub async fn load_index_entry(kv: &dyn Kv, graph: &GraphKey) -> Result<Option<GraphIndexEntry>, ControlError> {
+    Ok(kv.hget_json(keys::CLUSTER_GRAPHS, &graph.to_string()).await?)
 }
 
 /// Stored description of a graph.
@@ -96,10 +86,7 @@ pub async fn load_plan(kv: &dyn Kv, graph: &GraphKey) -> Result<Option<GraphPlan
 }
 
 /// Stored desired state of a graph.
-pub async fn load_desired(
-    kv: &dyn Kv,
-    graph: &GraphKey,
-) -> Result<Option<DesiredState>, ControlError> {
+pub async fn load_desired(kv: &dyn Kv, graph: &GraphKey) -> Result<Option<DesiredState>, ControlError> {
     Ok(kv.get_json(&keys::graph_desired(graph)).await?)
 }
 
@@ -110,9 +97,7 @@ pub async fn load_placement(kv: &dyn Kv) -> Result<Option<Placement>, ControlErr
 
 /// Every member of `cluster:members` joined with its metrics snapshot
 /// (`None` when it published none or an undecodable one), sorted by worker id.
-pub async fn load_member_reports(
-    kv: &dyn Kv,
-) -> Result<Vec<(MemberInfo, Option<WorkerSnapshot>)>, ControlError> {
+pub async fn load_member_reports(kv: &dyn Kv) -> Result<Vec<(MemberInfo, Option<WorkerSnapshot>)>, ControlError> {
     let mut members: Vec<MemberInfo> = kv
         .hgetall_json::<MemberInfo>(keys::CLUSTER_MEMBERS)
         .await?
@@ -156,24 +141,16 @@ async fn live_entry(kv: &dyn Kv, graph: &GraphKey) -> Result<GraphIndexEntry, Co
         .await?
         .ok_or_else(|| not_found_graph(graph))?;
     if entry.deleting {
-        return Err(ControlError::Invalid(format!(
-            "graph `{graph}` is being deleted"
-        )));
+        return Err(ControlError::Invalid(format!("graph `{graph}` is being deleted")));
     }
     Ok(entry)
 }
 
-async fn desired_or_default(
-    kv: &dyn Kv,
-    graph: &GraphKey,
-    clock: &dyn Clock,
-) -> Result<DesiredState, ControlError> {
-    Ok(load_desired(kv, graph)
-        .await?
-        .unwrap_or_else(|| DesiredState {
-            updated_ms: clock.now_ms(),
-            ..DesiredState::default()
-        }))
+async fn desired_or_default(kv: &dyn Kv, graph: &GraphKey, clock: &dyn Clock) -> Result<DesiredState, ControlError> {
+    Ok(load_desired(kv, graph).await?.unwrap_or_else(|| DesiredState {
+        updated_ms: clock.now_ms(),
+        ..DesiredState::default()
+    }))
 }
 
 async fn save_desired(
@@ -188,19 +165,13 @@ async fn save_desired(
 }
 
 /// Validate `spec`, then store it as `previous version + 1`.
-async fn store_spec(
-    kv: &dyn Kv,
-    clock: &dyn Clock,
-    mut spec: GraphSpec,
-) -> Result<u64, ControlError> {
+async fn store_spec(kv: &dyn Kv, clock: &dyn Clock, mut spec: GraphSpec) -> Result<u64, ControlError> {
     let catalog = load_catalog(kv).await?;
     Topology::build(&spec, &catalog).map_err(|e| ControlError::Invalid(e.to_string()))?;
     let key = spec.key();
     let entry = load_index_entry(kv, &key).await?;
     if entry.as_ref().is_some_and(|entry| entry.deleting) {
-        return Err(ControlError::Invalid(format!(
-            "graph `{key}` is being deleted"
-        )));
+        return Err(ControlError::Invalid(format!("graph `{key}` is being deleted")));
     }
     let stored_version = match load_spec(kv, &key).await {
         Ok(stored) => stored.map_or(0, |stored| stored.version),
@@ -228,8 +199,7 @@ async fn store_spec(
         updated_ms: now,
         deleting: false,
     };
-    kv.hset_json(keys::CLUSTER_GRAPHS, &key.to_string(), &entry)
-        .await?;
+    kv.hset_json(keys::CLUSTER_GRAPHS, &key.to_string(), &entry).await?;
     bump_epoch(kv).await?;
     Ok(version)
 }
@@ -237,21 +207,13 @@ async fn store_spec(
 /// Validate a description against the catalog and store it. Returns the new
 /// version (`previous + 1`, 1 for a new graph). Writes the spec, the index
 /// entry, the desired state (`running`) when absent, then bumps the epoch.
-pub async fn apply_graph(
-    kv: &dyn Kv,
-    clock: &dyn Clock,
-    spec: GraphSpec,
-) -> Result<u64, ControlError> {
+pub async fn apply_graph(kv: &dyn Kv, clock: &dyn Clock, spec: GraphSpec) -> Result<u64, ControlError> {
     store_spec(kv, clock, spec).await
 }
 
 /// Stop a graph and mark it for deletion: desired state `stopped`, index
 /// entry `deleting`. The controller removes the rest.
-pub async fn delete_graph(
-    kv: &dyn Kv,
-    clock: &dyn Clock,
-    graph: &GraphKey,
-) -> Result<(), ControlError> {
+pub async fn delete_graph(kv: &dyn Kv, clock: &dyn Clock, graph: &GraphKey) -> Result<(), ControlError> {
     let mut entry = load_index_entry(kv, graph)
         .await?
         .ok_or_else(|| not_found_graph(graph))?;
@@ -260,18 +222,12 @@ pub async fn delete_graph(
     save_desired(kv, graph, clock, desired).await?;
     entry.deleting = true;
     entry.updated_ms = clock.now_ms();
-    kv.hset_json(keys::CLUSTER_GRAPHS, &graph.to_string(), &entry)
-        .await?;
+    kv.hset_json(keys::CLUSTER_GRAPHS, &graph.to_string(), &entry).await?;
     bump_epoch(kv).await
 }
 
 /// Change the desired run state of a graph.
-pub async fn set_state(
-    kv: &dyn Kv,
-    clock: &dyn Clock,
-    graph: &GraphKey,
-    state: RunState,
-) -> Result<(), ControlError> {
+pub async fn set_state(kv: &dyn Kv, clock: &dyn Clock, graph: &GraphKey, state: RunState) -> Result<(), ControlError> {
     live_entry(kv, graph).await?;
     let mut desired = desired_or_default(kv, graph, clock).await?;
     desired.state = state;
@@ -279,14 +235,8 @@ pub async fn set_state(
     bump_epoch(kv).await
 }
 
-async fn spec_with_node(
-    kv: &dyn Kv,
-    graph: &GraphKey,
-    node: &NodeId,
-) -> Result<GraphSpec, ControlError> {
-    let spec = load_spec(kv, graph)
-        .await?
-        .ok_or_else(|| not_found_graph(graph))?;
+async fn spec_with_node(kv: &dyn Kv, graph: &GraphKey, node: &NodeId) -> Result<GraphSpec, ControlError> {
+    let spec = load_spec(kv, graph).await?.ok_or_else(|| not_found_graph(graph))?;
     if spec.node(node).is_none() {
         return Err(ControlError::NotFound(format!(
             "unknown node `{node}` in graph `{graph}`"

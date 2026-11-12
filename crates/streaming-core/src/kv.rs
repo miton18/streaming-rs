@@ -8,14 +8,17 @@
 //! Every error must be treated as *outcome unknown*: the command may or may
 //! not have been applied. Callers are written to be safe under blind retry.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 
 /// A KV failure. The outcome of the failed command is unknown.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -86,11 +89,7 @@ impl dyn Kv {
     }
 
     /// `HGET` then decode JSON.
-    pub async fn hget_json<T: DeserializeOwned>(
-        &self,
-        key: &str,
-        field: &str,
-    ) -> Result<Option<T>, KvError> {
+    pub async fn hget_json<T: DeserializeOwned>(&self, key: &str, field: &str) -> Result<Option<T>, KvError> {
         match self.hget(key, field).await? {
             Some(bytes) => decode_json(key, &bytes).map(Some),
             None => Ok(None),
@@ -98,30 +97,17 @@ impl dyn Kv {
     }
 
     /// Encode JSON then `HSET` one field.
-    pub async fn hset_json<T: Serialize + Sync>(
-        &self,
-        key: &str,
-        field: &str,
-        value: &T,
-    ) -> Result<(), KvError> {
-        self.hset(key, vec![(field.to_owned(), encode_json(key, value)?)])
-            .await
+    pub async fn hset_json<T: Serialize + Sync>(&self, key: &str, field: &str, value: &T) -> Result<(), KvError> {
+        self.hset(key, vec![(field.to_owned(), encode_json(key, value)?)]).await
     }
 
     /// `HGETALL` then decode every value as JSON. Undecodable fields are skipped.
-    pub async fn hgetall_json<T: DeserializeOwned>(
-        &self,
-        key: &str,
-    ) -> Result<Vec<(String, T)>, KvError> {
+    pub async fn hgetall_json<T: DeserializeOwned>(&self, key: &str) -> Result<Vec<(String, T)>, KvError> {
         Ok(self
             .hgetall(key)
             .await?
             .into_iter()
-            .filter_map(|(field, bytes)| {
-                serde_json::from_slice(&bytes)
-                    .ok()
-                    .map(|value| (field, value))
-            })
+            .filter_map(|(field, bytes)| serde_json::from_slice(&bytes).ok().map(|value| (field, value)))
             .collect())
     }
 }
@@ -242,9 +228,7 @@ impl Kv for MemKv {
 
     async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> {
         self.write();
-        self.entries
-            .lock()
-            .insert(key.to_owned(), Entry::Str(value));
+        self.entries.lock().insert(key.to_owned(), Entry::Str(value));
         Ok(())
     }
 
@@ -355,8 +339,9 @@ impl Kv for MemKv {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use futures::executor::block_on;
+
+    use super::*;
 
     #[test]
     fn hsetnx_is_a_compare_and_set() {
@@ -376,16 +361,11 @@ mod tests {
             assert_eq!(kv.incr("epoch").await.unwrap(), 2);
             kv.set("s", b"x".to_vec()).await.unwrap();
             assert!(kv.hget("s", "f").await.is_err());
-            kv.hset(
-                "h",
-                vec![("a".into(), b"1".to_vec()), ("b".into(), b"2".to_vec())],
-            )
-            .await
-            .unwrap();
-            assert_eq!(kv.hgetall("h").await.unwrap().len(), 2);
-            kv.hdel("h", vec!["a".into(), "b".into(), "zzz".into()])
+            kv.hset("h", vec![("a".into(), b"1".to_vec()), ("b".into(), b"2".to_vec())])
                 .await
                 .unwrap();
+            assert_eq!(kv.hgetall("h").await.unwrap().len(), 2);
+            kv.hdel("h", vec!["a".into(), "b".into(), "zzz".into()]).await.unwrap();
             assert!(!kv.keys().contains(&"h".to_owned()));
             kv.del(vec!["s".into(), "missing".into()]).await.unwrap();
             assert_eq!(kv.get("s").await.unwrap(), None);
@@ -397,10 +377,7 @@ mod tests {
         block_on(async {
             let kv: DynKv = MemKv::shared();
             kv.set_json("doc", &vec![1, 2, 3]).await.unwrap();
-            assert_eq!(
-                kv.get_json::<Vec<i32>>("doc").await.unwrap(),
-                Some(vec![1, 2, 3])
-            );
+            assert_eq!(kv.get_json::<Vec<i32>>("doc").await.unwrap(), Some(vec![1, 2, 3]));
             kv.set("bad", b"{".to_vec()).await.unwrap();
             assert!(matches!(
                 kv.get_json::<Vec<i32>>("bad").await,

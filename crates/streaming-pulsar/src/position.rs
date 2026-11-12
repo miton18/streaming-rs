@@ -86,10 +86,7 @@ mod tests {
         // An empty partition: entry -1 on the wire, u64::MAX here.
         assert_eq!(end_position_of(&id(12, u64::MAX, -1, -1)), None);
         assert_eq!(end_position_of(&MessageId::EARLIEST), None);
-        assert_eq!(
-            end_position_of(&id(12, 4, -1, -1)),
-            Some(Position(12, 4, 0))
-        );
+        assert_eq!(end_position_of(&id(12, 4, -1, -1)), Some(Position(12, 4, 0)));
         // The last member of a batch is at or after every member already read.
         let end = end_position_of(&id(12, 5, 2, 3)).unwrap();
         assert_eq!(end, position_of(&id(12, 5, 2, 3)));

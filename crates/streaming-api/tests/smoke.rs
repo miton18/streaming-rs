@@ -22,11 +22,7 @@ async fn serves_over_tcp_and_shuts_down() {
     }));
 
     let client = reqwest::Client::new();
-    let health = client
-        .get(format!("http://{addr}/healthz"))
-        .send()
-        .await
-        .unwrap();
+    let health = client.get(format!("http://{addr}/healthz")).send().await.unwrap();
     assert_eq!(health.status(), 200);
     assert_eq!(health.text().await.unwrap(), "ok");
 

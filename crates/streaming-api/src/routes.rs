@@ -1,19 +1,26 @@
 //! HTTP handlers.
 
-use axum::Router;
-use axum::body::Bytes;
-use axum::extract::{Path, RawQuery, State};
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::{
+    Router,
+    body::Bytes,
+    extract::{Path, RawQuery, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use streaming_core::control::{GraphIndexEntry, OutputRow, RunState};
-use streaming_core::{Catalog, GraphId, GraphKey, GraphSpec, NodeId, TenantId, keys};
+use streaming_core::{
+    Catalog, GraphId, GraphKey, GraphSpec, NodeId, TenantId,
+    control::{GraphIndexEntry, OutputRow, RunState},
+    keys,
+};
 
-use crate::ApiState;
-use crate::control::{self, ControlError};
-use crate::status::{self, GraphDetail, MemberReport};
+use crate::{
+    ApiState,
+    control::{self, ControlError},
+    status::{self, GraphDetail, MemberReport},
+};
 
 /// Error answered as `{"error": "<message>"}`.
 #[derive(Debug)]
@@ -90,11 +97,7 @@ impl Context {
     }
 }
 
-async fn detail(
-    state: &ApiState,
-    context: &Context,
-    key: &GraphKey,
-) -> Result<Option<GraphDetail>, ApiError> {
+async fn detail(state: &ApiState, context: &Context, key: &GraphKey) -> Result<Option<GraphDetail>, ApiError> {
     let kv = &*state.kv;
     let Some(spec) = control::load_spec(kv, key).await? else {
         return Ok(None);
@@ -144,10 +147,7 @@ async fn tenants(State(state): State<ApiState>) -> ApiResult<status::TenantsView
     )))
 }
 
-async fn tenant_graphs(
-    State(state): State<ApiState>,
-    Path(tenant): Path<String>,
-) -> ApiResult<status::GraphsView> {
+async fn tenant_graphs(State(state): State<ApiState>, Path(tenant): Path<String>) -> ApiResult<status::GraphsView> {
     let tenant = TenantId::new(tenant)?;
     let entries: Vec<GraphIndexEntry> = control::load_index(&*state.kv)
         .await?
@@ -171,17 +171,12 @@ async fn tenant_graphs(
 /// The detail of a graph, or 404 when it is not in the index.
 async fn existing_detail(state: &ApiState, key: &GraphKey) -> Result<GraphDetail, ApiError> {
     let unknown = || ApiError::not_found(format!("unknown graph `{key}`"));
-    control::load_index_entry(&*state.kv, key)
-        .await?
-        .ok_or_else(unknown)?;
+    control::load_index_entry(&*state.kv, key).await?.ok_or_else(unknown)?;
     let context = Context::load(state).await?;
     detail(state, &context, key).await?.ok_or_else(unknown)
 }
 
-async fn graph(
-    State(state): State<ApiState>,
-    Path((tenant, graph)): Path<(String, String)>,
-) -> ApiResult<GraphDetail> {
+async fn graph(State(state): State<ApiState>, Path((tenant, graph)): Path<(String, String)>) -> ApiResult<GraphDetail> {
     let key = graph_key(&tenant, &graph)?;
     Ok(axum::Json(existing_detail(&state, &key).await?))
 }
@@ -228,9 +223,7 @@ async fn outputs(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("unknown graph `{key}`")))?;
     if spec.node(&node).is_none() {
-        return Err(ApiError::not_found(format!(
-            "unknown node `{node}` in graph `{key}`"
-        )));
+        return Err(ApiError::not_found(format!("unknown node `{node}` in graph `{key}`")));
     }
     let mut rows: Vec<OutputRow> = state
         .kv
@@ -302,17 +295,11 @@ async fn set_paused(
     Ok(axum::Json(json!({ "node": node, "paused": paused })))
 }
 
-async fn pause(
-    State(state): State<ApiState>,
-    Path(path): Path<(String, String, String)>,
-) -> ApiResult<Value> {
+async fn pause(State(state): State<ApiState>, Path(path): Path<(String, String, String)>) -> ApiResult<Value> {
     set_paused(state, path, true).await
 }
 
-async fn resume(
-    State(state): State<ApiState>,
-    Path(path): Path<(String, String, String)>,
-) -> ApiResult<Value> {
+async fn resume(State(state): State<ApiState>, Path(path): Path<(String, String, String)>) -> ApiResult<Value> {
     set_paused(state, path, false).await
 }
 

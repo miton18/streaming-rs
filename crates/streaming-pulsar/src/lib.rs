@@ -105,17 +105,15 @@ mod source;
 
 use std::sync::Arc;
 
-use moonpool_core::Providers;
-use streaming_core::{ParamSpec, Registry, SinkConnector, SourceConnector, TypeTag};
-
 pub use config::{
-    ConnectionSettings, DedupConfig, EventTimeMode, InitialPosition, ServiceUrl, SinkConfig,
-    SourceConfig,
+    ConnectionSettings, DedupConfig, EventTimeMode, InitialPosition, ServiceUrl, SinkConfig, SourceConfig,
 };
+use moonpool_core::Providers;
 pub use position::{end_position_of, partition_topic, position_of};
 pub use sequence::{SequenceLayout, SequenceState};
 pub use sink::{EMIT_ID_PROPERTY, PulsarOutput, PulsarSink, WriteStats, producer_name_for, route};
 pub use source::{PulsarMessage, PulsarSource};
+use streaming_core::{ParamSpec, Registry, SinkConnector, SourceConnector, TypeTag};
 
 /// Reference of the source operator.
 pub const SOURCE_OP: &str = "std/pulsar-source@1";
@@ -129,10 +127,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
         "Reads a Pulsar topic through a durable Failover subscription, one slice per partition.",
         |context, config| {
             let config = SourceConfig::from_json(context, config)?;
-            Ok(
-                Arc::new(PulsarSource::new(context.providers.clone(), config))
-                    as Arc<dyn SourceConnector>,
-            )
+            Ok(Arc::new(PulsarSource::new(context.providers.clone(), config)) as Arc<dyn SourceConnector>)
         },
     );
     registry.register_sink(
@@ -142,8 +137,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
         TypeTag::of::<PulsarOutput>(),
         |context, config| {
             let config = SinkConfig::from_json(context, config)?;
-            Ok(Arc::new(PulsarSink::new(context.providers.clone(), config))
-                as Arc<dyn SinkConnector>)
+            Ok(Arc::new(PulsarSink::new(context.providers.clone(), config)) as Arc<dyn SinkConnector>)
         },
     );
     registry.with_params(SOURCE_OP, source_params());
@@ -261,13 +255,13 @@ fn sink_params() -> Vec<ParamSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use moonpool_core::TokioProviders;
     use serde_json::{Value, json};
     use streaming_core::{
-        GraphId, NodeId, OpContext, OpError, OpFactory, OpKind, OpRef, StaticSecrets, SystemClock,
-        TenantId,
+        GraphId, NodeId, OpContext, OpError, OpFactory, OpKind, OpRef, StaticSecrets, SystemClock, TenantId,
     };
+
+    use super::*;
 
     fn context() -> OpContext<TokioProviders> {
         let tenant = TenantId::new("acme").unwrap();
@@ -302,22 +296,17 @@ mod tests {
         assert_eq!(snk.input, TypeTag::of::<PulsarOutput>());
 
         // Factories validate the configuration without connecting.
-        let Some((_, OpFactory::Source(factory))) = registry.get(&OpRef::new(SOURCE_OP).unwrap())
-        else {
+        let Some((_, OpFactory::Source(factory))) = registry.get(&OpRef::new(SOURCE_OP).unwrap()) else {
             panic!("not a source");
         };
         let ok = json!({"service_url": "pulsar://localhost:6650",
                         "topic": "persistent://public/default/t", "subscription": "s"});
         assert!(factory(&context(), &ok).is_ok());
         assert!(matches!(
-            factory(
-                &context(),
-                &json!({"topic": "persistent://public/default/t"})
-            ),
+            factory(&context(), &json!({"topic": "persistent://public/default/t"})),
             Err(OpError::Config(_))
         ));
-        let Some((_, OpFactory::Sink(factory))) = registry.get(&OpRef::new(SINK_OP).unwrap())
-        else {
+        let Some((_, OpFactory::Sink(factory))) = registry.get(&OpRef::new(SINK_OP).unwrap()) else {
             panic!("not a sink");
         };
         assert!(
@@ -398,8 +387,7 @@ mod tests {
 
     #[test]
     fn sink_config() {
-        let config =
-            sink(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t"})).unwrap();
+        let config = sink(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t"})).unwrap();
         assert_eq!(config.producer_name, None);
         assert_eq!(config.dedup, None);
         assert_eq!(config.send_timeout_ms, 30_000);
@@ -415,58 +403,41 @@ mod tests {
 
         // Deduplication needs a stable producer name and a layout that fits.
         assert!(matches!(
-            sink(
-                &json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
-                         "broker_dedup": {"position_bits": [24, 24, 7]}})
-            ),
+            sink(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
+                         "broker_dedup": {"position_bits": [24, 24, 7]}})),
             Err(OpError::Config(_))
         ));
         assert!(matches!(
-            sink(
-                &json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
+            sink(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
                          "producer_name": "w",
-                         "broker_dedup": {"position_bits": [32, 24, 7], "index_bits": 8}})
-            ),
+                         "broker_dedup": {"position_bits": [32, 24, 7], "index_bits": 8}})),
             Err(OpError::Config(_))
         ));
         assert!(matches!(
-            sink(
-                &json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
-                         "producer_name": ""})
-            ),
+            sink(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
+                         "producer_name": ""})),
             Err(OpError::Config(_))
         ));
     }
 
     #[test]
     fn token_becomes_connect_auth() {
-        let config = source(
-            &json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
-                                    "subscription": "s", "token": "jwt"}),
-        )
+        let config = source(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
+                                    "subscription": "s", "token": "jwt"}))
         .unwrap();
         let connection = client::connection_config(&config.connection);
         assert_eq!(connection.auth_method_name, "token");
         assert_eq!(connection.auth_data.as_deref(), Some(b"jwt".as_slice()));
         assert!(connection.supervisor.is_some());
-        let anonymous = source(
-            &json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
-                                       "subscription": "s"}),
-        )
+        let anonymous = source(&json!({"service_url": "pulsar://b", "topic": "persistent://p/d/t",
+                                       "subscription": "s"}))
         .unwrap();
-        assert_eq!(
-            client::connection_config(&anonymous.connection).auth_data,
-            None
-        );
+        assert_eq!(client::connection_config(&anonymous.connection).auth_data, None);
     }
 
     /// A configuration made of the described parameters: `pick` decides
     /// which, with their default or else the sample value.
-    fn described(
-        params: &[ParamSpec],
-        samples: &Value,
-        pick: impl Fn(&ParamSpec) -> bool,
-    ) -> Value {
+    fn described(params: &[ParamSpec], samples: &Value, pick: impl Fn(&ParamSpec) -> bool) -> Value {
         let mut config = json!({});
         for p in params.iter().filter(|p| pick(p)) {
             let value = p
@@ -489,19 +460,10 @@ mod tests {
     ) {
         let mut registry = Registry::<TokioProviders>::empty();
         register(&mut registry);
-        let params = registry
-            .catalog()
-            .get(&OpRef::new(op).unwrap())
-            .unwrap()
-            .params
-            .clone();
+        let params = registry.catalog().get(&OpRef::new(op).unwrap()).unwrap().params.clone();
         assert!(!params.is_empty(), "{op} describes no parameter");
         for p in &params {
-            assert!(
-                !p.description.is_empty(),
-                "{op}: `{}` is not described",
-                p.name
-            );
+            assert!(!p.description.is_empty(), "{op}: `{}` is not described", p.name);
         }
         let everything = described(&params, samples, |_| true);
         parse(&everything).unwrap_or_else(|e| panic!("{op}: {e}"));
@@ -516,11 +478,7 @@ mod tests {
         for p in params.iter().filter(|p| p.required) {
             let mut config = required.clone();
             config.as_object_mut().unwrap().remove(&p.name);
-            assert!(
-                parse(&config).is_err(),
-                "{op}: `{}` is not required",
-                p.name
-            );
+            assert!(parse(&config).is_err(), "{op}: `{}` is not required", p.name);
         }
         for p in &params {
             for choice in &p.choices {

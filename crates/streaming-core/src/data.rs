@@ -5,16 +5,14 @@
 //! type-erased values ([`Datum`]); the registry checks type compatibility when
 //! a graph is submitted, and operators downcast on the hot path.
 
-use std::any::Any;
-use std::fmt;
-use std::str::FromStr;
-use std::sync::Arc;
+use std::{any::Any, fmt, str::FromStr, sync::Arc};
 
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::ids::SliceId;
-use crate::time::{Timestamp, Window};
+use crate::{
+    ids::SliceId,
+    time::{Timestamp, Window},
+};
 
 /// A type-erased, cheaply clonable value.
 pub type Datum = Arc<dyn Any + Send + Sync>;
@@ -176,10 +174,7 @@ impl Origin {
     /// Origin of a record freshly read from a source.
     #[must_use]
     pub fn source(position: Position) -> Self {
-        Self {
-            position,
-            lineage: 0,
-        }
+        Self { position, lineage: 0 }
     }
 
     /// Origin of the `index`-th output produced by node `node_hash` from a
@@ -253,10 +248,7 @@ impl EmitId {
     /// Build the id of a record emitted by a slice.
     #[must_use]
     pub fn new(slice: &SliceId, origin: &Origin) -> Self {
-        Self(format!(
-            "{slice}/{}/{:016x}",
-            origin.position, origin.lineage
-        ))
+        Self(format!("{slice}/{}/{:016x}", origin.position, origin.lineage))
     }
 
     /// The id as a string.
@@ -350,10 +342,7 @@ mod tests {
         let json = serde_json::to_string(&position).unwrap();
         assert_eq!(json, "\"18446744073709551615.9223372036854775808.3\"");
         assert_eq!(serde_json::from_str::<Position>(&json).unwrap(), position);
-        assert_eq!(
-            serde_json::from_str::<Position>("[7,8,9]").unwrap(),
-            Position(7, 8, 9)
-        );
+        assert_eq!(serde_json::from_str::<Position>("[7,8,9]").unwrap(), Position(7, 8, 9));
         let small = Position(0, 5, 0);
         let bytes = postcard::to_allocvec(&small).unwrap();
         assert_eq!(bytes, [0, 5, 0]);

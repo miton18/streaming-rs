@@ -8,12 +8,8 @@ mod common;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common::{
-    NodeParams, Registry, builder_with, check_report, convergence_gap, fail, seeds, sleep,
-};
-use moonpool_sim::{
-    SimContext, SimulationResult, TimeProvider, Workload, assert_always, assert_sometimes,
-};
+use common::{NodeParams, Registry, builder_with, check_report, convergence_gap, fail, seeds, sleep};
+use moonpool_sim::{SimContext, SimulationResult, TimeProvider, Workload, assert_always, assert_sometimes};
 
 const N: usize = 4;
 
@@ -41,8 +37,7 @@ impl Workload for IsolationWorkload {
         loop {
             sleep(ctx, Duration::from_millis(200)).await?;
             let all = self.registry.live();
-            let (foreign, cluster): (Vec<_>, Vec<_>) =
-                all.into_iter().partition(|(ip, _)| *ip == foreign_ip);
+            let (foreign, cluster): (Vec<_>, Vec<_>) = all.into_iter().partition(|(ip, _)| *ip == foreign_ip);
             for (ip, g) in &cluster {
                 let knows_foreign = g
                     .members()
@@ -58,17 +53,12 @@ impl Workload for IsolationWorkload {
                 .chain(&foreign)
                 .map(|(_, g)| g.stats().cluster_mismatches)
                 .sum();
-            if ctx.time().now() - start > Duration::from_secs(10)
-                && convergence_gap(&cluster, N - 1).is_none()
-            {
+            if ctx.time().now() - start > Duration::from_secs(10) && convergence_gap(&cluster, N - 1).is_none() {
                 assert_sometimes!(mismatches > 0, "cluster id mismatch refused");
                 return Ok(());
             }
             if ctx.time().now() - start > Duration::from_secs(60) {
-                return Err(fail(format!(
-                    "no convergence: {:?}",
-                    convergence_gap(&cluster, N - 1)
-                )));
+                return Err(fail(format!("no convergence: {:?}", convergence_gap(&cluster, N - 1))));
             }
         }
     }

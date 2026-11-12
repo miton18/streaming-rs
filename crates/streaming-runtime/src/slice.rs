@@ -7,36 +7,38 @@
 //! epoch, the *commit* actor writes the epoch to the KV in one field. The root
 //! only acknowledges its input once the epoch is committed.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::future::Future;
-use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    future::Future,
+    panic::AssertUnwindSafe,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use futures::FutureExt;
 use moonpool_core::{Providers, TaskProvider, TimeProvider};
 use parking_lot::Mutex;
-use streaming_core::control::{ActorKind, ActorState, GraphPlan, RunState};
-use streaming_core::data::hash_str;
-use streaming_core::ops::DynAcc;
-use streaming_core::spec::GraphSettings;
 use streaming_core::{
-    DynAggregator, DynKey, DynMap, Emit, EmitId, Key, KvError, NodeId, OpContext, OpError,
-    OpFactory, OpKind, Origin, PartitionReader, Position, Record, SinkConnector, SliceId, SliceKey,
-    SourceConnector, Timestamp, Topology, Window, WindowAssigner, WorkerId,
+    DynAggregator, DynKey, DynMap, Emit, EmitId, Key, KvError, NodeId, OpContext, OpError, OpFactory, OpKind, Origin,
+    PartitionReader, Position, Record, SinkConnector, SliceId, SliceKey, SourceConnector, Timestamp, Topology, Window,
+    WindowAssigner, WorkerId,
+    control::{ActorKind, ActorState, GraphPlan, RunState},
+    data::hash_str,
+    ops::DynAcc,
+    spec::GraphSettings,
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::RuntimeEnv;
-use crate::mailbox::{Barrier, Input, Inputs, Msg, Outputs};
-use crate::metrics::{ActorIdent, ActorMetrics, Meter, SliceMetrics, ts_key};
-use crate::mutation::{Mutant, planted};
-use crate::scope::TaskScope;
-use crate::state::{
-    self, CommitOutcome, CommitRecord, NO_WATERMARK, NodeChanges, StateEntry, StateError,
-    WindowChanges, emitted,
+use crate::{
+    RuntimeEnv,
+    mailbox::{Barrier, Input, Inputs, Msg, Outputs},
+    metrics::{ActorIdent, ActorMetrics, Meter, SliceMetrics, ts_key},
+    mutation::{Mutant, planted},
+    scope::TaskScope,
+    state::{
+        self, CommitOutcome, CommitRecord, NO_WATERMARK, NodeChanges, StateEntry, StateError, WindowChanges, emitted,
+    },
 };
 
 const MIN_BACKOFF: Duration = Duration::from_millis(50);
@@ -226,11 +228,7 @@ fn context<P: Providers>(env: &RuntimeEnv<P>, key: &SliceKey, node: &NodeId) -> 
     }
 }
 
-fn lateness_of<P: Providers>(
-    env: &RuntimeEnv<P>,
-    topology: &Topology,
-    aggregate: &NodeId,
-) -> Result<i64, OpError> {
+fn lateness_of<P: Providers>(env: &RuntimeEnv<P>, topology: &Topology, aggregate: &NodeId) -> Result<i64, OpError> {
     let window = topology
         .inputs
         .get(aggregate)
@@ -241,9 +239,7 @@ fn lateness_of<P: Providers>(
         .node(window)
         .ok_or_else(|| OpError::Config(format!("unknown node `{window}`")))?;
     match env.registry.get(&spec.op) {
-        Some((_, OpFactory::Window(factory))) => {
-            Ok(factory(&spec.config)?.allowed_lateness().as_millis() as i64)
-        }
+        Some((_, OpFactory::Window(factory))) => Ok(factory(&spec.config)?.allowed_lateness().as_millis() as i64),
         _ => Err(OpError::Config(format!(
             "`{window}` is not a window operator known to this worker"
         ))),
@@ -261,16 +257,12 @@ fn build_op<P: Providers>(
         .spec
         .node(node)
         .ok_or_else(|| OpError::Config(format!("unknown node `{node}`")))?;
-    let (_, factory) = env.registry.get(&spec.op).ok_or_else(|| {
-        OpError::Config(format!(
-            "operator `{}` is not compiled into this worker",
-            spec.op
-        ))
-    })?;
+    let (_, factory) = env
+        .registry
+        .get(&spec.op)
+        .ok_or_else(|| OpError::Config(format!("operator `{}` is not compiled into this worker", spec.op)))?;
     Ok(match factory {
-        OpFactory::Source(factory) => {
-            NodeOp::Source(factory(&context(env, key, node), &spec.config)?)
-        }
+        OpFactory::Source(factory) => NodeOp::Source(factory(&context(env, key, node), &spec.config)?),
         OpFactory::Sink(factory) => NodeOp::Sink(factory(&context(env, key, node), &spec.config)?),
         OpFactory::Map(factory) => NodeOp::Map(factory(&spec.config)?),
         OpFactory::Key(factory) => NodeOp::Key(factory(&spec.config)?),
@@ -319,12 +311,7 @@ impl<P: Providers> ActorCtx<P> {
     /// Suspend while the node is paused by the control plane.
     async fn wait_unpaused(&mut self) {
         loop {
-            if !self
-                .control
-                .borrow_and_update()
-                .paused_nodes
-                .contains(&self.node)
-            {
+            if !self.control.borrow_and_update().paused_nodes.contains(&self.node) {
                 self.meter.metrics.set_state(ActorState::Running);
                 return;
             }
@@ -400,10 +387,7 @@ async fn run_aggregate<P: Providers>(
                         )));
                     };
                     if is_closed(&window, lateness_ms, watermark) {
-                        ctx.meter
-                            .metrics
-                            .late_dropped
-                            .fetch_add(1, Ordering::Relaxed);
+                        ctx.meter.metrics.late_dropped.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     let slot = state
@@ -496,9 +480,7 @@ async fn run_sink<P: Providers>(
                 ctx.meter.records_out(batch.len());
             }
             Input::Barrier(barrier) => {
-                let _ = commits.send(Contribution::Ack {
-                    epoch: barrier.epoch,
-                });
+                let _ = commits.send(Contribution::Ack { epoch: barrier.epoch });
             }
         }
     }
@@ -531,11 +513,7 @@ impl<P: Providers> Root<P> {
     fn settle(&mut self) -> Option<Position> {
         let committed = *self.committed.borrow_and_update();
         let mut position = None;
-        while self
-            .in_flight
-            .front()
-            .is_some_and(|(epoch, _)| *epoch <= committed)
-        {
+        while self.in_flight.front().is_some_and(|(epoch, _)| *epoch <= committed) {
             if let Some((_, Some(covered))) = self.in_flight.pop_front() {
                 position = Some(covered);
             }
@@ -625,11 +603,7 @@ impl<P: Providers> Root<P> {
                 continue;
             }
             let kv = self.ctx.env.kv.as_ref();
-            let Ok(log) = self
-                .ctx
-                .persist(|| state::read_log(kv, &gate.emitter))
-                .await
-            else {
+            let Ok(log) = self.ctx.persist(|| state::read_log(kv, &gate.emitter)).await else {
                 continue;
             };
             let upto = log.head().and_then(|head| head.position);
@@ -648,12 +622,7 @@ impl<P: Providers> Root<P> {
 
     /// Emit one epoch: its header to the commit actor, its records and its
     /// barrier downstream.
-    async fn emit(
-        &mut self,
-        records: Vec<Record>,
-        position: Option<Position>,
-        watermark: Timestamp,
-    ) {
+    async fn emit(&mut self, records: Vec<Record>, position: Option<Position>, watermark: Timestamp) {
         self.epoch += 1;
         let epoch = self.epoch;
         let _ = self.commits.send(Contribution::Header {
@@ -671,10 +640,7 @@ impl<P: Providers> Root<P> {
         while !records.is_empty() {
             let rest = records.split_off(chunk.min(records.len()));
             self.outputs
-                .send(
-                    &self.ctx.meter,
-                    Msg::Records(std::mem::replace(&mut records, rest)),
-                )
+                .send(&self.ctx.meter, Msg::Records(std::mem::replace(&mut records, rest)))
                 .await;
         }
         self.outputs
@@ -792,8 +758,7 @@ async fn run_source<P: Providers>(
         if polled.is_empty() {
             let now = root.ctx.env.providers.time().now();
             let since = *idle_since.get_or_insert(now);
-            let due =
-                last_idle_epoch.is_none_or(|at| now.saturating_sub(at) >= idle_epoch_interval);
+            let due = last_idle_epoch.is_none_or(|at| now.saturating_sub(at) >= idle_epoch_interval);
             if root.stateful && now.saturating_sub(since) >= settings.idle_timeout && due {
                 match open.end_position().await {
                     Ok(end) => {
@@ -805,8 +770,7 @@ async fn run_source<P: Providers>(
                         if caught_up {
                             // Nothing left to read and nothing arrived for a while: let
                             // event time follow the wall clock so windows can close.
-                            new_watermark = watermark
-                                .max(root.ctx.env.clock.now_ms().saturating_sub(out_of_orderness));
+                            new_watermark = watermark.max(root.ctx.env.clock.now_ms().saturating_sub(out_of_orderness));
                         }
                     }
                     Err(error) => root.ctx.meter.metrics.error(error.to_string()),
@@ -896,10 +860,7 @@ async fn run_emitter<P: Providers>(
         let mut logs = Vec::with_capacity(feeding.len());
         let mut global = Timestamp::MAX;
         for (index, slice) in feeding.iter().enumerate() {
-            let log = root
-                .ctx
-                .persist(|| state::read_log(kv.as_ref(), slice))
-                .await?;
+            let log = root.ctx.persist(|| state::read_log(kv.as_ref(), slice)).await?;
             // A retired slice has stopped for good: its windows are waited
             // for, its watermark is not.
             if index < active {
@@ -926,18 +887,13 @@ async fn run_emitter<P: Providers>(
         // once; their index entry stays until no commit record has carried a
         // change to them for `gc_grace`, so that a write issued meanwhile by
         // an instance that lost the slice is deleted too (see `state`).
-        for (((slice, log), found), released) in
-            feeding.iter().zip(&logs).zip(&indexed).zip(&mut released)
-        {
+        for (((slice, log), found), released) in feeding.iter().zip(&logs).zip(&indexed).zip(&mut released) {
             let changing = state::pending_windows(&log.records, &node);
             released.retain(|window| found.contains_key(window));
             let mut release = Vec::new();
             let mut quiet = Vec::new();
             let mut forget = Vec::new();
-            for (window, since) in found
-                .iter()
-                .filter(|(window, _)| emitted(window, committed))
-            {
+            for (window, since) in found.iter().filter(|(window, _)| emitted(window, committed)) {
                 if !released.contains(window) {
                     release.push(*window);
                 }
@@ -1001,18 +957,12 @@ async fn run_emitter<P: Providers>(
             for (slice, log) in feeding.iter().zip(&logs) {
                 let partial = root
                     .ctx
-                    .persist(|| {
-                        state::read_window(kv.as_ref(), slice, &node, &window, &log.records)
-                    })
+                    .persist(|| state::read_window(kv.as_ref(), slice, &node, &window, &log.records))
                     .await?;
                 for (key, (bytes, _)) in partial {
-                    let acc = aggregator
-                        .decode(&bytes)
-                        .map_err(|e| root.ctx.op_error(e))?;
+                    let acc = aggregator.decode(&bytes).map_err(|e| root.ctx.op_error(e))?;
                     match merged.get_mut(&key) {
-                        Some(existing) => aggregator
-                            .merge(existing, &acc)
-                            .map_err(|e| root.ctx.op_error(e))?,
+                        Some(existing) => aggregator.merge(existing, &acc).map_err(|e| root.ctx.op_error(e))?,
                         None => {
                             merged.insert(key, acc);
                         }
@@ -1023,10 +973,7 @@ async fn run_emitter<P: Providers>(
             // emitted in our place meanwhile: another instance committing this
             // window would then delete the very state we were reading. Its
             // commit comes first, so checking the log after the read settles it.
-            let own = root
-                .ctx
-                .persist(|| state::read_log(kv.as_ref(), &root.ctx.key))
-                .await?;
+            let own = root.ctx.persist(|| state::read_log(kv.as_ref(), &root.ctx.key)).await?;
             let ours = match own.head() {
                 None => root.start_epoch == 0,
                 Some(head) => head.owner == root.owner || head.epoch == root.start_epoch,
@@ -1045,9 +992,7 @@ async fn run_emitter<P: Providers>(
                 if (index as u64) < resume {
                     continue;
                 }
-                let value = aggregator
-                    .finish(acc, window, key)
-                    .map_err(|e| root.ctx.op_error(e))?;
+                let value = aggregator.finish(acc, window, key).map_err(|e| root.ctx.op_error(e))?;
                 results.push((
                     index as u64,
                     Record {
@@ -1055,11 +1000,7 @@ async fn run_emitter<P: Providers>(
                         ts: window.end - 1,
                         key: Some(key.clone()),
                         window: Some(window),
-                        origin: Origin::source(Position(
-                            window_position.0,
-                            window_position.1,
-                            index as u64,
-                        )),
+                        origin: Origin::source(Position(window_position.0, window_position.1, index as u64)),
                     },
                 ));
             }
@@ -1137,14 +1078,11 @@ async fn copy_out<P: Providers>(
                     if ctx.now().saturating_sub(*proven) > validity {
                         let asked = ctx.now();
                         let view = ctx.persist(|| state::read_log(kv, &ctx.key)).await?;
-                        let ours = view
-                            .head()
-                            .is_some_and(|at| at.epoch == head && at.owner == owner);
+                        let ours = view.head().is_some_and(|at| at.epoch == head && at.owner == owner);
                         if !ours {
                             return Ok(false);
                         }
-                        let present: BTreeSet<u64> =
-                            view.records.iter().map(|record| record.epoch).collect();
+                        let present: BTreeSet<u64> = view.records.iter().map(|record| record.epoch).collect();
                         gone.extend(
                             records
                                 .iter()
@@ -1154,9 +1092,7 @@ async fn copy_out<P: Providers>(
                         *proven = asked;
                         continue;
                     }
-                    match state::materialize_window(kv, &ctx.key, &node.node, changes, record.epoch)
-                        .await
-                    {
+                    match state::materialize_window(kv, &ctx.key, &node.node, changes, record.epoch).await {
                         Ok(()) => {
                             backoff = MIN_BACKOFF;
                             break;
@@ -1227,9 +1163,7 @@ async fn run_committer<P: Providers>(
             Some(header) => entry.header = Some(header),
             None => {
                 entry.reports += 1;
-                entry
-                    .changes
-                    .extend(changes.filter(|c| !c.windows.is_empty()));
+                entry.changes.extend(changes.filter(|c| !c.windows.is_empty()));
             }
         }
 
@@ -1278,9 +1212,7 @@ async fn run_committer<P: Providers>(
                 live.push(next);
             } else {
                 let asked = ctx.now();
-                let view = ctx
-                    .persist(|| state::read_log(kv.as_ref(), &ctx.key))
-                    .await?;
+                let view = ctx.persist(|| state::read_log(kv.as_ref(), &ctx.key)).await?;
                 let ours = view
                     .head()
                     .is_some_and(|head| head.epoch == next && head.owner == owner);
@@ -1314,10 +1246,7 @@ async fn run_committer<P: Providers>(
             // stay, so that a worker left behind cannot take those epochs.
             // Best effort: what is not emptied now is at the next commit.
             heavy.extend(inherited.iter().map(|record| record.epoch));
-            if state::tombstone(kv.as_ref(), &ctx.key, &heavy)
-                .await
-                .is_ok()
-            {
+            if state::tombstone(kv.as_ref(), &ctx.key, &heavy).await.is_ok() {
                 heavy.clear();
             }
             if !record.changes.is_empty() {
@@ -1343,9 +1272,7 @@ async fn run_committer<P: Providers>(
             }
             slice.watermark.store(record.watermark, Ordering::Relaxed);
             slice.commits.fetch_add(1, Ordering::Relaxed);
-            slice
-                .commit_ns
-                .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+            slice.commit_ns.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
             ctx.meter.records_in(1);
             ctx.meter.records_out(1);
             let _ = committed.send(next);
@@ -1492,10 +1419,7 @@ async fn prepare<P: Providers>(
             continue;
         };
         let mut state = AggState::new();
-        let windows = persist(env, &note, || {
-            state::list_windows(kv, &params.key, node, pending)
-        })
-        .await?;
+        let windows = persist(env, &note, || state::list_windows(kv, &params.key, node, pending)).await?;
         for window in windows {
             if is_closed(&window, *lateness_ms, start.watermark) {
                 closed.entry(node.clone()).or_default().insert(window);
@@ -1583,9 +1507,7 @@ pub(crate) async fn run_slice<P: Providers>(
             exit.finish(SliceExit::Failed(error.to_string()));
             Vec::new()
         }
-        Some(Ok(prepared)) => {
-            start_actors(&params, &scope, control, &shared, &exit, &nodes, prepared)
-        }
+        Some(Ok(prepared)) => start_actors(&params, &scope, control, &shared, &exit, &nodes, prepared),
     };
     scope.token().cancelled().await;
     for handle in handles {
@@ -1598,8 +1520,7 @@ pub(crate) async fn run_slice<P: Providers>(
             ActorState::Failed
         }
         SliceExit::Fenced => {
-            *shared.metrics.last_error.lock() =
-                Some("fenced: another worker committed this slice".to_owned());
+            *shared.metrics.last_error.lock() = Some("fenced: another worker committed this slice".to_owned());
             ActorState::Failed
         }
         SliceExit::Stopped | SliceExit::Drained => ActorState::Stopped,
@@ -1673,10 +1594,7 @@ fn start_actors<P: Providers>(
         .count();
     shared.metrics.epoch.store(start.epoch, Ordering::Relaxed);
     *shared.metrics.position.lock() = start.position;
-    shared
-        .metrics
-        .watermark
-        .store(start.watermark, Ordering::Relaxed);
+    shared.metrics.watermark.store(start.watermark, Ordering::Relaxed);
 
     let ctx = |node: &NodeId, metrics: Arc<ActorMetrics>| ActorCtx {
         env: env.clone(),
@@ -1754,8 +1672,7 @@ fn start_actors<P: Providers>(
             start_epoch: epoch,
             gates,
         };
-        let actor: std::pin::Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send>> = match op
-        {
+        let actor: std::pin::Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send>> = match op {
             NodeOp::Source(connector) => {
                 let Some(start) = start.take() else { continue };
                 let partition = match &params.key.slice {
@@ -1763,12 +1680,7 @@ fn start_actors<P: Providers>(
                     SliceId::Emitter { .. } => 0,
                 };
                 Box::pin(run_source(
-                    make_root(
-                        actor_ctx,
-                        node_outputs,
-                        start.epoch,
-                        gates.take().unwrap_or_default(),
-                    ),
+                    make_root(actor_ctx, node_outputs, start.epoch, gates.take().unwrap_or_default()),
                     connector,
                     partition,
                     start,
@@ -1793,12 +1705,7 @@ fn start_actors<P: Providers>(
                     })
                     .collect();
                 Box::pin(run_emitter(
-                    make_root(
-                        actor_ctx,
-                        node_outputs,
-                        start.epoch,
-                        gates.take().unwrap_or_default(),
-                    ),
+                    make_root(actor_ctx, node_outputs, start.epoch, gates.take().unwrap_or_default()),
                     aggregator,
                     lateness_ms,
                     feeding,
@@ -1875,9 +1782,7 @@ fn start_actors<P: Providers>(
                     closed_of.get(node).cloned().unwrap_or_default(),
                 ))
             }
-            NodeOp::Sink(sink) => {
-                Box::pin(run_sink(actor_ctx, sink, node_inputs, commits_tx.clone()))
-            }
+            NodeOp::Sink(sink) => Box::pin(run_sink(actor_ctx, sink, node_inputs, commits_tx.clone())),
         };
         handles.push(spawn_actor(
             scope,

@@ -236,14 +236,8 @@ impl Decoder {
             return bad("truncated frame");
         };
         match src[pos] {
-            b'+' => Ok((
-                Value::Simple(String::from_utf8_lossy(line).into_owned()),
-                next,
-            )),
-            b'-' => Ok((
-                Value::Error(String::from_utf8_lossy(line).into_owned()),
-                next,
-            )),
+            b'+' => Ok((Value::Simple(String::from_utf8_lossy(line).into_owned()), next)),
+            b'-' => Ok((Value::Error(String::from_utf8_lossy(line).into_owned()), next)),
             b':' => Ok((Value::Integer(parse_int(line)?), next)),
             b'$' => {
                 let n = parse_int(line)?;
@@ -368,10 +362,7 @@ mod tests {
             one(wire),
             Value::Array(vec![
                 bulk(b"0"),
-                Value::Array(vec![
-                    Value::Array(vec![bulk(b"a"), Value::Integer(1)]),
-                    Value::Null
-                ]),
+                Value::Array(vec![Value::Array(vec![bulk(b"a"), Value::Integer(1)]), Value::Null]),
                 Value::Simple("x".into()),
             ])
         );
@@ -465,9 +456,7 @@ mod tests {
 
     #[test]
     fn many_element_array() {
-        let items: Vec<Value> = (0..5000)
-            .map(|i| bulk(format!("field-{i}").as_bytes()))
-            .collect();
+        let items: Vec<Value> = (0..5000).map(|i| bulk(format!("field-{i}").as_bytes())).collect();
         let value = Value::Array(vec![bulk(b"0"), Value::Array(items)]);
         let mut wire = Vec::new();
         encode_value(&value, &mut wire);

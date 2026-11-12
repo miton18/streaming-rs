@@ -6,20 +6,19 @@
 //! outcome is two workers running the same slice for a while, which the
 //! commit log arbitrates.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use moonpool_core::{Providers, TimeProvider};
-use streaming_core::control::{
-    DesiredState, GraphIndexEntry, GraphPlan, Load, MemberInfo, Placement, RunState,
-};
 use streaming_core::{
-    GraphKey, GraphSpec, Kv, KvError, NodeSpec, OpContext, OpFactory, OpKind, SliceId, SliceKey,
-    Topology, WorkerId, keys,
+    GraphKey, GraphSpec, Kv, KvError, NodeSpec, OpContext, OpFactory, OpKind, SliceId, SliceKey, Topology, WorkerId,
+    control::{DesiredState, GraphIndexEntry, GraphPlan, Load, MemberInfo, Placement, RunState},
+    keys,
 };
 
-use crate::RuntimeEnv;
-use crate::state;
+use crate::{RuntimeEnv, state};
 
 /// A worker as the placement policy sees it.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,18 +62,17 @@ pub(crate) fn assign(
     let count = |assignments: &BTreeMap<SliceKey, WorkerId>, worker: &WorkerId| {
         assignments.values().filter(|w| *w == worker).count()
     };
-    let fewest =
-        |assignments: &BTreeMap<SliceKey, WorkerId>, among: &[&Candidate]| -> Option<WorkerId> {
-            among
-                .iter()
-                .min_by(|a, b| {
-                    count(assignments, &a.worker)
-                        .cmp(&count(assignments, &b.worker))
-                        .then(a.load.cpu.total_cmp(&b.load.cpu))
-                        .then(a.worker.cmp(&b.worker))
-                })
-                .map(|candidate| candidate.worker.clone())
-        };
+    let fewest = |assignments: &BTreeMap<SliceKey, WorkerId>, among: &[&Candidate]| -> Option<WorkerId> {
+        among
+            .iter()
+            .min_by(|a, b| {
+                count(assignments, &a.worker)
+                    .cmp(&count(assignments, &b.worker))
+                    .then(a.load.cpu.total_cmp(&b.load.cpu))
+                    .then(a.worker.cmp(&b.worker))
+            })
+            .map(|candidate| candidate.worker.clone())
+    };
     let everyone: Vec<&Candidate> = workers.iter().collect();
     let with_headroom: Vec<&Candidate> = workers
         .iter()
@@ -91,9 +89,7 @@ pub(crate) fn assign(
             .map(|candidate| {
                 let colocated = assignments
                     .iter()
-                    .filter(|(other, worker)| {
-                        other.graph_key() == graph && **worker == candidate.worker
-                    })
+                    .filter(|(other, worker)| other.graph_key() == graph && **worker == candidate.worker)
                     .count();
                 (colocated, &candidate.worker)
             })
@@ -112,9 +108,7 @@ pub(crate) fn assign(
     if rebalance {
         let overloaded = workers
             .iter()
-            .filter(|candidate| {
-                candidate.load.is_saturated() && count(&assignments, &candidate.worker) > 1
-            })
+            .filter(|candidate| candidate.load.is_saturated() && count(&assignments, &candidate.worker) > 1)
             .max_by(|a, b| {
                 count(&assignments, &a.worker)
                     .cmp(&count(&assignments, &b.worker))
@@ -220,10 +214,7 @@ pub(crate) async fn plan_graph<P: Providers>(env: &RuntimeEnv<P>, spec: &GraphSp
 
 /// Read a JSON document. A document that is absent or cannot be decoded is
 /// `None`; a store failure is an error, never mistaken for an absent document.
-async fn read_doc<T: serde::de::DeserializeOwned>(
-    kv: &dyn Kv,
-    key: &str,
-) -> Result<Option<T>, KvError> {
+async fn read_doc<T: serde::de::DeserializeOwned>(kv: &dyn Kv, key: &str) -> Result<Option<T>, KvError> {
     match kv.get_json(key).await {
         Ok(doc) => Ok(doc),
         Err(KvError::Malformed { key, reason }) => {
@@ -237,16 +228,11 @@ async fn read_doc<T: serde::de::DeserializeOwned>(
 /// Remove everything a slice left in the KV.
 async fn purge_slice(kv: &dyn Kv, nodes: &[NodeSpec], slice: &SliceKey) -> Result<(), KvError> {
     for node in nodes {
-        let windows: Vec<_> = state::indexed_windows(kv, slice, &node.id)
-            .await?
-            .into_keys()
-            .collect();
+        let windows: Vec<_> = state::indexed_windows(kv, slice, &node.id).await?.into_keys().collect();
         state::delete_windows(kv, slice, &node.id, &windows).await?;
-        kv.del(vec![keys::slice_window_index(slice, &node.id)])
-            .await?;
+        kv.del(vec![keys::slice_window_index(slice, &node.id)]).await?;
     }
-    kv.del(vec![keys::slice_log(slice), keys::slice_seal(slice)])
-        .await
+    kv.del(vec![keys::slice_log(slice), keys::slice_seal(slice)]).await
 }
 
 /// Whether everything a retired slice committed has been emitted: each window
@@ -300,10 +286,7 @@ async fn purge_graph(kv: &dyn Kv, graph: &GraphKey) -> Result<(), KvError> {
         };
         purge_slice(kv, &nodes, &slice).await?;
     }
-    let mut doomed: Vec<String> = nodes
-        .iter()
-        .map(|node| keys::graph_output(graph, &node.id))
-        .collect();
+    let mut doomed: Vec<String> = nodes.iter().map(|node| keys::graph_output(graph, &node.id)).collect();
     doomed.extend([
         keys::graph_spec(graph),
         keys::graph_desired(graph),
@@ -335,9 +318,7 @@ pub(crate) async fn run_once<P: Providers>(
         .iter()
         .map(|(_, entry)| GraphKey::new(entry.tenant.clone(), entry.graph.clone()))
         .collect();
-    state
-        .deleting_since
-        .retain(|graph, _| known.contains(graph));
+    state.deleting_since.retain(|graph, _| known.contains(graph));
 
     for (_, entry) in index {
         let graph = GraphKey::new(entry.tenant.clone(), entry.graph.clone());
@@ -381,9 +362,7 @@ pub(crate) async fn run_once<P: Providers>(
                 fresh.generation = old.generation;
             }
             let same = plan.as_ref().is_some_and(|plan| {
-                plan.spec_version == fresh.spec_version
-                    && plan.error == fresh.error
-                    && plan.slices == fresh.slices
+                plan.spec_version == fresh.spec_version && plan.error == fresh.error && plan.slices == fresh.slices
             });
             if same {
                 // Nothing changed: see whether retired slices can go.
@@ -469,9 +448,7 @@ pub(crate) async fn run_once<P: Providers>(
                 plan = Some(fresh);
             }
         }
-        let desired: DesiredState = read_doc(kv, &keys::graph_desired(&graph))
-            .await?
-            .unwrap_or_default();
+        let desired: DesiredState = read_doc(kv, &keys::graph_desired(&graph)).await?.unwrap_or_default();
         if desired.state == RunState::Stopped {
             continue;
         }
@@ -491,12 +468,8 @@ pub(crate) async fn run_once<P: Providers>(
             load: member.load,
         })
         .collect();
-    let placement: Placement = read_doc(kv, keys::CLUSTER_PLACEMENT)
-        .await?
-        .unwrap_or_default();
-    let rebalance = state
-        .last_move
-        .is_none_or(|at| now.saturating_sub(at) >= cooldown);
+    let placement: Placement = read_doc(kv, keys::CLUSTER_PLACEMENT).await?.unwrap_or_default();
+    let rebalance = state.last_move.is_none_or(|at| now.saturating_sub(at) >= cooldown);
     let (assignments, moved) = assign(&slices, &candidates, &placement.assignments, rebalance);
     if moved {
         state.last_move = Some(now);
@@ -527,10 +500,7 @@ mod tests {
     fn worker(id: &str, cpu: f64) -> Candidate {
         Candidate {
             worker: WorkerId::new(id).unwrap(),
-            load: Load {
-                cpu,
-                ..Load::default()
-            },
+            load: Load { cpu, ..Load::default() },
         }
     }
 
@@ -596,24 +566,13 @@ mod tests {
 
         let hot: Vec<Candidate> = calm
             .iter()
-            .map(|c| {
-                worker(
-                    c.worker.as_str(),
-                    if c.worker.as_str() == home { 0.95 } else { 0.1 },
-                )
-            })
+            .map(|c| worker(c.worker.as_str(), if c.worker.as_str() == home { 0.95 } else { 0.1 }))
             .collect();
         let (spread, moved) = assign(&all, &hot, &colocated, true);
         assert!(moved);
-        let changed: Vec<_> = spread
-            .iter()
-            .filter(|(slice, w)| colocated[*slice] != **w)
-            .collect();
+        let changed: Vec<_> = spread.iter().filter(|(slice, w)| colocated[*slice] != **w).collect();
         assert_eq!(changed.len(), 1, "exactly one slice moves");
-        assert!(matches!(
-            changed[0].0.slice,
-            streaming_core::SliceId::Source { .. }
-        ));
+        assert!(matches!(changed[0].0.slice, streaming_core::SliceId::Source { .. }));
 
         // During the cooldown nothing else moves.
         let (held, moved) = assign(&all, &hot, &spread, false);

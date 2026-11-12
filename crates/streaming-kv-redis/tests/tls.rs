@@ -6,19 +6,19 @@
 
 mod common;
 
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
 
-use futures_rustls::TlsAcceptor;
-use futures_rustls::rustls::ServerConfig;
-use futures_rustls::rustls::crypto::ring;
-use futures_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use futures_rustls::{
+    TlsAcceptor,
+    rustls::{
+        ServerConfig,
+        crypto::ring,
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    },
+};
 use moonpool_core::TokioProviders;
 use streaming_core::KvError;
-use streaming_kv_redis::testkit::conformance;
-use streaming_kv_redis::{FakeRedis, RedisConfig, RedisKv};
+use streaming_kv_redis::{FakeRedis, RedisConfig, RedisKv, testkit::conformance};
 use tokio::net::TcpListener;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -28,11 +28,7 @@ struct Cert {
 }
 
 fn generate_cert() -> Option<Cert> {
-    let dir: PathBuf = std::env::temp_dir().join(format!(
-        "kvredis-tls-{}-{}",
-        std::process::id(),
-        common::free_port()
-    ));
+    let dir: PathBuf = std::env::temp_dir().join(format!("kvredis-tls-{}-{}", std::process::id(), common::free_port()));
     std::fs::create_dir_all(&dir).ok()?;
     let p = |n: &str| dir.join(n).to_string_lossy().into_owned();
     let run = |args: &[&str]| {
@@ -63,15 +59,7 @@ fn generate_cert() -> Option<Cert> {
         "-addext",
         "basicConstraints=critical,CA:FALSE",
     ])?;
-    run(&[
-        "x509",
-        "-in",
-        &p("cert.pem"),
-        "-outform",
-        "DER",
-        "-out",
-        &p("cert.der"),
-    ])?;
+    run(&["x509", "-in", &p("cert.pem"), "-outform", "DER", "-out", &p("cert.der")])?;
     run(&[
         "pkcs8",
         "-topk8",
@@ -153,10 +141,7 @@ async fn conformance_over_tls() {
     let mut c = RedisConfig::from_url(&format!("rediss://:tok@localhost:{port}")).unwrap();
     c.tls_extra_roots_der = vec![cert.cert_der.clone()];
     assert!(c.tls);
-    RedisKv::new(TokioProviders::new(), c)
-        .ping()
-        .await
-        .expect("rediss url");
+    RedisKv::new(TokioProviders::new(), c).ping().await.expect("rediss url");
 }
 
 #[tokio::test]
@@ -168,10 +153,7 @@ async fn untrusted_or_mismatched_certificates_are_refused() {
     let port = start_tls_fake(FakeRedis::new(), &cert).await;
 
     // Unknown issuer: not in the web PKI roots and not added.
-    let kv = RedisKv::new(
-        TokioProviders::new(),
-        cfg(format!("localhost:{port}"), vec![]),
-    );
+    let kv = RedisKv::new(TokioProviders::new(), cfg(format!("localhost:{port}"), vec![]));
     let err = kv.ping().await.unwrap_err();
     assert!(
         matches!(&err, KvError::Unavailable(m) if m.contains("TLS handshake")),

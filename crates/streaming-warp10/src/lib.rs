@@ -56,12 +56,11 @@ mod tls;
 
 use std::sync::Arc;
 
-use moonpool_core::Providers;
-use streaming_core::{ParamSpec, Registry, SinkConnector, TypeTag};
-
 pub use config::Warp10Config;
 pub use gts::{Gts, GtsValue, TimeUnit};
+use moonpool_core::Providers;
 pub use sink::Warp10Sink;
+use streaming_core::{ParamSpec, Registry, SinkConnector, TypeTag};
 
 /// Reference under which the sink is registered.
 pub const SINK_OP: &str = "std/warp10-sink@1";
@@ -122,10 +121,11 @@ fn sink_params() -> Vec<ParamSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use moonpool_core::TokioProviders;
     use serde_json::{Value, json};
     use streaming_core::{OpError, OpRef};
+
+    use super::*;
 
     fn parse(config: &Value) -> Result<Warp10Config, OpError> {
         Warp10Config::from_json(config, |token| {

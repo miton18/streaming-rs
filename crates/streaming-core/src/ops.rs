@@ -11,15 +11,15 @@
 //! Sources and sinks are connectors: they talk to the outside world and are
 //! implemented directly against [`SourceConnector`] and [`SinkConnector`].
 
-use std::any::Any;
-use std::time::Duration;
+use std::{any::Any, time::Duration};
 
 use async_trait::async_trait;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 
-use crate::data::{Datum, Emit, Key, Position};
-use crate::time::{Timestamp, Window};
+use crate::{
+    data::{Datum, Emit, Key, Position},
+    time::{Timestamp, Window},
+};
 
 /// Failure while building or running an operator.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -73,11 +73,7 @@ pub trait SourceConnector: Send + Sync + 'static {
     /// there is one. A connector able to seek should start right after it; a
     /// connector that cannot may start earlier, the runtime drops what it has
     /// already processed.
-    async fn open(
-        &self,
-        partition: u32,
-        after: Option<Position>,
-    ) -> Result<Box<dyn PartitionReader>, SourceError>;
+    async fn open(&self, partition: u32, after: Option<Position>) -> Result<Box<dyn PartitionReader>, SourceError>;
 }
 
 /// A reader on one partition.
@@ -89,11 +85,7 @@ pub trait SourceConnector: Send + Sync + 'static {
 pub trait PartitionReader: Send + 'static {
     /// Wait up to `max_wait` for records and return at most `max` of them.
     /// An empty vector means nothing arrived in time.
-    async fn poll(
-        &mut self,
-        max: usize,
-        max_wait: Duration,
-    ) -> Result<Vec<SourceRecord>, SourceError>;
+    async fn poll(&mut self, max: usize, max_wait: Duration) -> Result<Vec<SourceRecord>, SourceError>;
 
     /// Everything up to `upto` included is durably processed and may be
     /// released by the source.

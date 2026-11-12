@@ -7,12 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::Value;
-use streaming_core::control::{
-    ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, GraphPlan, Load,
-    MemberInfo, Placement, RunState, SliceSnapshot, TenantUsage, WorkerSnapshot,
-};
 use streaming_core::{
     Catalog, GraphSpec, NodeId, OpDescriptor, SliceId, SliceKey, TenantId, Timestamp, WorkerId,
+    control::{
+        ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, GraphPlan, Load, MemberInfo, Placement,
+        RunState, SliceSnapshot, TenantUsage, WorkerSnapshot,
+    },
 };
 
 /// A member with the metrics snapshot it published, if any.
@@ -435,18 +435,10 @@ fn aggregate_node(
     instances: &[(&WorkerId, &ActorSnapshot)],
 ) -> NodeView {
     let sum = |f: fn(&ActorSnapshot) -> f64, pick: &dyn Fn(&ActorSnapshot) -> bool| -> f64 {
-        instances
-            .iter()
-            .filter(|(_, a)| pick(a))
-            .map(|(_, a)| f(a))
-            .sum()
+        instances.iter().filter(|(_, a)| pick(a)).map(|(_, a)| f(a)).sum()
     };
     let sum_u = |f: fn(&ActorSnapshot) -> u64, pick: &dyn Fn(&ActorSnapshot) -> bool| -> u64 {
-        instances
-            .iter()
-            .filter(|(_, a)| pick(a))
-            .map(|(_, a)| f(a))
-            .sum()
+        instances.iter().filter(|(_, a)| pick(a)).map(|(_, a)| f(a)).sum()
     };
     let any = |_: &ActorSnapshot| true;
     let not_emitter = |a: &ActorSnapshot| a.kind != ActorKind::Emitter;
@@ -458,8 +450,7 @@ fn aggregate_node(
     // an aggregate. For one actor the three phases exclude each other, so the
     // actor waiting for room downstream is never the busiest one: each ratio
     // is the worst found over the instances, on its own.
-    let worst =
-        |f: fn(&ActorSnapshot) -> f64| instances.iter().map(|(_, a)| f(a)).fold(0.0_f64, f64::max);
+    let worst = |f: fn(&ActorSnapshot) -> f64| instances.iter().map(|(_, a)| f(a)).fold(0.0_f64, f64::max);
     let busy = worst(|a| a.busy);
     let backpressured = worst(|a| a.backpressured);
     let waiting = worst(|a| a.waiting).min(busy);
@@ -479,9 +470,7 @@ fn aggregate_node(
         id: spec_node.id.clone(),
         op: spec_node.op.to_string(),
         kind: descriptor.map_or_else(|| "unknown".to_owned(), |d| d.kind.to_string()),
-        description: descriptor
-            .map(|d| d.description.clone())
-            .unwrap_or_default(),
+        description: descriptor.map(|d| d.description.clone()).unwrap_or_default(),
         input_type: descriptor.map(|d| d.input.to_string()),
         output_type: descriptor.map(|d| d.output.to_string()),
         config: spec_node.config.clone(),
@@ -522,11 +511,7 @@ fn percent(ratio: f64) -> String {
 /// `commits` are the `commit` actors of the graph (their `node` is the root
 /// node of their slice).
 #[must_use]
-pub fn find_bottleneck(
-    spec: &GraphSpec,
-    nodes: &[NodeView],
-    commits: &[&ActorSnapshot],
-) -> Option<Bottleneck> {
+pub fn find_bottleneck(spec: &GraphSpec, nodes: &[NodeView], commits: &[&ActorSnapshot]) -> Option<Bottleneck> {
     let by_id: BTreeMap<&NodeId, &NodeView> = nodes.iter().map(|n| (&n.id, n)).collect();
     let mut preds: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
     for (from, to) in &spec.edges {
@@ -594,8 +579,7 @@ pub fn find_bottleneck(
         let better = match &best {
             None => true,
             Some((current, _)) => {
-                node.busy > current.busy
-                    || (node.busy == current.busy && rank.get(&node.id) > rank.get(&current.id))
+                node.busy > current.busy || (node.busy == current.busy && rank.get(&node.id) > rank.get(&current.id))
             }
         };
         if better {
@@ -681,35 +665,22 @@ pub fn graph_detail(
     now_ms: Timestamp,
     member_timeout_ms: i64,
 ) -> GraphDetail {
-    let in_graph = |tenant: &TenantId, graph: &streaming_core::GraphId| {
-        *tenant == spec.tenant && *graph == spec.graph
-    };
+    let in_graph = |tenant: &TenantId, graph: &streaming_core::GraphId| *tenant == spec.tenant && *graph == spec.graph;
 
     let mut instances: BTreeMap<&NodeId, Vec<(&WorkerId, &ActorSnapshot)>> = BTreeMap::new();
     let mut commits: Vec<&ActorSnapshot> = Vec::new();
     let mut reported: Vec<(&WorkerId, &SliceSnapshot)> = Vec::new();
     let mut total_actors = 0;
     for (member, snapshot) in alive_snapshots(members, now_ms, member_timeout_ms) {
-        for actor in snapshot
-            .actors
-            .iter()
-            .filter(|a| in_graph(&a.tenant, &a.graph))
-        {
+        for actor in snapshot.actors.iter().filter(|a| in_graph(&a.tenant, &a.graph)) {
             total_actors += 1;
             if actor.kind == ActorKind::Commit {
                 commits.push(actor);
             } else {
-                instances
-                    .entry(&actor.node)
-                    .or_default()
-                    .push((&member.worker, actor));
+                instances.entry(&actor.node).or_default().push((&member.worker, actor));
             }
         }
-        for slice in snapshot
-            .slices
-            .iter()
-            .filter(|s| in_graph(&s.tenant, &s.graph))
-        {
+        for slice in snapshot.slices.iter().filter(|s| in_graph(&s.tenant, &s.graph)) {
             reported.push((&member.worker, slice));
         }
     }
@@ -869,8 +840,9 @@ pub fn dot(spec: &GraphSpec) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use streaming_core::{GraphId, NodeSpec, OpKind, OpRef, TypeTag};
+
+    use super::*;
 
     const NOW: i64 = 1_000_000;
     const TIMEOUT: i64 = 5_000;
@@ -939,9 +911,7 @@ mod tests {
 
     fn actor(node_id: &str, kind: ActorKind) -> ActorSnapshot {
         let slice = match kind {
-            ActorKind::Emitter => SliceId::Emitter {
-                node: node("count"),
-            },
+            ActorKind::Emitter => SliceId::Emitter { node: node("count") },
             _ => SliceId::Source {
                 node: node("events"),
                 partition: 0,
@@ -1011,11 +981,7 @@ mod tests {
         }
     }
 
-    fn snapshot(
-        id: &str,
-        actors: Vec<ActorSnapshot>,
-        slices: Vec<SliceSnapshot>,
-    ) -> WorkerSnapshot {
+    fn snapshot(id: &str, actors: Vec<ActorSnapshot>, slices: Vec<SliceSnapshot>) -> WorkerSnapshot {
         WorkerSnapshot {
             worker: worker(id),
             at_ms: NOW,
@@ -1131,10 +1097,7 @@ mod tests {
         };
         use ActorState::*;
         assert_eq!(state_of(vec![Running, Stopped, Failed]), NodeState::Failed);
-        assert_eq!(
-            state_of(vec![Running, Starting, Paused]),
-            NodeState::Starting
-        );
+        assert_eq!(state_of(vec![Running, Starting, Paused]), NodeState::Starting);
         assert_eq!(state_of(vec![Running, Draining, Paused]), NodeState::Paused);
         assert_eq!(state_of(vec![Running, Draining]), NodeState::Draining);
         assert_eq!(state_of(vec![Stopped, Running]), NodeState::Running);
@@ -1168,10 +1131,7 @@ mod tests {
                 vec![slice_snapshot("src.events.0", Some(1))],
             )),
         );
-        let boundary = (
-            member("w3", NOW - TIMEOUT),
-            Some(snapshot("w3", vec![], vec![])),
-        );
+        let boundary = (member("w3", NOW - TIMEOUT), Some(snapshot("w3", vec![], vec![])));
         let detail = detail_of(&[dead, boundary]);
         assert_eq!(node_of(&detail, "count").actors, 0);
         assert_eq!(node_of(&detail, "count").state, NodeState::Pending);
@@ -1214,14 +1174,7 @@ mod tests {
         assert!(node_of(&detail, "key").paused);
         assert!(!node_of(&detail, "count").paused);
         assert_eq!(detail.state, RunState::Paused);
-        let fill = |to: &str| {
-            detail
-                .edges
-                .iter()
-                .find(|e| e.to.as_str() == to)
-                .unwrap()
-                .fill
-        };
+        let fill = |to: &str| detail.edges.iter().find(|e| e.to.as_str() == to).unwrap().fill;
         assert_eq!(fill("count"), 0.75);
         assert_eq!(fill("win"), 0.0, "capacity 0 gives 0");
     }
@@ -1286,20 +1239,10 @@ mod tests {
             TIMEOUT,
         );
         assert_eq!(detail.slices.len(), 4);
-        let find = |id: &str| {
-            detail
-                .slices
-                .iter()
-                .find(|s| s.slice.slice.to_string() == id)
-                .unwrap()
-        };
+        let find = |id: &str| detail.slices.iter().find(|s| s.slice.slice.to_string() == id).unwrap();
         assert_eq!(find("src.events.0").worker, Some(worker("w1")));
         assert_eq!(find("src.events.0").assigned_to, Some(worker("w1")));
-        assert_eq!(
-            find("src.events.9").assigned_to,
-            None,
-            "reported, not planned"
-        );
+        assert_eq!(find("src.events.9").assigned_to, None, "reported, not planned");
         let missing = find("src.events.1");
         assert_eq!(missing.worker, None);
         assert_eq!(missing.assigned_to, Some(worker("w2")));
@@ -1359,10 +1302,7 @@ mod tests {
         );
         // A planned source slice nobody reports.
         let p = plan(&["src.events.0", "src.events.1"]);
-        assert_eq!(
-            run(Some(&p), vec![slice_snapshot("src.events.0", Some(30))]),
-            None
-        );
+        assert_eq!(run(Some(&p), vec![slice_snapshot("src.events.0", Some(30))]), None);
         // No source slice at all.
         assert_eq!(run(None, vec![slice_snapshot("agg.count", Some(5))]), None);
         assert_eq!(run(None, vec![]), None);
@@ -1383,11 +1323,7 @@ mod tests {
         assert_eq!(bottleneck.node, node("count"));
         assert_eq!(bottleneck.kind, "aggregate");
         assert_eq!(bottleneck.busy, 0.97);
-        assert!(
-            bottleneck.reason.contains("events"),
-            "{}",
-            bottleneck.reason
-        );
+        assert!(bottleneck.reason.contains("events"), "{}", bottleneck.reason);
         assert!(node_of(&detail, "count").bottleneck);
         assert!(!node_of(&detail, "events").bottleneck);
         let summary = graph_summary(&detail, 0);
@@ -1427,10 +1363,8 @@ mod tests {
         for (waiting, limited_by) in [(0.95, "destination"), (0.1, "work")] {
             let mut sink = with_load(actor("out", ActorKind::Sink), 1.0, 0.0);
             sink.waiting = waiting;
-            let (bottleneck, detail) = bottleneck_of(vec![
-                with_load(actor("events", ActorKind::Source), 0.1, 0.8),
-                sink,
-            ]);
+            let (bottleneck, detail) =
+                bottleneck_of(vec![with_load(actor("events", ActorKind::Source), 0.1, 0.8), sink]);
             let bottleneck = bottleneck.unwrap();
             assert_eq!(bottleneck.node, node("out"));
             assert_eq!(bottleneck.limited_by, limited_by);
@@ -1561,21 +1495,13 @@ mod tests {
         ]);
         let bottleneck = bottleneck.unwrap();
         assert_eq!(bottleneck.node, node("count"));
-        assert!(
-            bottleneck.reason.starts_with("busy 95% "),
-            "{}",
-            bottleneck.reason
-        );
+        assert!(bottleneck.reason.starts_with("busy 95% "), "{}", bottleneck.reason);
     }
 
     #[test]
     fn commit_thresholds_are_inclusive() {
         let (bottleneck, _) = bottleneck_of(vec![
-            with_load(
-                actor("events", ActorKind::Source),
-                0.2,
-                BACKPRESSURE_THRESHOLD,
-            ),
+            with_load(actor("events", ActorKind::Source), 0.2, BACKPRESSURE_THRESHOLD),
             with_load(actor("events", ActorKind::Commit), BUSY_THRESHOLD, 0.0),
         ]);
         assert_eq!(bottleneck.unwrap().kind, "commit");
@@ -1601,11 +1527,7 @@ mod tests {
             assert_eq!(bottleneck.busy, reported);
             // On a tie, the first commit found is kept.
             if first == second {
-                assert!(
-                    bottleneck.reason.contains("`src.events.0`"),
-                    "{}",
-                    bottleneck.reason
-                );
+                assert!(bottleneck.reason.contains("`src.events.0`"), "{}", bottleneck.reason);
             }
         }
     }
@@ -1659,10 +1581,7 @@ mod tests {
         assert_eq!(view.epoch, 12);
         assert!(view.workers[0].alive);
         assert!(!view.workers[1].alive);
-        assert_eq!(
-            view.workers[0].tenants[&TenantId::new("acme").unwrap()].actors,
-            7
-        );
+        assert_eq!(view.workers[0].tenants[&TenantId::new("acme").unwrap()].actors, 7);
         assert!(view.workers[1].tenants.is_empty());
         assert_eq!(view.placement.version, 0);
         let json = serde_json::to_value(&view).unwrap();
@@ -1686,16 +1605,12 @@ mod tests {
             busy: 0.0,
         };
         let mut s1 = snapshot("w1", vec![], vec![]);
-        s1.tenants
-            .insert(TenantId::new("acme").unwrap(), usage(5, 100.0));
-        s1.tenants
-            .insert(TenantId::new("orphan").unwrap(), usage(1, 1.0));
+        s1.tenants.insert(TenantId::new("acme").unwrap(), usage(5, 100.0));
+        s1.tenants.insert(TenantId::new("orphan").unwrap(), usage(1, 1.0));
         let mut s2 = snapshot("w2", vec![], vec![]);
-        s2.tenants
-            .insert(TenantId::new("acme").unwrap(), usage(9, 900.0));
+        s2.tenants.insert(TenantId::new("acme").unwrap(), usage(9, 900.0));
         let mut dead = snapshot("w3", vec![], vec![]);
-        dead.tenants
-            .insert(TenantId::new("acme").unwrap(), usage(100, 1e6));
+        dead.tenants.insert(TenantId::new("acme").unwrap(), usage(100, 1e6));
         let members = [
             (member("w1", NOW), Some(s1)),
             (member("w2", NOW), Some(s2)),
@@ -1725,10 +1640,7 @@ mod tests {
     fn dot_has_one_line_per_node_and_edge() {
         let text = dot(&spec());
         assert!(text.starts_with("digraph \"acme/g\" {"), "{text}");
-        assert!(
-            text.contains("\"events\" [label=\"events\\nt/src@1\"];"),
-            "{text}"
-        );
+        assert!(text.contains("\"events\" [label=\"events\\nt/src@1\"];"), "{text}");
         assert!(text.contains("\"events\" -> \"key\";"), "{text}");
         assert_eq!(text.lines().count(), 1 + 5 + 4 + 1);
     }

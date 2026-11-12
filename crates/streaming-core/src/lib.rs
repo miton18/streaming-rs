@@ -28,11 +28,9 @@ pub use data::{Datum, Emit, EmitId, Key, Origin, Position, Record, Windowed, dat
 pub use ids::{GraphId, GraphKey, IdError, NodeId, OpRef, SliceId, SliceKey, TenantId, WorkerId};
 pub use kv::{DynKv, Kv, KvError, MemKv};
 pub use ops::{
-    Aggregator, DynAggregator, DynKey, DynMap, OpError, PartitionReader, SinkConnector, SinkError,
-    SourceConnector, SourceError, SourceRecord, WindowAssigner,
+    Aggregator, DynAggregator, DynKey, DynMap, OpError, PartitionReader, SinkConnector, SinkError, SourceConnector,
+    SourceError, SourceRecord, WindowAssigner,
 };
-pub use registry::{
-    Catalog, OpContext, OpDescriptor, OpFactory, OpKind, ParamSpec, Registry, TypeTag,
-};
+pub use registry::{Catalog, OpContext, OpDescriptor, OpFactory, OpKind, ParamSpec, Registry, TypeTag};
 pub use spec::{GraphSpec, NodeSpec, SpecError, Topology};
 pub use time::{Timestamp, Window, format_duration, parse_duration};

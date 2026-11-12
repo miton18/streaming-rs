@@ -1,23 +1,24 @@
 //! `std/pulsar-sink@1`.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::lock::Mutex;
-use magnetar::proto::CreateProducerRequest;
-use magnetar::runtime_moonpool::{Producer, SendFut};
-use magnetar::{OutgoingMessage, java_string_hash};
+use magnetar::{
+    OutgoingMessage, java_string_hash,
+    proto::CreateProducerRequest,
+    runtime_moonpool::{Producer, SendFut},
+};
 use moonpool_core::Providers;
-use streaming_core::data::hash_str;
-use streaming_core::ops::downcast;
-use streaming_core::{Emit, EmitId, SinkConnector, SinkError};
+use streaming_core::{Emit, EmitId, SinkConnector, SinkError, data::hash_str, ops::downcast};
 
-use crate::client::{ClientCell, Conn};
-use crate::config::SinkConfig;
-use crate::position::partition_topic;
-use crate::sequence::{SequenceLayout, SequenceState};
+use crate::{
+    client::{ClientCell, Conn},
+    config::SinkConfig,
+    position::partition_topic,
+    sequence::{SequenceLayout, SequenceState},
+};
 
 /// Message property holding the framework's emit id of the element.
 pub const EMIT_ID_PROPERTY: &str = "streaming-emit-id";
@@ -156,9 +157,7 @@ impl<P: Providers> PulsarSink<P> {
         let topics: Vec<String> = if count == 0 {
             vec![self.config.topic.clone()]
         } else {
-            (0..count)
-                .map(|p| partition_topic(&self.config.topic, p))
-                .collect()
+            (0..count).map(|p| partition_topic(&self.config.topic, p)).collect()
         };
         Ok(Producers {
             partitions: topics
@@ -184,8 +183,7 @@ impl<P: Providers> PulsarSink<P> {
             // own sequence id; Magnetar also fails (rather than replays)
             // batched sends caught by a reconnect.
             enable_batching: false,
-            send_timeout: (self.config.send_timeout_ms > 0)
-                .then(|| Duration::from_millis(self.config.send_timeout_ms)),
+            send_timeout: (self.config.send_timeout_ms > 0).then(|| Duration::from_millis(self.config.send_timeout_ms)),
             ..CreateProducerRequest::default()
         };
         let producer = conn
@@ -216,18 +214,11 @@ impl<P: Providers> PulsarSink<P> {
         let mut pending: Vec<Vec<SendFut>> = (0..count).map(|_| Vec::new()).collect();
         let mut stats = WriteStats::default();
         for (id, message, seq) in prepared {
-            let p = route(
-                message.key.as_deref(),
-                id,
-                count,
-                self.config.dedup.is_some(),
-            );
+            let p = route(message.key.as_deref(), id, count, self.config.dedup.is_some());
             let partition = &mut producers.partitions[p];
             match seq {
                 None if partition.open.is_none() => {
-                    let open = self
-                        .open_producer(&conn, &partition.topic, name.clone(), None)
-                        .await?;
+                    let open = self.open_producer(&conn, &partition.topic, name.clone(), None).await?;
                     partition.open = Some(open);
                 }
                 None => {}
@@ -248,9 +239,10 @@ impl<P: Providers> PulsarSink<P> {
                     if partition.open.as_ref().is_none_or(|o| o.next_seq != seq) {
                         wait_all(&mut pending[p]).await?;
                         if let Some(old) = partition.open.take() {
-                            old.producer.close().await.map_err(|e| {
-                                format!("close producer on `{}`: {e}", partition.topic)
-                            })?;
+                            old.producer
+                                .close()
+                                .await
+                                .map_err(|e| format!("close producer on `{}`: {e}", partition.topic))?;
                         }
                         let open = self
                             .open_producer(&conn, &partition.topic, name.clone(), Some(seq))
@@ -290,10 +282,7 @@ async fn wait_all(pending: &mut Vec<SendFut>) -> Result<(), String> {
         .collect();
     match failed.first() {
         None => Ok(()),
-        Some(first) => Err(format!(
-            "{} of {total} messages failed, first: {first}",
-            failed.len()
-        )),
+        Some(first) => Err(format!("{} of {total} messages failed, first: {first}", failed.len())),
     }
 }
 
@@ -387,8 +376,9 @@ impl<P: Providers> SinkConnector for PulsarSink<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use streaming_core::{NodeId, Origin, Position, SliceId};
+
+    use super::*;
 
     fn emit_id(partition: u32, position: Position) -> EmitId {
         let slice = SliceId::Source {
@@ -402,10 +392,7 @@ mod tests {
     fn slice_and_producer_name() {
         let id = emit_id(3, Position(1, 2, 0));
         assert_eq!(slice_of(&id), "src.events.3");
-        assert_eq!(
-            producer_name_for("orders", "src.events.3"),
-            "orders-src.events.3"
-        );
+        assert_eq!(producer_name_for("orders", "src.events.3"), "orders-src.events.3");
     }
 
     #[test]
@@ -431,10 +418,7 @@ mod tests {
         let spread: std::collections::BTreeSet<usize> = (0..64)
             .map(|i| route(None, &emit_id(0, Position(1, i, 0)), 7, false))
             .collect();
-        assert!(
-            spread.len() > 3,
-            "keyless elements should spread: {spread:?}"
-        );
+        assert!(spread.len() > 3, "keyless elements should spread: {spread:?}");
         // Dedup: one slice sticks to one partition, slices spread.
         let sticky: std::collections::BTreeSet<usize> = (0..64)
             .map(|i| route(None, &emit_id(0, Position(1, i, 0)), 7, true))

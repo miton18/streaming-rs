@@ -79,9 +79,7 @@ impl Endpoint {
         } else if let Some(rest) = url.strip_prefix("http://") {
             (false, rest)
         } else {
-            return Err(format!(
-                "endpoint `{url}` must start with `http://` or `https://`"
-            ));
+            return Err(format!("endpoint `{url}` must start with `http://` or `https://`"));
         };
         let rest = rest.split('#').next().unwrap_or(rest);
         let (authority, path) = match rest.find(['/', '?']) {
@@ -92,9 +90,7 @@ impl Endpoint {
         if authority.contains('@') {
             return Err("endpoint must not contain user info".to_owned());
         }
-        if authority
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control())
+        if authority.chars().any(|c| c.is_whitespace() || c.is_control())
             || path.chars().any(|c| c.is_whitespace() || c.is_control())
         {
             return Err(format!("endpoint `{url}` contains whitespace"));
@@ -176,8 +172,7 @@ pub fn build_request(
     body: &[u8],
 ) -> Result<Vec<u8>, HttpError> {
     let clean = |s: &str| !s.contains(['\r', '\n', '\0']);
-    if !clean(method) || !clean(path) || !clean(host) || path.contains(' ') || method.contains(' ')
-    {
+    if !clean(method) || !clean(path) || !clean(host) || path.contains(' ') || method.contains(' ') {
         return Err(HttpError::Malformed("invalid request line".into()));
     }
     let mut out = Vec::with_capacity(body.len() + 256);
@@ -188,13 +183,7 @@ pub fn build_request(
         }
         out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
     }
-    out.extend_from_slice(
-        format!(
-            "Content-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        )
-        .as_bytes(),
-    );
+    out.extend_from_slice(format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes());
     out.extend_from_slice(body);
     Ok(out)
 }
@@ -290,8 +279,7 @@ fn parse_head(buf: &[u8], max_head: usize) -> Result<Option<Head>, HttpError> {
     if end + 4 > max_head {
         return Err(HttpError::HeadTooLarge(max_head));
     }
-    let text = std::str::from_utf8(&buf[..end])
-        .map_err(|_| HttpError::Malformed("non UTF-8 header block".into()))?;
+    let text = std::str::from_utf8(&buf[..end]).map_err(|_| HttpError::Malformed("non UTF-8 header block".into()))?;
     let mut lines = text.split("\r\n");
     let start_line = lines.next().unwrap_or_default().to_owned();
     let mut headers = Vec::new();
@@ -328,9 +316,7 @@ fn framing(headers: &[(String, String)], default: Framing) -> Result<Framing, Ht
         {
             Ok(Framing::Chunked)
         } else {
-            Err(HttpError::Malformed(format!(
-                "unsupported transfer-encoding `{te}`"
-            )))
+            Err(HttpError::Malformed(format!("unsupported transfer-encoding `{te}`")))
         };
     }
     let mut length = None;
@@ -356,12 +342,7 @@ struct Body {
 }
 
 /// `Ok(None)`: more bytes needed.
-fn decode_body(
-    buf: &[u8],
-    framing: Framing,
-    eof: bool,
-    max_body: usize,
-) -> Result<Option<Body>, HttpError> {
+fn decode_body(buf: &[u8], framing: Framing, eof: bool, max_body: usize) -> Result<Option<Body>, HttpError> {
     match framing {
         Framing::None => Ok(Some(Body {
             data: Vec::new(),
@@ -401,11 +382,7 @@ fn decode_body(
 
 fn decode_chunked(buf: &[u8], eof: bool, max_body: usize) -> Result<Option<Body>, HttpError> {
     let incomplete = || {
-        if eof {
-            Err(HttpError::UnexpectedEof)
-        } else {
-            Ok(None)
-        }
+        if eof { Err(HttpError::UnexpectedEof) } else { Ok(None) }
     };
     let mut pos = 0;
     let mut data = Vec::new();
@@ -428,10 +405,7 @@ fn decode_chunked(buf: &[u8], eof: bool, max_body: usize) -> Result<Option<Body>
                 let empty = t_end == 0;
                 pos += t_end + 2;
                 if empty {
-                    return Ok(Some(Body {
-                        data,
-                        truncated: false,
-                    }));
+                    return Ok(Some(Body { data, truncated: false }));
                 }
             }
         }
@@ -441,10 +415,7 @@ fn decode_chunked(buf: &[u8], eof: bool, max_body: usize) -> Result<Option<Body>
             // Enough to fill the cap: stop here, the rest is not needed.
             if available >= room {
                 data.extend_from_slice(&buf[pos..pos + room]);
-                return Ok(Some(Body {
-                    data,
-                    truncated: true,
-                }));
+                return Ok(Some(Body { data, truncated: true }));
             }
             return incomplete();
         }
@@ -463,25 +434,14 @@ fn decode_chunked(buf: &[u8], eof: bool, max_body: usize) -> Result<Option<Body>
 /// closed the connection: nothing more will come.
 ///
 /// `Ok(None)` means "feed me more bytes".
-pub fn parse_response(
-    buf: &[u8],
-    eof: bool,
-    limits: Limits,
-) -> Result<Option<Response>, HttpError> {
+pub fn parse_response(buf: &[u8], eof: bool, limits: Limits) -> Result<Option<Response>, HttpError> {
     let Some(head) = parse_head(buf, limits.max_head)? else {
-        return if eof {
-            Err(HttpError::UnexpectedEof)
-        } else {
-            Ok(None)
-        };
+        return if eof { Err(HttpError::UnexpectedEof) } else { Ok(None) };
     };
     let mut parts = head.start_line.splitn(3, ' ');
     let version = parts.next().unwrap_or_default();
     if !version.starts_with("HTTP/1.") {
-        return Err(HttpError::Malformed(format!(
-            "bad status line `{}`",
-            head.start_line
-        )));
+        return Err(HttpError::Malformed(format!("bad status line `{}`", head.start_line)));
     }
     let status: u16 = parts
         .next()
@@ -513,20 +473,13 @@ pub fn parse_response(
 /// Parse a request from the bytes received so far (see [`parse_response`]).
 pub fn parse_request(buf: &[u8], eof: bool, limits: Limits) -> Result<Option<Request>, HttpError> {
     let Some(head) = parse_head(buf, limits.max_head)? else {
-        return if eof {
-            Err(HttpError::UnexpectedEof)
-        } else {
-            Ok(None)
-        };
+        return if eof { Err(HttpError::UnexpectedEof) } else { Ok(None) };
     };
     let mut parts = head.start_line.split(' ');
     let (method, target, version) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
         (Some(m), Some(t), Some(v), None) if !m.is_empty() && !t.is_empty() => (m, t, v),
         _ => {
-            return Err(HttpError::Malformed(format!(
-                "bad request line `{}`",
-                head.start_line
-            )));
+            return Err(HttpError::Malformed(format!("bad request line `{}`", head.start_line)));
         }
     };
     if !version.starts_with("HTTP/1.") {
@@ -567,18 +520,12 @@ where
 }
 
 /// Read one response from a stream.
-pub async fn read_response<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    limits: Limits,
-) -> Result<Response, ReadError> {
+pub async fn read_response<R: AsyncRead + Unpin>(reader: &mut R, limits: Limits) -> Result<Response, ReadError> {
     read_message(reader, |buf, eof| parse_response(buf, eof, limits)).await
 }
 
 /// Read one request from a stream.
-pub async fn read_request<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    limits: Limits,
-) -> Result<Request, ReadError> {
+pub async fn read_request<R: AsyncRead + Unpin>(reader: &mut R, limits: Limits) -> Result<Request, ReadError> {
     read_message(reader, |buf, eof| parse_request(buf, eof, limits)).await
 }
 
@@ -677,11 +624,7 @@ mod tests {
     fn fragmented_input_at_every_split_point() {
         let raw: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
         for cut in 0..raw.len() {
-            assert_eq!(
-                parse_response(&raw[..cut], false, L).unwrap(),
-                None,
-                "cut at {cut}"
-            );
+            assert_eq!(parse_response(&raw[..cut], false, L).unwrap(), None, "cut at {cut}");
         }
         assert_eq!(resp(raw).body, b"hello");
         // a closed connection in the middle is an error
@@ -689,10 +632,7 @@ mod tests {
             parse_response(&raw[..raw.len() - 1], true, L),
             Err(HttpError::UnexpectedEof)
         );
-        assert_eq!(
-            parse_response(b"HTT", true, L),
-            Err(HttpError::UnexpectedEof)
-        );
+        assert_eq!(parse_response(b"HTT", true, L), Err(HttpError::UnexpectedEof));
     }
 
     #[test]
@@ -707,14 +647,7 @@ mod tests {
         let both = b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n";
         assert_eq!(resp(both).body, b"hi");
         // bad chunk framing
-        assert!(
-            parse_response(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
-                false,
-                L
-            )
-            .is_err()
-        );
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", false, L).is_err());
         assert!(
             parse_response(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhiXX0\r\n\r\n",
@@ -723,14 +656,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            parse_response(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n",
-                false,
-                L
-            )
-            .is_err()
-        );
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n", false, L).is_err());
     }
 
     #[test]
@@ -774,10 +700,7 @@ mod tests {
 
     #[test]
     fn limits_and_reason_phrases() {
-        assert_eq!(
-            (Limits::RESPONSE.max_head, Limits::RESPONSE.max_body),
-            (16_384, 8_192)
-        );
+        assert_eq!((Limits::RESPONSE.max_head, Limits::RESPONSE.max_body), (16_384, 8_192));
         assert_eq!(
             (Limits::REQUEST.max_head, Limits::REQUEST.max_body),
             (16_384, 67_108_864)
@@ -872,12 +795,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(r.body.is_empty());
-        let chunked =
-            b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
-        assert_eq!(
-            parse_request(chunked, false, L).unwrap().unwrap().body,
-            b"abc"
-        );
+        let chunked = b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
+        assert_eq!(parse_request(chunked, false, L).unwrap().unwrap().body, b"abc");
         assert!(parse_request(b"GET /x\r\n\r\n", false, L).is_err());
         assert!(parse_request(b"GET /x HTTP/2\r\n\r\n", false, L).is_err());
     }

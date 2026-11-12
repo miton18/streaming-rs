@@ -9,21 +9,20 @@
 mod demo;
 mod stock;
 
-use std::net::SocketAddr;
-use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    io::ErrorKind,
+    net::SocketAddr,
+    process::{Command, Stdio},
+    sync::Arc,
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 use moonpool_core::TokioProviders;
 use streaming_api::{ApiConfig, ApiState, control};
-use streaming_core::{
-    Clock, DynKv, EnvSecrets, MemKv, Registry, SecretProvider, SystemClock, WorkerId,
-};
+use streaming_core::{Clock, DynKv, EnvSecrets, MemKv, Registry, SecretProvider, SystemClock, WorkerId};
 use streaming_kv_redis::{RedisConfig, RedisKv};
-use streaming_runtime::{
-    GossipConfig, GossipMembership, RuntimeEnv, Worker, WorkerConfig, builtin,
-};
+use streaming_runtime::{GossipConfig, GossipMembership, RuntimeEnv, Worker, WorkerConfig, builtin};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -106,7 +105,6 @@ fn environment(
 /// What to tell someone when `address` cannot be listened on. An operating
 /// system error code is not a message.
 fn listen_error(address: SocketAddr, error: &std::io::Error) -> String {
-    use std::io::ErrorKind;
     match error.kind() {
         ErrorKind::AddrInUse => format!("the address {address} is already in use"),
         ErrorKind::AddrNotAvailable => {
@@ -135,8 +133,7 @@ async fn wait_for_signal(shutdown: CancellationToken) {
 /// Try to open `url` in the user's browser. Best effort, never fatal.
 fn open_browser(url: &str) -> bool {
     let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
-        || std::fs::read_to_string("/proc/version")
-            .is_ok_and(|version| version.to_lowercase().contains("microsoft"));
+        || std::fs::read_to_string("/proc/version").is_ok_and(|version| version.to_lowercase().contains("microsoft"));
     let mut candidates: Vec<(&str, Vec<&str>)> = Vec::new();
     if wsl {
         candidates.push(("wslview", vec![url]));
@@ -162,13 +159,7 @@ fn open_browser(url: &str) -> bool {
 }
 
 /// A gossip configuration for one worker.
-fn gossip_config(
-    cluster: &str,
-    worker: &WorkerId,
-    listen: &str,
-    advertise: &str,
-    seeds: Vec<String>,
-) -> GossipConfig {
+fn gossip_config(cluster: &str, worker: &WorkerId, listen: &str, advertise: &str, seeds: Vec<String>) -> GossipConfig {
     let generation = SystemClock.now_ms().max(0) as u64;
     let mut config = GossipConfig::new(cluster, worker.as_str(), generation, listen);
     config.advertise_addr = advertise.to_owned();
@@ -176,12 +167,7 @@ fn gossip_config(
     config
 }
 
-async fn standalone(
-    listen: SocketAddr,
-    workers: u32,
-    no_open: bool,
-    gossip_port: u16,
-) -> Result<(), AnyError> {
+async fn standalone(listen: SocketAddr, workers: u32, no_open: bool, gossip_port: u16) -> Result<(), AnyError> {
     let store = MemKv::shared();
     let kv: DynKv = store.clone();
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
@@ -197,21 +183,15 @@ async fn standalone(
         let id = WorkerId::new(format!("worker-{index}"))?;
         let mut config = WorkerConfig::new(id.clone());
         config.api_addr = Some(address.to_string());
-        let mut worker = Worker::new(
-            environment(kv.clone(), registry, Arc::new(EnvSecrets)),
-            config,
-        );
+        let mut worker = Worker::new(environment(kv.clone(), registry, Arc::new(EnvSecrets)), config);
         if gossip_port != 0 {
             // The in-process workers gossip over loopback, like separate
             // machines would: the first one is everybody's seed.
             let port = |index: u32| format!("127.0.0.1:{}", u32::from(gossip_port) + index - 1);
-            let config =
-                gossip_config("standalone", &id, &port(index), &port(index), vec![port(1)]);
+            let config = gossip_config("standalone", &id, &port(index), &port(index), vec![port(1)]);
             match GossipMembership::join(TokioProviders::new(), config, kv.clone()).await {
                 Ok(membership) => worker = worker.with_membership(Arc::new(membership)),
-                Err(error) => eprintln!(
-                    "  gossip unavailable for {id} ({error}): using KV heartbeats instead"
-                ),
+                Err(error) => eprintln!("  gossip unavailable for {id} ({error}): using KV heartbeats instead"),
             }
         }
         tasks.push(tokio::spawn(worker.run(shutdown.clone())));
@@ -279,12 +259,7 @@ struct GossipOptions {
     cluster: String,
 }
 
-async fn worker(
-    id: String,
-    kv_url: String,
-    listen: Option<SocketAddr>,
-    gossip: GossipOptions,
-) -> Result<(), AnyError> {
+async fn worker(id: String, kv_url: String, listen: Option<SocketAddr>, gossip: GossipOptions) -> Result<(), AnyError> {
     let config = RedisConfig::from_url(&kv_url)?;
     let redis = RedisKv::new(TokioProviders::new(), config);
     redis.ping().await?;
@@ -317,13 +292,7 @@ async fn worker(
     );
     if let Some(gossip_listen) = gossip.listen {
         let advertise = gossip.advertise.unwrap_or_else(|| gossip_listen.clone());
-        let config = gossip_config(
-            &gossip.cluster,
-            &worker_id,
-            &gossip_listen,
-            &advertise,
-            gossip.seeds,
-        );
+        let config = gossip_config(&gossip.cluster, &worker_id, &gossip_listen, &advertise, gossip.seeds);
         let membership = GossipMembership::join(TokioProviders::new(), config, kv.clone()).await?;
         eprintln!("  gossip: listening on {gossip_listen}, advertised as {advertise}");
         worker = worker.with_membership(Arc::new(membership));

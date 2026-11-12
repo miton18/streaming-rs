@@ -18,9 +18,11 @@
 //! t:<tenant>:g:<graph>:s:<slice>:w:<node>:<win>  hash  <hexkey>@<epoch> -> accumulator
 //! ```
 
-use crate::data::Key;
-use crate::ids::{GraphKey, NodeId, SliceKey, TenantId, WorkerId};
-use crate::time::Window;
+use crate::{
+    data::Key,
+    ids::{GraphKey, NodeId, SliceKey, TenantId, WorkerId},
+    time::Window,
+};
 
 /// Counter bumped on every control-plane change.
 pub const CLUSTER_EPOCH: &str = "cluster:epoch";

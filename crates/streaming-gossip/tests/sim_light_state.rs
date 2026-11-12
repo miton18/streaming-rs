@@ -3,26 +3,21 @@
 //! and a (re)joining node resynchronises the whole cluster state within a
 //! bounded number of rounds / bytes.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::cast_possible_truncation
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_possible_truncation)]
 
 mod common;
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use common::{
-    NodeParams, Registry, builder_with, check_report, convergence_gap, fail, ground_truth, seeds,
-    sleep,
-};
+use common::{NodeParams, Registry, builder_with, check_report, convergence_gap, fail, ground_truth, seeds, sleep};
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, SimContext, SimulationResult, TimeProvider,
-    Workload, assert_always, assert_sometimes,
+    Attrition, AttritionScope, Chaos, ChaosMode, SimContext, SimulationResult, TimeProvider, Workload, assert_always,
+    assert_sometimes,
 };
 use streaming_gossip::{GossipError, Limits, wire};
 
@@ -160,10 +155,8 @@ impl LightWorkload {
                 // Bytes: the state itself (at most twice: concurrent exchanges
                 // may deliver the same versions) + per frame overhead (header,
                 // tags, the peer's digest).
-                let digest_bound =
-                    wire::MAX_VARINT_USIZE + N * (1 + g.node_id().len() + 4 * wire::MAX_VARINT_U64);
-                let per_frame =
-                    (wire::FRAME_HEADER_LEN + wire::MESSAGE_OVERHEAD + 32 + digest_bound) as u64;
+                let digest_bound = wire::MAX_VARINT_USIZE + N * (1 + g.node_id().len() + 4 * wire::MAX_VARINT_U64);
+                let per_frame = (wire::FRAME_HEADER_LEN + wire::MESSAGE_OVERHEAD + 32 + digest_bound) as u64;
                 let byte_bound = 2 * others_state_bound() as u64 + s.frames_received * per_frame;
                 assert_always!(
                     s.bytes_received <= byte_bound,
@@ -221,10 +214,7 @@ impl Workload for LightWorkload {
         }
         let live = self.registry.live();
         assert_always!(false, "light: cluster converges");
-        Err(fail(format!(
-            "no convergence: {:?}",
-            convergence_gap(&live, N)
-        )))
+        Err(fail(format!("no convergence: {:?}", convergence_gap(&live, N))))
     }
 }
 

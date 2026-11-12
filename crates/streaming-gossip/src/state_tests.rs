@@ -1,8 +1,4 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::cast_possible_truncation
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_possible_truncation)]
 
 use super::*;
 use crate::wire::{delta_size, digest_size};
@@ -23,12 +19,7 @@ fn node(id: &str, generation: u64) -> ClusterState {
 }
 
 /// `a` initiates a full SYN / SYN-ACK / ACK exchange with `b`.
-fn sync(
-    a: &mut ClusterState,
-    b: &mut ClusterState,
-    budget: usize,
-    now: Duration,
-) -> (DeltaInfo, DeltaInfo) {
+fn sync(a: &mut ClusterState, b: &mut ClusterState, budget: usize, now: Duration) -> (DeltaInfo, DeltaInfo) {
     let da = a.digest();
     let db = b.digest();
     let (to_a, ia) = b.compute_delta(&da, budget, 7);
@@ -58,22 +49,15 @@ fn local_limits_are_enforced() {
         s.set_local(&long_key, "v", Duration::ZERO),
         Err(GossipError::KeyTooLong { .. })
     ));
-    assert!(
-        s.set_local(&"k".repeat(l.max_key_len), "v", Duration::ZERO)
-            .unwrap()
-    );
+    assert!(s.set_local(&"k".repeat(l.max_key_len), "v", Duration::ZERO).unwrap());
     let long_val = "v".repeat(l.max_value_len + 1);
     assert!(matches!(
         s.set_local("x", &long_val, Duration::ZERO),
         Err(GossipError::ValueTooLong { .. })
     ));
-    assert!(
-        s.set_local("x", &"v".repeat(l.max_value_len), Duration::ZERO)
-            .unwrap()
-    );
+    assert!(s.set_local("x", &"v".repeat(l.max_value_len), Duration::ZERO).unwrap());
     for i in 2..l.max_keys {
-        s.set_local(&format!("key{i}"), "v", Duration::ZERO)
-            .unwrap();
+        s.set_local(&format!("key{i}"), "v", Duration::ZERO).unwrap();
     }
     assert_eq!(s.node_view("a").unwrap().values.len(), l.max_keys);
     assert_eq!(
@@ -190,10 +174,7 @@ fn a_budget_of_exactly_the_delta_size_is_enough() {
     let size = info.bytes;
 
     let (exact, info) = a.compute_delta(&peer, size, 3);
-    assert!(
-        !info.truncated,
-        "a budget equal to the size must fit it all"
-    );
+    assert!(!info.truncated, "a budget equal to the size must fit it all");
     assert_eq!((info.bytes, exact), (size, full));
 
     for budget in [size - 1, size / 2, 40] {
@@ -214,19 +195,14 @@ fn heartbeats_are_not_starved_by_a_large_backlog() {
     sync(&mut a, &mut c, 1 << 20, S);
     sync(&mut b, &mut a, 1 << 20, S);
     for i in 0..60 {
-        a.set_local(&format!("k{i}"), &"z".repeat(500), Duration::ZERO)
-            .unwrap();
+        a.set_local(&format!("k{i}"), &"z".repeat(500), Duration::ZERO).unwrap();
     }
     c.beat();
     sync(&mut a, &mut c, 1 << 20, 2 * S);
     // a now has a huge own backlog for b plus a newer heartbeat of c.
     let (delta, info) = a.compute_delta(&b.digest(), 1500, 3);
     assert!(info.truncated);
-    let c_delta = delta
-        .nodes
-        .iter()
-        .find(|n| n.node_id == "c")
-        .expect("c header present");
+    let c_delta = delta.nodes.iter().find(|n| n.node_id == "c").expect("c header present");
     assert_eq!(c_delta.heartbeat, 1);
     assert!(c_delta.updates.is_empty());
 }
@@ -249,10 +225,7 @@ fn higher_generation_replaces_everything() {
     let v = b.node_view("a").unwrap();
     assert_eq!(v.generation, 2);
     assert!(v.alive, "a generation bump is proof of life");
-    assert_eq!(
-        v.values,
-        BTreeMap::from([("shared".to_string(), "new".to_string())])
-    );
+    assert_eq!(v.values, BTreeMap::from([("shared".to_string(), "new".to_string())]));
     assert_eq!(b.counters().generation_bumps, 1);
 
     // A stale copy of generation 1 (e.g. relayed by a slow peer) is ignored.
@@ -262,11 +235,7 @@ fn higher_generation_replaces_everything() {
     assert_eq!(values_of(&b, "a"), values_of(&a2, "a"));
     // And b never sends generation 1 data back to a2 (it does not know it any more).
     let (d, _) = b.compute_delta(&a2.digest(), 1 << 16, 0);
-    assert!(
-        d.nodes
-            .iter()
-            .all(|n| n.node_id != "a" || n.generation == 2)
-    );
+    assert!(d.nodes.iter().all(|n| n.node_id != "a" || n.generation == 2));
 }
 
 #[test]
@@ -469,19 +438,10 @@ fn invalid_incoming_deltas_are_rejected() {
         value: Some(v),
         version,
     };
+    b.apply_delta(mk(vec![up("k".repeat(l.max_key_len + 1), "v".into(), 1)], 1), S);
+    b.apply_delta(mk(vec![up("k".into(), "v".repeat(l.max_value_len + 1), 1)], 1), S);
     b.apply_delta(
-        mk(vec![up("k".repeat(l.max_key_len + 1), "v".into(), 1)], 1),
-        S,
-    );
-    b.apply_delta(
-        mk(vec![up("k".into(), "v".repeat(l.max_value_len + 1), 1)], 1),
-        S,
-    );
-    b.apply_delta(
-        mk(
-            vec![up("k".into(), "v".into(), 2), up("j".into(), "v".into(), 2)],
-            2,
-        ),
+        mk(vec![up("k".into(), "v".into(), 2), up("j".into(), "v".into(), 2)], 2),
         S,
     );
     b.apply_delta(mk(vec![up("k".into(), "v".into(), 5)], 3), S);
@@ -616,8 +576,7 @@ fn digest_and_full_state_sizes_are_bounded_by_limits() {
     );
     for i in 0..l.max_keys {
         let key = format!("{i:0width$}", width = l.max_key_len);
-        a.set_local(&key, &"v".repeat(l.max_value_len), Duration::ZERO)
-            .unwrap();
+        a.set_local(&key, &"v".repeat(l.max_value_len), Duration::ZERO).unwrap();
     }
     for _ in 0..1000 {
         a.beat();
@@ -689,15 +648,7 @@ fn randomized_convergence() {
         let mut cfg = cfg();
         cfg.tombstone_grace = Duration::from_secs(1 + rng.next() % 20);
         let mut nodes: Vec<ClusterState> = (0..n)
-            .map(|i| {
-                ClusterState::new(
-                    &format!("n{i}"),
-                    1,
-                    &format!("n{i}"),
-                    cfg.clone(),
-                    Duration::ZERO,
-                )
-            })
+            .map(|i| ClusterState::new(&format!("n{i}"), 1, &format!("n{i}"), cfg.clone(), Duration::ZERO))
             .collect();
         let mut now = Duration::ZERO;
         for _step in 0..400 {

@@ -4,16 +4,12 @@
 //! simulations: producers append, readers poll by position, acknowledged
 //! records are released.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use moonpool_core::{Providers, TimeProvider};
 use parking_lot::Mutex;
-use streaming_core::{
-    Datum, PartitionReader, Position, SourceConnector, SourceError, SourceRecord, Timestamp,
-};
+use streaming_core::{Datum, PartitionReader, Position, SourceConnector, SourceError, SourceRecord, Timestamp};
 use tokio::sync::Notify;
 
 #[derive(Default)]
@@ -174,11 +170,7 @@ impl<P: Providers> SourceConnector for MemLogSource<P> {
         Ok(self.log.partitions())
     }
 
-    async fn open(
-        &self,
-        partition: u32,
-        after: Option<Position>,
-    ) -> Result<Box<dyn PartitionReader>, SourceError> {
+    async fn open(&self, partition: u32, after: Option<Position>) -> Result<Box<dyn PartitionReader>, SourceError> {
         Ok(Box::new(MemLogReader {
             log: self.log.clone(),
             providers: self.providers.clone(),
@@ -197,11 +189,7 @@ struct MemLogReader<P: Providers> {
 
 #[async_trait]
 impl<P: Providers> PartitionReader for MemLogReader<P> {
-    async fn poll(
-        &mut self,
-        max: usize,
-        max_wait: Duration,
-    ) -> Result<Vec<SourceRecord>, SourceError> {
+    async fn poll(&mut self, max: usize, max_wait: Duration) -> Result<Vec<SourceRecord>, SourceError> {
         let wait = self.log.appended();
         let mut records = self.log.read(self.partition, self.next, max);
         if records.is_empty() {
@@ -227,8 +215,9 @@ impl<P: Providers> PartitionReader for MemLogReader<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use streaming_core::datum;
+
+    use super::*;
 
     #[test]
     fn read_ack_and_release() {
@@ -239,17 +228,11 @@ mod tests {
         assert_eq!(log.end(0), Some(Position(0, 5, 0)));
         assert_eq!(log.end(1), None);
         let first = log.read(0, 0, 3);
-        assert_eq!(
-            first.iter().map(|r| r.position.1).collect::<Vec<_>>(),
-            [1, 2, 3]
-        );
+        assert_eq!(first.iter().map(|r| r.position.1).collect::<Vec<_>>(), [1, 2, 3]);
         log.ack(0, Position(0, 2, 0));
         assert_eq!(log.retained(0), 3);
         // A reader behind the released prefix resumes at the first retained record.
         let rest = log.read(0, 0, 10);
-        assert_eq!(
-            rest.iter().map(|r| r.position.1).collect::<Vec<_>>(),
-            [3, 4, 5]
-        );
+        assert_eq!(rest.iter().map(|r| r.position.1).collect::<Vec<_>>(), [3, 4, 5]);
     }
 }

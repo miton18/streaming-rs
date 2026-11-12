@@ -3,8 +3,7 @@
 //! Identifiers end up inside KV keys (`t:<tenant>:g:<graph>:...`) and inside
 //! slice names (`src.<node>.<partition>`), so their alphabet is restricted.
 
-use std::fmt;
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -99,23 +98,33 @@ macro_rules! string_id {
 
 string_id!(
     /// A tenant. Every graph, actor, key and metric belongs to exactly one. Alphabet `[A-Za-z0-9_-]`.
-    TenantId, "tenant id", []
+    TenantId,
+    "tenant id",
+    []
 );
 string_id!(
     /// A graph, unique inside its tenant. Alphabet `[A-Za-z0-9_-]`.
-    GraphId, "graph id", []
+    GraphId,
+    "graph id",
+    []
 );
 string_id!(
     /// A node of a graph, unique inside its graph. Alphabet `[A-Za-z0-9_-]`.
-    NodeId, "node id", []
+    NodeId,
+    "node id",
+    []
 );
 string_id!(
     /// A worker process of the cluster. Alphabet `[A-Za-z0-9_.-]`.
-    WorkerId, "worker id", ['.']
+    WorkerId,
+    "worker id",
+    ['.']
 );
 string_id!(
     /// Reference to a registered operator, e.g. `std/count@1`. Alphabet `[A-Za-z0-9_./@-]`.
-    OpRef, "operator ref", ['/', '@', '.']
+    OpRef,
+    "operator ref",
+    ['/', '@', '.']
 );
 
 /// A graph inside its tenant. Displays as `tenant/graph`.
@@ -216,9 +225,7 @@ impl FromStr for SliceId {
                 .ok_or_else(|| err("expected `src.<node>.<partition>`"))?;
             Ok(SliceId::Source {
                 node: NodeId::new(node)?,
-                partition: partition
-                    .parse()
-                    .map_err(|_| err("partition is not a number"))?,
+                partition: partition.parse().map_err(|_| err("partition is not a number"))?,
             })
         } else if let Some(node) = s.strip_prefix("agg.") {
             Ok(SliceId::Emitter {
@@ -272,8 +279,7 @@ impl FromStr for SliceKey {
     type Err = IdError;
     fn from_str(s: &str) -> Result<Self, IdError> {
         let mut parts = s.splitn(3, '/');
-        let (Some(tenant), Some(graph), Some(slice)) = (parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(tenant), Some(graph), Some(slice)) = (parts.next(), parts.next(), parts.next()) else {
             return Err(IdError {
                 kind: "slice key",
                 value: s.to_owned(),

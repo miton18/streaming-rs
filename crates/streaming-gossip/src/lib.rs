@@ -49,23 +49,23 @@ pub mod error;
 pub mod state;
 pub mod wire;
 
-use std::future::Future;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
-
-use moonpool_core::{
-    NetworkProvider, Providers, RandomProvider, TaskProvider, TcpListenerTrait, TimeProvider,
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
-use parking_lot::Mutex;
-use tokio::sync::watch;
-use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub use config::{GossipConfig, Limits};
 pub use error::{GossipError, WireError};
-pub use state::{Member, NodeView};
-
+use moonpool_core::{NetworkProvider, Providers, RandomProvider, TaskProvider, TcpListenerTrait, TimeProvider};
+use parking_lot::Mutex;
 use state::{ClusterState, StateConfig, TargetRng};
+pub use state::{Member, NodeView};
+use tokio::sync::watch;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use wire::{Delta, Message};
 
 /// Observability counters of a node.
@@ -221,27 +221,19 @@ impl<P: Providers> Gossip<P> {
     ///
     /// # Errors
     /// Invalid configuration or bind failure.
-    pub async fn start(
-        providers: P,
-        config: GossipConfig,
-        shutdown: CancellationToken,
-    ) -> Result<Self, GossipError> {
+    pub async fn start(providers: P, config: GossipConfig, shutdown: CancellationToken) -> Result<Self, GossipError> {
         config.validate()?;
-        let listener = providers
-            .network()
-            .bind(&config.listen_addr)
-            .await
-            .map_err(|e| {
-                let addr = config.listen_addr.clone();
-                if e.kind() == std::io::ErrorKind::AddrInUse {
-                    GossipError::AddrInUse { addr }
-                } else {
-                    GossipError::Bind {
-                        addr,
-                        reason: e.to_string(),
-                    }
+        let listener = providers.network().bind(&config.listen_addr).await.map_err(|e| {
+            let addr = config.listen_addr.clone();
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                GossipError::AddrInUse { addr }
+            } else {
+                GossipError::Bind {
+                    addr,
+                    reason: e.to_string(),
                 }
-            })?;
+            }
+        })?;
         let now = providers.time().timer();
         let state = ClusterState::new(
             &config.node_id,
@@ -266,12 +258,7 @@ impl<P: Providers> Gossip<P> {
             "gossip-server",
             server_loop(Arc::clone(&inner), listener),
         );
-        spawn_guarded(
-            &providers,
-            &shutdown,
-            "gossip-rounds",
-            round_loop(Arc::clone(&inner)),
-        );
+        spawn_guarded(&providers, &shutdown, "gossip-rounds", round_loop(Arc::clone(&inner)));
         tracing::debug!(
             node = %inner.config.node_id,
             generation = inner.config.generation,
@@ -425,42 +412,27 @@ impl<P: Providers> Inner<P> {
     fn record_digest(&self, bytes: usize) {
         let b = bytes as u64;
         self.counters.last_digest_bytes.store(b, Ordering::Relaxed);
-        self.counters
-            .max_digest_bytes
-            .fetch_max(b, Ordering::Relaxed);
+        self.counters.max_digest_bytes.fetch_max(b, Ordering::Relaxed);
     }
 
     fn record_delta(&self, bytes: usize) {
         let b = bytes as u64;
         self.counters.last_delta_bytes.store(b, Ordering::Relaxed);
-        self.counters
-            .max_delta_bytes
-            .fetch_max(b, Ordering::Relaxed);
+        self.counters.max_delta_bytes.fetch_max(b, Ordering::Relaxed);
     }
 
-    async fn send<S: futures::io::AsyncWrite + Unpin + Send>(
-        &self,
-        s: &mut S,
-        msg: &Message,
-    ) -> Result<(), WireError> {
+    async fn send<S: futures::io::AsyncWrite + Unpin + Send>(&self, s: &mut S, msg: &Message) -> Result<(), WireError> {
         let n = wire::write_frame(s, msg).await?;
         inc(&self.counters.frames_sent);
-        self.counters
-            .bytes_sent
-            .fetch_add(n as u64, Ordering::Relaxed);
+        self.counters.bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
         Ok(())
     }
 
-    async fn recv<S: futures::io::AsyncRead + Unpin + Send>(
-        &self,
-        s: &mut S,
-    ) -> Result<Message, WireError> {
+    async fn recv<S: futures::io::AsyncRead + Unpin + Send>(&self, s: &mut S) -> Result<Message, WireError> {
         match wire::read_frame(s, self.config.max_frame_bytes).await {
             Ok((msg, n)) => {
                 inc(&self.counters.frames_received);
-                self.counters
-                    .bytes_received
-                    .fetch_add(n as u64, Ordering::Relaxed);
+                self.counters.bytes_received.fetch_add(n as u64, Ordering::Relaxed);
                 Ok(msg)
             }
             Err(WireError::Io(e)) => Err(WireError::Io(e)),
@@ -497,9 +469,7 @@ impl<P: Providers> Inner<P> {
 async fn round_loop<P: Providers>(inner: Arc<Inner<P>>) {
     let interval = inner.config.gossip_interval;
     // Random initial offset so that nodes started together do not gossip in lockstep.
-    let jitter_us = u64::try_from(interval.as_micros())
-        .unwrap_or(u64::MAX)
-        .max(1);
+    let jitter_us = u64::try_from(interval.as_micros()).unwrap_or(u64::MAX).max(1);
     let first = Duration::from_micros(inner.providers.random().random_range(0..jitter_us));
     if inner.providers.time().sleep(first).await.is_err() {
         return;
@@ -544,10 +514,7 @@ async fn exchange<P: Providers>(inner: Arc<Inner<P>>, addr: String) {
     inc(&inner.counters.exchanges_initiated);
     let time = inner.providers.time().clone();
     let mut stream = match time
-        .timeout(
-            inner.config.connect_timeout,
-            inner.providers.network().connect(&addr),
-        )
+        .timeout(inner.config.connect_timeout, inner.providers.network().connect(&addr))
         .await
     {
         Ok(Ok(s)) => s,
@@ -598,9 +565,7 @@ where
         Message::SynAck { digest, delta } => (digest, delta),
         Message::BadCluster { cluster_id } => {
             inc(&inner.counters.cluster_mismatches);
-            return Err(WireError::Protocol(format!(
-                "peer is in cluster {cluster_id:?}"
-            )));
+            return Err(WireError::Protocol(format!("peer is in cluster {cluster_id:?}")));
         }
         _ => return Err(inner.protocol_error("expected SynAck")),
     };
@@ -618,16 +583,11 @@ impl<P: Providers> Drop for InboundSlot<P> {
     }
 }
 
-async fn server_loop<P: Providers>(
-    inner: Arc<Inner<P>>,
-    listener: <P::Network as NetworkProvider>::TcpListener,
-) {
+async fn server_loop<P: Providers>(inner: Arc<Inner<P>>, listener: <P::Network as NetworkProvider>::TcpListener) {
     loop {
         match listener.accept().await {
             Ok((stream, _peer)) => {
-                if inner.inbound.fetch_add(1, Ordering::Relaxed)
-                    >= inner.config.max_inbound_exchanges
-                {
+                if inner.inbound.fetch_add(1, Ordering::Relaxed) >= inner.config.max_inbound_exchanges {
                     inner.inbound.fetch_sub(1, Ordering::Relaxed);
                     inc(&inner.counters.inbound_refused);
                     drop(stream);
@@ -635,25 +595,14 @@ async fn server_loop<P: Providers>(
                 }
                 let slot = InboundSlot(Arc::clone(&inner));
                 let inner2 = Arc::clone(&inner);
-                spawn_guarded(
-                    &inner.providers,
-                    &inner.shutdown,
-                    "gossip-inbound",
-                    async move {
-                        let _slot = slot;
-                        serve(inner2, stream).await;
-                    },
-                );
+                spawn_guarded(&inner.providers, &inner.shutdown, "gossip-inbound", async move {
+                    let _slot = slot;
+                    serve(inner2, stream).await;
+                });
             }
             Err(e) => {
                 tracing::debug!(error = %e, "accept failed");
-                if inner
-                    .providers
-                    .time()
-                    .sleep(Duration::from_millis(10))
-                    .await
-                    .is_err()
-                {
+                if inner.providers.time().sleep(Duration::from_millis(10)).await.is_err() {
                     return;
                 }
             }
@@ -699,9 +648,7 @@ where
         return Ok(false);
     }
     let (digest, delta) = inner.answer(&peer_digest)?;
-    inner
-        .send(stream, &Message::SynAck { digest, delta })
-        .await?;
+    inner.send(stream, &Message::SynAck { digest, delta }).await?;
     let delta = match inner.recv(stream).await? {
         Message::Ack { delta } => delta,
         _ => return Err(inner.protocol_error("expected Ack")),

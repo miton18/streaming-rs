@@ -1,20 +1,22 @@
 //! `Warp10Sink<TokioProviders>` against the fake ingress over real localhost
 //! TCP, plus a few hand-written misbehaving servers.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use moonpool_core::{NetworkProvider, Providers, TcpListenerTrait, TokioProviders};
 use serde_json::json;
 use streaming_core::{
-    Emit, EmitId, GraphId, NodeId, OpFactory, OpRef, Origin, Position, Registry, SinkConnector,
-    SliceId, StaticSecrets, SystemClock, TenantId, datum,
+    Emit, EmitId, GraphId, NodeId, OpFactory, OpRef, Origin, Position, Registry, SinkConnector, SliceId, StaticSecrets,
+    SystemClock, TenantId, datum,
 };
-use streaming_warp10::fake::{FakeWarp10, PointKey};
-use streaming_warp10::{Gts, GtsValue, Warp10Config, Warp10Sink};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use streaming_warp10::{
+    Gts, GtsValue, Warp10Config, Warp10Sink,
+    fake::{FakeWarp10, PointKey},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
 use tokio_util::sync::CancellationToken;
 
 const TOKEN: &str = "write-token-123";
@@ -96,20 +98,11 @@ async fn start() -> Server {
     tokio::spawn(async move {
         let _ = f.serve_listener(providers, listener, s).await;
     });
-    Server {
-        fake,
-        port,
-        shutdown,
-    }
+    Server { fake, port, shutdown }
 }
 
-fn sink_for(
-    port: u16,
-    token: &str,
-    tweak: impl FnOnce(&mut Warp10Config),
-) -> Warp10Sink<TokioProviders> {
-    let mut config =
-        Warp10Config::new(&format!("http://127.0.0.1:{port}/api/v0/update"), token).unwrap();
+fn sink_for(port: u16, token: &str, tweak: impl FnOnce(&mut Warp10Config)) -> Warp10Sink<TokioProviders> {
+    let mut config = Warp10Config::new(&format!("http://127.0.0.1:{port}/api/v0/update"), token).unwrap();
     config.timeout = Duration::from_secs(5);
     tweak(&mut config);
     Warp10Sink::new(TokioProviders::new(), config).unwrap()
@@ -130,18 +123,12 @@ async fn happy_path() {
 #[tokio::test]
 async fn time_unit_is_applied() {
     let server = start().await;
-    let sink = sink_for(server.port, TOKEN, |c| {
-        c.time_unit = streaming_warp10::TimeUnit::Ns
-    });
-    sink.write(&[emit(0, Gts::new("m").at(5).value(1.0))])
-        .await
-        .unwrap();
+    let sink = sink_for(server.port, TOKEN, |c| c.time_unit = streaming_warp10::TimeUnit::Ns);
+    sink.write(&[emit(0, Gts::new("m").at(5).value(1.0))]).await.unwrap();
     assert_eq!(
-        server.fake.get(&PointKey::new(
-            "m",
-            Vec::<(String, String)>::new(),
-            5_000_000
-        )),
+        server
+            .fake
+            .get(&PointKey::new("m", Vec::<(String, String)>::new(), 5_000_000)),
         Some(GtsValue::Double(1.0))
     );
 }
@@ -166,10 +153,7 @@ async fn http_503_then_retry() {
     let b = batch(5);
     for _ in 0..2 {
         let err = sink.write(&b).await.unwrap_err();
-        assert!(
-            err.0.contains("503") && err.0.contains("injected failure"),
-            "{err}"
-        );
+        assert!(err.0.contains("503") && err.0.contains("injected failure"), "{err}");
         assert!(server.fake.is_empty());
     }
     sink.write(&b).await.unwrap();
@@ -208,9 +192,7 @@ async fn connection_dropped_before_commit_then_retry() {
 async fn overwrite_semantics_last_write_wins() {
     let server = start().await;
     let sink = sink_for(server.port, TOKEN, |_| {});
-    sink.write(&[emit(0, Gts::new("m").at(1).value(1))])
-        .await
-        .unwrap();
+    sink.write(&[emit(0, Gts::new("m").at(1).value(1))]).await.unwrap();
     sink.write(&[emit(0, Gts::new("m").at(1).value("now a string"))])
         .await
         .unwrap();
@@ -322,10 +304,7 @@ async fn fragmented_200_and_chunked_error_bodies() {
         }
     })
     .await;
-    sink_for(port, TOKEN, |_| {})
-        .write(&batch(1))
-        .await
-        .unwrap();
+    sink_for(port, TOKEN, |_| {}).write(&batch(1)).await.unwrap();
 
     // 500 with a chunked body, and a body that echoes the token
     let port = raw_server(|mut stream| async move {
@@ -339,26 +318,17 @@ async fn fragmented_200_and_chunked_error_bodies() {
         stream.write_all(chunked.as_bytes()).await.unwrap();
     })
     .await;
-    let err = sink_for(port, TOKEN, |_| {})
-        .write(&batch(1))
-        .await
-        .unwrap_err();
+    let err = sink_for(port, TOKEN, |_| {}).write(&batch(1)).await.unwrap_err();
     assert!(err.0.contains("500") && err.0.contains("line two"), "{err}");
     assert!(!err.0.contains(TOKEN), "{err}");
 
     // 200 is the only success: 204 is an error
     let port = raw_server(|mut stream| async move {
         let _ = read_request_head(&mut stream).await;
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
-            .await
-            .unwrap();
+        stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await.unwrap();
     })
     .await;
-    let err = sink_for(port, TOKEN, |_| {})
-        .write(&batch(1))
-        .await
-        .unwrap_err();
+    let err = sink_for(port, TOKEN, |_| {}).write(&batch(1)).await.unwrap_err();
     assert!(err.0.contains("204"), "{err}");
 
     // garbage
@@ -367,12 +337,7 @@ async fn fragmented_200_and_chunked_error_bodies() {
         stream.write_all(b"not http at all\r\n\r\n").await.unwrap();
     })
     .await;
-    assert!(
-        sink_for(port, TOKEN, |_| {})
-            .write(&batch(1))
-            .await
-            .is_err()
-    );
+    assert!(sink_for(port, TOKEN, |_| {}).write(&batch(1)).await.is_err());
 }
 
 #[tokio::test]
@@ -382,8 +347,7 @@ async fn request_carries_token_content_type_and_text_body() {
         let tx = tx.clone();
         async move {
             let head = read_request_head(&mut stream).await;
-            tx.send(String::from_utf8_lossy(&head).into_owned())
-                .unwrap();
+            tx.send(String::from_utf8_lossy(&head).into_owned()).unwrap();
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .await
@@ -397,14 +361,8 @@ async fn request_carries_token_content_type_and_text_body() {
         .unwrap();
     let raw = rx.recv().await.unwrap();
     assert!(raw.starts_with("POST /api/v0/update HTTP/1.1\r\n"), "{raw}");
-    assert!(
-        raw.contains(&format!("Host: 127.0.0.1:{port}\r\n")),
-        "{raw}"
-    );
-    assert!(
-        raw.contains(&format!("X-Warp10-Token: {TOKEN}\r\n")),
-        "{raw}"
-    );
+    assert!(raw.contains(&format!("Host: 127.0.0.1:{port}\r\n")), "{raw}");
+    assert!(raw.contains(&format!("X-Warp10-Token: {TOKEN}\r\n")), "{raw}");
     assert!(raw.contains("Content-Type: text/plain\r\n"), "{raw}");
     assert!(raw.ends_with("\r\n\r\n1000// a%20b{k=v} T\n"), "{raw}");
 }
@@ -443,12 +401,6 @@ async fn registered_in_the_registry_and_builds_from_json() {
     assert_eq!(server.fake.points(), expected(3));
 
     // unknown secret, bad config
-    assert!(
-        factory(
-            &context,
-            &json!({"endpoint": "http://h/", "token": {"secret": "nope"}})
-        )
-        .is_err()
-    );
+    assert!(factory(&context, &json!({"endpoint": "http://h/", "token": {"secret": "nope"}})).is_err());
     assert!(factory(&context, &json!({"endpoint": "http://h/"})).is_err());
 }

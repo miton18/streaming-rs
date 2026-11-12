@@ -14,18 +14,24 @@
 //! server task being crashed and restarted: boot a fresh
 //! `fake.clone().serve(..)` and the old state is still there.
 
-use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
-use std::io;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashMap},
+    future::Future,
+    io,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
-use futures::StreamExt;
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use futures::stream::FuturesUnordered;
+use futures::{
+    StreamExt,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    stream::FuturesUnordered,
+};
 use moonpool_core::{NetworkProvider, Providers, TcpListenerTrait, TimeProvider, select};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -53,8 +59,7 @@ impl Hash {
         } else {
             self.next_seq += 1;
             self.index.insert(field.to_vec(), self.next_seq);
-            self.by_seq
-                .insert(self.next_seq, (field.to_vec(), value.to_vec()));
+            self.by_seq.insert(self.next_seq, (field.to_vec(), value.to_vec()));
             true
         }
     }
@@ -345,12 +350,9 @@ impl FakeRedis {
                 match store.get(&a[0][..]) {
                     None => Value::Array(vec![]),
                     Some(Entry::Str(_)) => wrong_type(),
-                    Some(Entry::Hash(h)) => Value::Array(
-                        h.by_seq
-                            .values()
-                            .flat_map(|(f, v)| [bulk(f), bulk(v)])
-                            .collect(),
-                    ),
+                    Some(Entry::Hash(h)) => {
+                        Value::Array(h.by_seq.values().flat_map(|(f, v)| [bulk(f), bulk(v)]).collect())
+                    }
                 }
             }
             "HDEL" => {
@@ -374,10 +376,7 @@ impl FakeRedis {
                 if a.len() < 2 {
                     return arity(&name);
                 }
-                let Some(cursor) = std::str::from_utf8(&a[1])
-                    .ok()
-                    .and_then(|c| c.parse::<u64>().ok())
-                else {
+                let Some(cursor) = std::str::from_utf8(&a[1]).ok().and_then(|c| c.parse::<u64>().ok()) else {
                     return err("ERR invalid cursor");
                 };
                 let mut count = 10usize;
@@ -401,10 +400,7 @@ impl FakeRedis {
                         // page and keep the cursor.
                         let call = self.shared.scan_calls.fetch_add(1, Ordering::Relaxed);
                         if call % 5 == 4 && cursor != 0 {
-                            return Value::Array(vec![
-                                bulk(cursor.to_string().as_bytes()),
-                                Value::Array(vec![]),
-                            ]);
+                            return Value::Array(vec![bulk(cursor.to_string().as_bytes()), Value::Array(vec![])]);
                         }
                         let mut flat = Vec::new();
                         let mut last = None;
@@ -515,12 +511,7 @@ impl FakeRedis {
     ///
     /// # Errors
     /// Binding `addr` failed.
-    pub async fn serve<P: Providers>(
-        self,
-        providers: P,
-        addr: &str,
-        shutdown: CancellationToken,
-    ) -> io::Result<()> {
+    pub async fn serve<P: Providers>(self, providers: P, addr: &str, shutdown: CancellationToken) -> io::Result<()> {
         let listener = providers.network().bind(addr).await?;
         type Conn = Pin<Box<dyn Future<Output = ()> + Send>>;
         let mut conns: FuturesUnordered<Conn> = FuturesUnordered::new();
@@ -548,10 +539,7 @@ mod tests {
     use super::*;
 
     fn run(fake: &FakeRedis, session: &mut Session, cmd: &[&str]) -> Value {
-        let args: Vec<Bytes> = cmd
-            .iter()
-            .map(|s| Bytes::copy_from_slice(s.as_bytes()))
-            .collect();
+        let args: Vec<Bytes> = cmd.iter().map(|s| Bytes::copy_from_slice(s.as_bytes())).collect();
         fake.execute(session, &args)
     }
 
@@ -562,53 +550,28 @@ mod tests {
     #[test]
     fn strings_and_wrong_type() {
         let (f, mut s) = fresh();
-        assert_eq!(
-            run(&f, &mut s, &["SET", "a", "1"]),
-            Value::Simple("OK".into())
-        );
+        assert_eq!(run(&f, &mut s, &["SET", "a", "1"]), Value::Simple("OK".into()));
         assert_eq!(run(&f, &mut s, &["INCR", "a"]), Value::Integer(2));
         assert_eq!(run(&f, &mut s, &["HSET", "h", "f", "v"]), Value::Integer(1));
-        assert!(
-            matches!(run(&f, &mut s, &["GET", "h"]), Value::Error(m) if m.starts_with("WRONGTYPE"))
-        );
-        assert!(
-            matches!(run(&f, &mut s, &["HGET", "a", "f"]), Value::Error(m) if m.starts_with("WRONGTYPE"))
-        );
-        assert!(
-            matches!(run(&f, &mut s, &["INCR", "h"]), Value::Error(m) if m.starts_with("WRONGTYPE"))
-        );
+        assert!(matches!(run(&f, &mut s, &["GET", "h"]), Value::Error(m) if m.starts_with("WRONGTYPE")));
+        assert!(matches!(run(&f, &mut s, &["HGET", "a", "f"]), Value::Error(m) if m.starts_with("WRONGTYPE")));
+        assert!(matches!(run(&f, &mut s, &["INCR", "h"]), Value::Error(m) if m.starts_with("WRONGTYPE")));
         run(&f, &mut s, &["SET", "t", "abc"]);
-        assert!(
-            matches!(run(&f, &mut s, &["INCR", "t"]), Value::Error(m) if m.contains("not an integer"))
-        );
+        assert!(matches!(run(&f, &mut s, &["INCR", "t"]), Value::Error(m) if m.contains("not an integer")));
         run(&f, &mut s, &["SET", "p", "+5"]);
         assert!(matches!(run(&f, &mut s, &["INCR", "p"]), Value::Error(_)));
         run(&f, &mut s, &["SET", "m", "9223372036854775807"]);
-        assert!(
-            matches!(run(&f, &mut s, &["INCR", "m"]), Value::Error(m) if m.contains("overflow"))
-        );
+        assert!(matches!(run(&f, &mut s, &["INCR", "m"]), Value::Error(m) if m.contains("overflow")));
     }
 
     #[test]
     fn hash_lifecycle_and_hsetnx() {
         let (f, mut s) = fresh();
-        assert_eq!(
-            run(&f, &mut s, &["HSETNX", "h", "f", "1"]),
-            Value::Integer(1)
-        );
-        assert_eq!(
-            run(&f, &mut s, &["HSETNX", "h", "f", "2"]),
-            Value::Integer(0)
-        );
+        assert_eq!(run(&f, &mut s, &["HSETNX", "h", "f", "1"]), Value::Integer(1));
+        assert_eq!(run(&f, &mut s, &["HSETNX", "h", "f", "2"]), Value::Integer(0));
         assert_eq!(f.peek_field("h", "f"), Some(b"1".to_vec()));
-        assert_eq!(
-            run(&f, &mut s, &["HSET", "h", "f", "3", "g", "4"]),
-            Value::Integer(1)
-        );
-        assert_eq!(
-            run(&f, &mut s, &["HDEL", "h", "f", "nope"]),
-            Value::Integer(1)
-        );
+        assert_eq!(run(&f, &mut s, &["HSET", "h", "f", "3", "g", "4"]), Value::Integer(1));
+        assert_eq!(run(&f, &mut s, &["HDEL", "h", "f", "nope"]), Value::Integer(1));
         assert_eq!(f.key_count(), 1);
         assert_eq!(run(&f, &mut s, &["HDEL", "h", "g"]), Value::Integer(1));
         assert_eq!(f.key_count(), 0, "hash disappears with its last field");
@@ -625,20 +588,13 @@ mod tests {
         let mut cursor = "0".to_owned();
         let mut pages = 0;
         loop {
-            let Value::Array(parts) = run(&f, &mut s, &["HSCAN", "h", &cursor, "COUNT", "37"])
-            else {
+            let Value::Array(parts) = run(&f, &mut s, &["HSCAN", "h", &cursor, "COUNT", "37"]) else {
                 panic!()
             };
-            let Value::Bulk(next) = &parts[0] else {
-                panic!()
-            };
-            let Value::Array(flat) = &parts[1] else {
-                panic!()
-            };
+            let Value::Bulk(next) = &parts[0] else { panic!() };
+            let Value::Array(flat) = &parts[1] else { panic!() };
             for pair in flat.chunks(2) {
-                let Value::Bulk(field) = &pair[0] else {
-                    panic!()
-                };
+                let Value::Bulk(field) = &pair[0] else { panic!() };
                 assert!(seen.insert(field.clone()), "duplicate field in one scan");
             }
             pages += 1;
@@ -660,9 +616,7 @@ mod tests {
         let Value::Array(parts) = run(&f, &mut s, &["HSCAN", "h", "0", "COUNT", "10"]) else {
             panic!()
         };
-        let Value::Bulk(next) = &parts[0] else {
-            panic!()
-        };
+        let Value::Bulk(next) = &parts[0] else { panic!() };
         let cursor = String::from_utf8(next.to_vec()).unwrap();
         // Delete everything seen so far and add a new field mid-scan.
         for i in 0..10 {
@@ -672,16 +626,11 @@ mod tests {
         let mut total = 0;
         let mut cursor = cursor;
         loop {
-            let Value::Array(parts) = run(&f, &mut s, &["HSCAN", "h", &cursor, "COUNT", "10"])
-            else {
+            let Value::Array(parts) = run(&f, &mut s, &["HSCAN", "h", &cursor, "COUNT", "10"]) else {
                 panic!()
             };
-            let Value::Bulk(next) = &parts[0] else {
-                panic!()
-            };
-            let Value::Array(flat) = &parts[1] else {
-                panic!()
-            };
+            let Value::Bulk(next) = &parts[0] else { panic!() };
+            let Value::Array(flat) = &parts[1] else { panic!() };
             total += flat.len() / 2;
             cursor = String::from_utf8(next.to_vec()).unwrap();
             if cursor == "0" {
@@ -703,12 +652,8 @@ mod tests {
 
         let f = FakeRedis::with_password(None, "pw");
         let mut s = Session { authed: false };
-        assert!(
-            matches!(run(&f, &mut s, &["GET", "a"]), Value::Error(m) if m.starts_with("NOAUTH"))
-        );
-        assert!(
-            matches!(run(&f, &mut s, &["AUTH", "bad"]), Value::Error(m) if m.starts_with("WRONGPASS"))
-        );
+        assert!(matches!(run(&f, &mut s, &["GET", "a"]), Value::Error(m) if m.starts_with("NOAUTH")));
+        assert!(matches!(run(&f, &mut s, &["AUTH", "bad"]), Value::Error(m) if m.starts_with("WRONGPASS")));
         assert_eq!(run(&f, &mut s, &["AUTH", "pw"]), Value::Simple("OK".into()));
         assert_eq!(run(&f, &mut s, &["GET", "a"]), Value::Null);
     }

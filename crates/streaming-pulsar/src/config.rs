@@ -38,9 +38,7 @@ impl ServiceUrl {
             ));
         }
         if authority.is_empty() || authority.contains('/') || authority.contains('@') {
-            return Err(format!(
-                "service_url `{url}`: expected `scheme://host[:port]`"
-            ));
+            return Err(format!("service_url `{url}`: expected `scheme://host[:port]`"));
         }
         let default_port = if tls { 6651 } else { 6650 };
         let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
@@ -77,8 +75,7 @@ impl ServiceUrl {
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    (s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix))
-        .then(|| &s[prefix.len()..])
+    (s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix)).then(|| &s[prefix.len()..])
 }
 
 fn parse_port(url: &str, port: &str) -> Result<u16, String> {
@@ -253,27 +250,17 @@ fn connection<P: moonpool_core::Providers>(
 
 impl SourceConfig {
     /// Parse and validate a node configuration, resolving secrets.
-    pub fn from_json<P: moonpool_core::Providers>(
-        context: &OpContext<P>,
-        config: &Value,
-    ) -> Result<Self, OpError> {
+    pub fn from_json<P: moonpool_core::Providers>(context: &OpContext<P>, config: &Value) -> Result<Self, OpError> {
         let raw: RawSource = parse(config)?;
         check_topic(&raw.topic)?;
         if raw.subscription.trim().is_empty() {
             return Err(OpError::Config("subscription must not be empty".into()));
         }
         if raw.receiver_queue_size == 0 {
-            return Err(OpError::Config(
-                "receiver_queue_size must be positive".into(),
-            ));
+            return Err(OpError::Config("receiver_queue_size must be positive".into()));
         }
         Ok(Self {
-            connection: connection(
-                context,
-                &raw.service_url,
-                raw.token.as_ref(),
-                raw.tls_trust_certs_file,
-            )?,
+            connection: connection(context, &raw.service_url, raw.token.as_ref(), raw.tls_trust_certs_file)?,
             topic: raw.topic,
             subscription: raw.subscription,
             event_time: raw.event_time,
@@ -285,10 +272,7 @@ impl SourceConfig {
 
 impl SinkConfig {
     /// Parse and validate a node configuration, resolving secrets.
-    pub fn from_json<P: moonpool_core::Providers>(
-        context: &OpContext<P>,
-        config: &Value,
-    ) -> Result<Self, OpError> {
+    pub fn from_json<P: moonpool_core::Providers>(context: &OpContext<P>, config: &Value) -> Result<Self, OpError> {
         let raw: RawSink = parse(config)?;
         check_topic(&raw.topic)?;
         if let Some(name) = &raw.producer_name
@@ -306,19 +290,11 @@ impl SinkConfig {
                             .into(),
                     ));
                 }
-                Some(
-                    SequenceLayout::new(dedup.position_bits, dedup.index_bits)
-                        .map_err(OpError::Config)?,
-                )
+                Some(SequenceLayout::new(dedup.position_bits, dedup.index_bits).map_err(OpError::Config)?)
             }
         };
         Ok(Self {
-            connection: connection(
-                context,
-                &raw.service_url,
-                raw.token.as_ref(),
-                raw.tls_trust_certs_file,
-            )?,
+            connection: connection(context, &raw.service_url, raw.token.as_ref(), raw.tls_trust_certs_file)?,
             topic: raw.topic,
             producer_name: raw.producer_name,
             dedup,

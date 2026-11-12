@@ -1,22 +1,20 @@
 //! The operator registry: the bridge between the references stored in a graph
 //! description (`acme/decode-event@1`) and the Rust code compiled into a worker.
 
-use std::any::Any;
-use std::collections::BTreeMap;
-use std::fmt;
-use std::sync::Arc;
+use std::{any::Any, collections::BTreeMap, fmt, sync::Arc};
 
 use moonpool_core::Providers;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::clock::{Clock, SecretProvider};
-use crate::data::{Datum, Key, datum};
-use crate::ids::{GraphId, NodeId, OpRef, TenantId};
-use crate::ops::{
-    Aggregator, DynAggregator, DynKey, DynMap, OpError, SinkConnector, SourceConnector,
-    TypedAggregator, WindowAssigner, downcast,
+use crate::{
+    clock::{Clock, SecretProvider},
+    data::{Datum, Key, datum},
+    ids::{GraphId, NodeId, OpRef, TenantId},
+    ops::{
+        Aggregator, DynAggregator, DynKey, DynMap, OpError, SinkConnector, SourceConnector, TypedAggregator,
+        WindowAssigner, downcast,
+    },
 };
 
 /// What a node does in a graph.
@@ -98,11 +96,7 @@ impl Serialize for TypeTag {
 impl<'de> Deserialize<'de> for TypeTag {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Ok(if s == "*" {
-            TypeTag::Any
-        } else {
-            TypeTag::Named(s)
-        })
+        Ok(if s == "*" { TypeTag::Any } else { TypeTag::Named(s) })
     }
 }
 
@@ -235,10 +229,7 @@ impl<P: Providers> OpContext<P> {
                     .and_then(Value::as_str)
                     .ok_or_else(|| OpError::Config("expected `{\"secret\": \"<name>\"}`".into()))?;
                 self.secrets.get(&self.tenant, name).ok_or_else(|| {
-                    OpError::Config(format!(
-                        "secret `{name}` is not defined for tenant `{}`",
-                        self.tenant
-                    ))
+                    OpError::Config(format!("secret `{name}` is not defined for tenant `{}`", self.tenant))
                 })
             }
             _ => Err(OpError::Config(
@@ -248,10 +239,8 @@ impl<P: Providers> OpContext<P> {
     }
 }
 
-type SourceFactory<P> =
-    dyn Fn(&OpContext<P>, &Value) -> Result<Arc<dyn SourceConnector>, OpError> + Send + Sync;
-type SinkFactory<P> =
-    dyn Fn(&OpContext<P>, &Value) -> Result<Arc<dyn SinkConnector>, OpError> + Send + Sync;
+type SourceFactory<P> = dyn Fn(&OpContext<P>, &Value) -> Result<Arc<dyn SourceConnector>, OpError> + Send + Sync;
+type SinkFactory<P> = dyn Fn(&OpContext<P>, &Value) -> Result<Arc<dyn SinkConnector>, OpError> + Send + Sync;
 type MapFactory = dyn Fn(&Value) -> Result<Arc<dyn DynMap>, OpError> + Send + Sync;
 type KeyFactory = dyn Fn(&Value) -> Result<Arc<dyn DynKey>, OpError> + Send + Sync;
 type WindowFactory = dyn Fn(&Value) -> Result<Arc<dyn WindowAssigner>, OpError> + Send + Sync;
@@ -294,16 +283,8 @@ pub struct Registry<P: Providers> {
 impl<P: Providers> Registry<P> {
     /// Say what the configuration of a registered operator is made of, so
     /// that tools can offer a form for it. Unknown references are ignored.
-    pub fn with_params(
-        &mut self,
-        op: &str,
-        params: impl IntoIterator<Item = ParamSpec>,
-    ) -> &mut Self {
-        if let Some((descriptor, _)) = op
-            .parse::<OpRef>()
-            .ok()
-            .and_then(|op| self.ops.get_mut(&op))
-        {
+    pub fn with_params(&mut self, op: &str, params: impl IntoIterator<Item = ParamSpec>) -> &mut Self {
+        if let Some((descriptor, _)) = op.parse::<OpRef>().ok().and_then(|op| self.ops.get_mut(&op)) {
             descriptor.params = params.into_iter().collect();
         }
         self
@@ -312,9 +293,7 @@ impl<P: Providers> Registry<P> {
 
 impl<P: Providers> Clone for Registry<P> {
     fn clone(&self) -> Self {
-        Self {
-            ops: self.ops.clone(),
-        }
+        Self { ops: self.ops.clone() }
     }
 }
 
@@ -366,9 +345,7 @@ impl<P: Providers> Registry<P> {
     /// A registry with no operator at all.
     #[must_use]
     pub fn empty() -> Self {
-        Self {
-            ops: BTreeMap::new(),
-        }
+        Self { ops: BTreeMap::new() }
     }
 
     /// A registry holding the type-agnostic `std/*` operators
@@ -383,18 +360,11 @@ impl<P: Providers> Registry<P> {
     /// Register an operator from its descriptor and factory. Replaces any
     /// operator already registered under the same reference.
     pub fn register(&mut self, descriptor: OpDescriptor, factory: OpFactory<P>) -> &mut Self {
-        self.ops
-            .insert(descriptor.op.clone(), (descriptor, factory));
+        self.ops.insert(descriptor.op.clone(), (descriptor, factory));
         self
     }
 
-    fn describe(
-        op: &str,
-        kind: OpKind,
-        input: TypeTag,
-        output: TypeTag,
-        about: &str,
-    ) -> OpDescriptor {
+    fn describe(op: &str, kind: OpKind, input: TypeTag, output: TypeTag, about: &str) -> OpDescriptor {
         OpDescriptor {
             op: OpRef::new(op).unwrap_or_else(|e| panic!("{e}")),
             kind,
@@ -414,19 +384,10 @@ impl<P: Providers> Registry<P> {
         &mut self,
         op: &str,
         about: &str,
-        factory: impl Fn(&OpContext<P>, &Value) -> Result<Arc<dyn SourceConnector>, OpError>
-        + Send
-        + Sync
-        + 'static,
+        factory: impl Fn(&OpContext<P>, &Value) -> Result<Arc<dyn SourceConnector>, OpError> + Send + Sync + 'static,
     ) -> &mut Self {
         self.register(
-            Self::describe(
-                op,
-                OpKind::Source,
-                TypeTag::Any,
-                TypeTag::of::<Out>(),
-                about,
-            ),
+            Self::describe(op, OpKind::Source, TypeTag::Any, TypeTag::of::<Out>(), about),
             OpFactory::Source(Arc::new(factory)),
         )
     }
@@ -442,10 +403,7 @@ impl<P: Providers> Registry<P> {
         op: &str,
         about: &str,
         input: TypeTag,
-        factory: impl Fn(&OpContext<P>, &Value) -> Result<Arc<dyn SinkConnector>, OpError>
-        + Send
-        + Sync
-        + 'static,
+        factory: impl Fn(&OpContext<P>, &Value) -> Result<Arc<dyn SinkConnector>, OpError> + Send + Sync + 'static,
     ) -> &mut Self {
         self.register(
             Self::describe(op, OpKind::Sink, input, TypeTag::Any, about),
@@ -517,13 +475,7 @@ impl<P: Providers> Registry<P> {
         F: Fn(&In, &mut Vec<Out>) + Send + Sync + 'static,
     {
         self.register(
-            Self::describe(
-                op,
-                OpKind::Map,
-                TypeTag::of::<In>(),
-                TypeTag::of::<Out>(),
-                about,
-            ),
+            Self::describe(op, OpKind::Map, TypeTag::of::<In>(), TypeTag::of::<Out>(), about),
             OpFactory::Map(Arc::new(move |config: &Value| {
                 let f = build(parse_config::<C>(config)?);
                 Ok(Arc::new(FnMap(f, std::marker::PhantomData)) as Arc<dyn DynMap>)
@@ -551,10 +503,7 @@ impl<P: Providers> Registry<P> {
             Self::describe(op, OpKind::KeyBy, TypeTag::of::<In>(), TypeTag::Any, about),
             OpFactory::Key(Arc::new(move |_config: &Value| {
                 let f = f.clone();
-                Ok(
-                    Arc::new(FnKey(move |input: &In| f(input), std::marker::PhantomData))
-                        as Arc<dyn DynKey>,
-                )
+                Ok(Arc::new(FnKey(move |input: &In| f(input), std::marker::PhantomData)) as Arc<dyn DynKey>)
             })),
         )
     }
@@ -606,10 +555,7 @@ impl<P: Providers> Registry<P> {
                 about,
             ),
             OpFactory::Aggregate(Arc::new(move |config: &Value| {
-                Ok(
-                    Arc::new(TypedAggregator(build(parse_config::<C>(config)?)?))
-                        as Arc<dyn DynAggregator>,
-                )
+                Ok(Arc::new(TypedAggregator(build(parse_config::<C>(config)?)?)) as Arc<dyn DynAggregator>)
             })),
         )
     }
@@ -643,9 +589,7 @@ impl<P: Providers> Registry<P> {
     /// Look an operator up.
     #[must_use]
     pub fn get(&self, op: &OpRef) -> Option<(&OpDescriptor, &OpFactory<P>)> {
-        self.ops
-            .get(op)
-            .map(|(descriptor, factory)| (descriptor, factory))
+        self.ops.get(op).map(|(descriptor, factory)| (descriptor, factory))
     }
 
     /// The descriptors of every registered operator.
@@ -663,8 +607,9 @@ impl<P: Providers> Registry<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use moonpool_core::TokioProviders;
+
+    use super::*;
 
     #[test]
     fn operators_build_without_configuration() {
@@ -674,14 +619,9 @@ mod tests {
             out.extend(text.chars());
         });
         registry.register_key("test/key@1", "", |text: &String| text.clone());
-        for config in [
-            Value::Null,
-            serde_json::json!({}),
-            serde_json::json!({"ignored": 1}),
-        ] {
+        for config in [Value::Null, serde_json::json!({}), serde_json::json!({"ignored": 1})] {
             for op in ["test/len@1", "test/chars@1", "std/identity@1"] {
-                let Some((_, OpFactory::Map(factory))) = registry.get(&OpRef::new(op).unwrap())
-                else {
+                let Some((_, OpFactory::Map(factory))) = registry.get(&OpRef::new(op).unwrap()) else {
                     panic!("{op} is not a map");
                 };
                 let map = factory(&config).unwrap_or_else(|e| panic!("{op} with {config}: {e}"));
@@ -689,27 +629,18 @@ mod tests {
                 map.apply(&datum("abc".to_owned()), &mut out).unwrap();
                 assert!(!out.is_empty());
             }
-            let Some((_, OpFactory::Key(factory))) =
-                registry.get(&OpRef::new("test/key@1").unwrap())
-            else {
+            let Some((_, OpFactory::Key(factory))) = registry.get(&OpRef::new("test/key@1").unwrap()) else {
                 panic!("not a key");
             };
-            let key = factory(&config)
-                .unwrap()
-                .key(&datum("abc".to_owned()))
-                .unwrap();
+            let key = factory(&config).unwrap().key(&datum("abc".to_owned())).unwrap();
             assert_eq!(key.decode::<String>().unwrap(), "abc");
-            let Some((_, OpFactory::Aggregate(factory))) =
-                registry.get(&OpRef::new("std/count@1").unwrap())
-            else {
+            let Some((_, OpFactory::Aggregate(factory))) = registry.get(&OpRef::new("std/count@1").unwrap()) else {
                 panic!("not an aggregate");
             };
             factory(&config).unwrap();
         }
         // A window needs its size: a missing configuration is a clear error.
-        let Some((_, OpFactory::Window(factory))) =
-            registry.get(&OpRef::new("std/tumbling@1").unwrap())
-        else {
+        let Some((_, OpFactory::Window(factory))) = registry.get(&OpRef::new("std/tumbling@1").unwrap()) else {
             panic!("not a window");
         };
         assert!(matches!(factory(&Value::Null), Err(OpError::Config(_))));
@@ -727,12 +658,7 @@ mod tests {
             graph: GraphId::new("g").unwrap(),
             node: NodeId::new("n").unwrap(),
         };
-        assert_eq!(
-            context
-                .secret_or_literal(&serde_json::json!("plain"))
-                .unwrap(),
-            "plain"
-        );
+        assert_eq!(context.secret_or_literal(&serde_json::json!("plain")).unwrap(), "plain");
         assert_eq!(
             context
                 .secret_or_literal(&serde_json::json!({"secret": "token"}))

@@ -1,30 +1,36 @@
 //! A worker: the process-level loop that makes the local actors match what
 //! the KV says should run here, and reports back.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use moonpool_core::{Providers, RandomProvider, TimeProvider};
-use streaming_core::control::{
-    ActorKind, ActorState, DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement,
-    RunState, SliceSnapshot, TenantUsage, WorkerSnapshot,
-};
 use streaming_core::{
     DynKv, GraphKey, GraphSpec, KvError, NodeId, SliceKey, TenantId, Timestamp, Topology, WorkerId,
+    control::{
+        ActorKind, ActorState, DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState,
+        SliceSnapshot, TenantUsage, WorkerSnapshot,
+    },
     keys,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::RuntimeEnv;
-use crate::controller::{self, ControllerState};
-use crate::load::{LoadProbe, ProcessLoad};
-use crate::metrics::{ActorSample, SliceLifetime, SliceSample, snapshot_actor, snapshot_slice};
-use crate::scope::TaskScope;
-use crate::slice::{Control, SliceExit, SliceParams, SliceShared, run_slice};
+use crate::{
+    RuntimeEnv,
+    controller::{self, ControllerState},
+    load::{LoadProbe, ProcessLoad},
+    metrics::{ActorSample, SliceLifetime, SliceSample, snapshot_actor, snapshot_slice},
+    scope::TaskScope,
+    slice::{Control, SliceExit, SliceParams, SliceShared, run_slice},
+};
 
 /// How workers learn about each other.
 ///
@@ -59,21 +65,13 @@ impl KvMembership {
 #[async_trait]
 impl Membership for KvMembership {
     async fn announce(&self, me: &MemberInfo) {
-        if let Err(error) = self
-            .kv
-            .hset_json(keys::CLUSTER_MEMBERS, me.worker.as_str(), me)
-            .await
-        {
+        if let Err(error) = self.kv.hset_json(keys::CLUSTER_MEMBERS, me.worker.as_str(), me).await {
             tracing::warn!(%error, worker = %me.worker, "heartbeat failed");
         }
     }
 
     async fn alive(&self, now_ms: Timestamp, timeout_ms: i64) -> Option<Vec<MemberInfo>> {
-        let members = self
-            .kv
-            .hgetall_json::<MemberInfo>(keys::CLUSTER_MEMBERS)
-            .await
-            .ok()?;
+        let members = self.kv.hgetall_json::<MemberInfo>(keys::CLUSTER_MEMBERS).await.ok()?;
         Some(
             members
                 .into_iter()
@@ -84,10 +82,7 @@ impl Membership for KvMembership {
     }
 
     async fn leave(&self, worker: &WorkerId) {
-        let _ = self
-            .kv
-            .hdel(keys::CLUSTER_MEMBERS, vec![worker.to_string()])
-            .await;
+        let _ = self.kv.hdel(keys::CLUSTER_MEMBERS, vec![worker.to_string()]).await;
     }
 }
 
@@ -244,10 +239,7 @@ impl<P: Providers> Worker<P> {
             return Ok(());
         }
         let index: Vec<(String, GraphIndexEntry)> = kv.hgetall_json(keys::CLUSTER_GRAPHS).await?;
-        let placement: Placement = kv
-            .get_json(keys::CLUSTER_PLACEMENT)
-            .await?
-            .unwrap_or_default();
+        let placement: Placement = kv.get_json(keys::CLUSTER_PLACEMENT).await?.unwrap_or_default();
         let catalog = self.env.registry.catalog();
         let mut graphs = BTreeMap::new();
         for (_, entry) in index {
@@ -272,10 +264,7 @@ impl<P: Providers> Worker<P> {
             if plan.error.is_some() || plan.spec_version != spec.version {
                 continue;
             }
-            let desired: DesiredState = kv
-                .get_json(&keys::graph_desired(&graph))
-                .await?
-                .unwrap_or_default();
+            let desired: DesiredState = kv.get_json(&keys::graph_desired(&graph)).await?.unwrap_or_default();
             match Topology::build(&spec, &catalog) {
                 Ok(topology) => {
                     graphs.insert(
@@ -322,9 +311,7 @@ impl<P: Providers> Worker<P> {
                     graph: graph.graph.clone(),
                     slice: slice.clone(),
                 };
-                if self.config.ignore_placement
-                    || synced.placement.assignments.get(&key) == Some(me)
-                {
+                if self.config.ignore_placement || synced.placement.assignments.get(&key) == Some(me) {
                     target.insert(key, docs);
                 }
             }
@@ -353,8 +340,7 @@ impl<P: Providers> Worker<P> {
                     book.lifetime.fenced += 1;
                     book.failures += 1;
                     book.retry_at = Some(retry_at);
-                    book.last_error =
-                        Some("fenced: another worker committed this slice".to_owned());
+                    book.last_error = Some("fenced: another worker committed this slice".to_owned());
                     tracing::info!(slice = %key, "slice fenced");
                 }
                 Some(SliceExit::Failed(error)) => {
@@ -370,8 +356,7 @@ impl<P: Providers> Worker<P> {
         for (key, slice) in running.iter() {
             match target.get(key) {
                 Some(docs)
-                    if docs.spec_version == slice.spec_version
-                        && docs.plan.generation == slice.plan_generation =>
+                    if docs.spec_version == slice.spec_version && docs.plan.generation == slice.plan_generation =>
                 {
                     let wanted = Control {
                         run: docs.desired.state,
@@ -390,9 +375,7 @@ impl<P: Providers> Worker<P> {
         }
 
         for (key, docs) in &target {
-            if running.contains_key(key)
-                || !matches!(docs.desired.state, RunState::Running | RunState::Paused)
-            {
+            if running.contains_key(key) || !matches!(docs.desired.state, RunState::Running | RunState::Paused) {
                 continue;
             }
             let book = books.entry(key.clone()).or_default();
@@ -463,12 +446,7 @@ impl<P: Providers> Worker<P> {
             let mut samples = BTreeMap::new();
             for metrics in live {
                 let id = (metrics.ident.node.clone(), metrics.ident.kind);
-                let (snapshot, sample) = snapshot_actor(
-                    &metrics,
-                    slice.actor_samples.get(&id).copied(),
-                    now,
-                    interval,
-                );
+                let (snapshot, sample) = snapshot_actor(&metrics, slice.actor_samples.get(&id).copied(), now, interval);
                 samples.insert(id, sample);
                 let usage = tenants.entry(key.tenant.clone()).or_default();
                 usage.actors += 1;
@@ -583,12 +561,8 @@ impl<P: Providers> Worker<P> {
             // A worker that cannot tell who is alive leaves the controller's
             // work alone for this round: taking a failed read for an empty
             // cluster would make it claim every slice.
-            let alive = if self.config.controller
-                && now.saturating_sub(started) >= self.config.controller_grace
-            {
-                self.membership
-                    .alive(self.env.clock.now_ms(), timeout_ms)
-                    .await
+            let alive = if self.config.controller && now.saturating_sub(started) >= self.config.controller_grace {
+                self.membership.alive(self.env.clock.now_ms(), timeout_ms).await
             } else {
                 None
             };

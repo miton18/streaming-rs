@@ -1,8 +1,6 @@
 //! Event time, windows and human-readable durations.
 
-use std::fmt;
-use std::str::FromStr;
-use std::time::Duration;
+use std::{fmt, str::FromStr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -77,9 +75,7 @@ pub fn parse_duration(input: &str) -> Result<Duration, String> {
     if digits == 0 {
         return Err(format!("invalid duration `{input}`"));
     }
-    let value: u64 = s[..digits]
-        .parse()
-        .map_err(|_| format!("invalid duration `{input}`"))?;
+    let value: u64 = s[..digits].parse().map_err(|_| format!("invalid duration `{input}`"))?;
     let millis = match s[digits..].trim() {
         "" | "ms" => value,
         "s" => value * 1_000,
@@ -95,12 +91,7 @@ pub fn parse_duration(input: &str) -> Result<Duration, String> {
 #[must_use]
 pub fn format_duration(duration: Duration) -> String {
     let ms = duration.as_millis();
-    for (unit, size) in [
-        ("d", 86_400_000),
-        ("h", 3_600_000),
-        ("m", 60_000),
-        ("s", 1_000),
-    ] {
+    for (unit, size) in [("d", 86_400_000), ("h", 3_600_000), ("m", 60_000), ("s", 1_000)] {
         if ms != 0 && ms.is_multiple_of(size) {
             return format!("{}{unit}", ms / size);
         }
@@ -142,14 +133,8 @@ mod tests {
     fn durations() {
         assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
         assert_eq!(parse_duration("3s").unwrap(), Duration::from_secs(3));
-        assert_eq!(
-            parse_duration("3h").unwrap(),
-            Duration::from_secs(3 * 3_600)
-        );
-        assert_eq!(
-            parse_duration("3d").unwrap(),
-            Duration::from_secs(3 * 86_400)
-        );
+        assert_eq!(parse_duration("3h").unwrap(), Duration::from_secs(3 * 3_600));
+        assert_eq!(parse_duration("3d").unwrap(), Duration::from_secs(3 * 86_400));
         assert_eq!(parse_duration("250ms").unwrap(), Duration::from_millis(250));
         assert_eq!(parse_duration("42").unwrap(), Duration::from_millis(42));
         assert!(parse_duration("5 parsecs").is_err());

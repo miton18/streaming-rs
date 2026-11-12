@@ -14,28 +14,32 @@
 //! pipeline to settle, then checks that every event was accounted for exactly
 //! once.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider};
-use moonpool_sim::providers::SimProviders;
 use moonpool_sim::{
-    Process, SimContext, SimulationError, SimulationResult, Workload, assert_always,
-    assert_sometimes, buggify, buggify_with_prob,
+    Process, SimContext, SimulationError, SimulationResult, Workload, assert_always, assert_sometimes, buggify,
+    buggify_with_prob, providers::SimProviders,
 };
 use parking_lot::Mutex;
-use streaming_core::control::{DesiredState, GraphIndexEntry, RunState, WorkerSnapshot};
 use streaming_core::{
-    Clock, Datum, DynKv, Emit, GraphSpec, Kv, KvError, MemKv, NoSecrets, NodeId, PartitionReader,
-    Position, Registry, SinkConnector, SinkError, SourceConnector, SourceError, SourceRecord,
-    Timestamp, TypeTag, Window, Windowed, WorkerId, datum, keys,
+    Clock, Datum, DynKv, Emit, GraphSpec, Kv, KvError, MemKv, NoSecrets, NodeId, PartitionReader, Position, Registry,
+    SinkConnector, SinkError, SourceConnector, SourceError, SourceRecord, Timestamp, TypeTag, Window, Windowed,
+    WorkerId,
+    control::{DesiredState, GraphIndexEntry, RunState, WorkerSnapshot},
+    datum, keys,
 };
-use streaming_runtime::inspect::{SliceHead, covers, late_commit, slice_head};
-use streaming_runtime::memlog::MemLog;
-use streaming_runtime::{GossipConfig, GossipMembership, NoLoad, RuntimeEnv, Worker, WorkerConfig};
+use streaming_runtime::{
+    GossipConfig, GossipMembership, NoLoad, RuntimeEnv, Worker, WorkerConfig,
+    inspect::{SliceHead, covers, late_commit, slice_head},
+    memlog::MemLog,
+};
 
 /// Wall-clock origin of every simulation, in milliseconds since the epoch.
 pub const EPOCH_MS: Timestamp = 1_790_000_000_000;
@@ -63,9 +67,9 @@ impl SinkProbe {
             Some((writes, existing)) => {
                 *writes += 1;
                 if *existing != value {
-                    self.conflicts.lock().push(format!(
-                        "emit id `{id}` was written as `{existing}` then as `{value}`"
-                    ));
+                    self.conflicts
+                        .lock()
+                        .push(format!("emit id `{id}` was written as `{existing}` then as `{value}`"));
                 }
             }
             None => {
@@ -77,11 +81,7 @@ impl SinkProbe {
     /// The value held for each emit id.
     #[must_use]
     pub fn values(&self) -> Vec<String> {
-        self.rows
-            .lock()
-            .values()
-            .map(|(_, value)| value.clone())
-            .collect()
+        self.rows.lock().values().map(|(_, value)| value.clone()).collect()
     }
 
     /// Number of distinct emit ids received.
@@ -99,11 +99,7 @@ impl SinkProbe {
     /// Number of writes that hit an emit id already present.
     #[must_use]
     pub fn rewrites(&self) -> u64 {
-        self.rows
-            .lock()
-            .values()
-            .map(|(writes, _)| u64::from(writes - 1))
-            .sum()
+        self.rows.lock().values().map(|(writes, _)| u64::from(writes - 1)).sum()
     }
 
     /// Emit ids that were written with two different values.
@@ -225,18 +221,12 @@ pub struct SimClock<T: TimeProvider> {
 impl<T: TimeProvider> SimClock<T> {
     /// The exact simulated time.
     pub fn exact(time: T) -> Self {
-        Self {
-            time,
-            drifting: false,
-        }
+        Self { time, drifting: false }
     }
 
     /// The simulated time as a process with a drifting clock reads it.
     pub fn drifting(time: T) -> Self {
-        Self {
-            time,
-            drifting: true,
-        }
+        Self { time, drifting: true }
     }
 }
 
@@ -265,11 +255,7 @@ impl<P: Providers> ChaosKv<P> {
 
     async fn pause(&self, upto_ms: u64) {
         let delay = self.providers.random().random_range(0..upto_ms.max(1));
-        let _ = self
-            .providers
-            .time()
-            .sleep(Duration::from_millis(delay))
-            .await;
+        let _ = self.providers.time().sleep(Duration::from_millis(delay)).await;
     }
 
     /// Carry one command to the store the way a network would: late, not at
@@ -299,10 +285,7 @@ impl<P: Providers> ChaosKv<P> {
             // The request is on the wire when its sender gives up: the store
             // applies it later, whatever became of the sender meanwhile. The
             // task is not tied to the worker, so it outlives a crash.
-            let late = self
-                .providers
-                .random()
-                .random_range(0..self.env.late_ms.max(1));
+            let late = self.providers.random().random_range(0..self.env.late_ms.max(1));
             let kv = self.env.kv.clone();
             let env = self.env.clone();
             let time = self.providers.time().clone();
@@ -328,25 +311,21 @@ impl<P: Providers> ChaosKv<P> {
 impl<P: Providers> Kv for ChaosKv<P> {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, KvError> {
         let key = key.to_owned();
-        self.carry(move |kv| async move { kv.get(&key).await })
-            .await
+        self.carry(move |kv| async move { kv.get(&key).await }).await
     }
 
     async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), KvError> {
         let key = key.to_owned();
-        self.carry(move |kv| async move { kv.set(&key, value).await })
-            .await
+        self.carry(move |kv| async move { kv.set(&key, value).await }).await
     }
 
     async fn del(&self, keys: Vec<String>) -> Result<(), KvError> {
-        self.carry(move |kv| async move { kv.del(keys).await })
-            .await
+        self.carry(move |kv| async move { kv.del(keys).await }).await
     }
 
     async fn incr(&self, key: &str) -> Result<i64, KvError> {
         let key = key.to_owned();
-        self.carry(move |kv| async move { kv.incr(&key).await })
-            .await
+        self.carry(move |kv| async move { kv.incr(&key).await }).await
     }
 
     async fn hsetnx(&self, key: &str, field: &str, value: Vec<u8>) -> Result<bool, KvError> {
@@ -368,26 +347,22 @@ impl<P: Providers> Kv for ChaosKv<P> {
 
     async fn hset(&self, key: &str, entries: Vec<(String, Vec<u8>)>) -> Result<(), KvError> {
         let key = key.to_owned();
-        self.carry(move |kv| async move { kv.hset(&key, entries).await })
-            .await
+        self.carry(move |kv| async move { kv.hset(&key, entries).await }).await
     }
 
     async fn hget(&self, key: &str, field: &str) -> Result<Option<Vec<u8>>, KvError> {
         let (key, field) = (key.to_owned(), field.to_owned());
-        self.carry(move |kv| async move { kv.hget(&key, &field).await })
-            .await
+        self.carry(move |kv| async move { kv.hget(&key, &field).await }).await
     }
 
     async fn hgetall(&self, key: &str) -> Result<Vec<(String, Vec<u8>)>, KvError> {
         let key = key.to_owned();
-        self.carry(move |kv| async move { kv.hgetall(&key).await })
-            .await
+        self.carry(move |kv| async move { kv.hgetall(&key).await }).await
     }
 
     async fn hdel(&self, key: &str, fields: Vec<String>) -> Result<(), KvError> {
         let key = key.to_owned();
-        self.carry(move |kv| async move { kv.hdel(&key, fields).await })
-            .await
+        self.carry(move |kv| async move { kv.hdel(&key, fields).await }).await
     }
 }
 
@@ -405,11 +380,7 @@ impl<P: Providers> SourceConnector for ChaosSource<P> {
         Ok(self.env.log.partitions())
     }
 
-    async fn open(
-        &self,
-        partition: u32,
-        after: Option<Position>,
-    ) -> Result<Box<dyn PartitionReader>, SourceError> {
+    async fn open(&self, partition: u32, after: Option<Position>) -> Result<Box<dyn PartitionReader>, SourceError> {
         if buggify!() {
             return Err(SourceError("injected: cannot open reader".into()));
         }
@@ -439,16 +410,10 @@ struct ChaosReader<P: Providers> {
 
 #[async_trait]
 impl<P: Providers> PartitionReader for ChaosReader<P> {
-    async fn poll(
-        &mut self,
-        max: usize,
-        max_wait: Duration,
-    ) -> Result<Vec<SourceRecord>, SourceError> {
+    async fn poll(&mut self, max: usize, max_wait: Duration) -> Result<Vec<SourceRecord>, SourceError> {
         let scale = self.env.fault_scale;
         if buggify_with_prob!(0.02 * scale) {
-            return Err(SourceError(
-                "injected: connection to the broker lost".into(),
-            ));
+            return Err(SourceError("injected: connection to the broker lost".into()));
         }
         if buggify_with_prob!(0.05 * scale) {
             // Redelivery: the broker rewinds to somewhere before what it delivered.
@@ -477,9 +442,7 @@ impl<P: Providers> PartitionReader for ChaosReader<P> {
     async fn ack(&mut self, upto: Position) -> Result<(), SourceError> {
         // An acknowledged record is gone from the topic for good: whatever is
         // acknowledged must already be committed.
-        if let Ok(slice) =
-            format!("acme/sim/src.events.{}", self.partition).parse::<streaming_core::SliceKey>()
-        {
+        if let Ok(slice) = format!("acme/sim/src.events.{}", self.partition).parse::<streaming_core::SliceKey>() {
             let committed = slice_head(self.env.kv.as_ref(), &slice)
                 .await
                 .ok()
@@ -523,26 +486,19 @@ struct ChaosSink<P: Providers> {
 impl<P: Providers> SinkConnector for ChaosSink<P> {
     async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
         let delay = self.providers.random().random_range(0..self.latency_ms);
-        let _ = self
-            .providers
-            .time()
-            .sleep(Duration::from_millis(delay))
-            .await;
+        let _ = self.providers.time().sleep(Duration::from_millis(delay)).await;
         let scale = self.env.fault_scale;
         if buggify_with_prob!(0.03 * scale) {
             return Err(SinkError("injected: sink unreachable".into()));
         }
         let applied = if buggify_with_prob!(0.03 * scale) {
             // Fails halfway: a prefix of the batch is durably written.
-            self.providers
-                .random()
-                .random_range(0..batch.len().max(1) + 1)
+            self.providers.random().random_range(0..batch.len().max(1) + 1)
         } else {
             batch.len()
         };
         for emit in &batch[..applied] {
-            self.probe
-                .record(emit.id.as_str(), (self.render)(&emit.value));
+            self.probe.record(emit.id.as_str(), (self.render)(&emit.value));
         }
         if applied < batch.len() || buggify_with_prob!(0.03 * scale) {
             *self.env.sink_ambiguous.lock() += 1;
@@ -583,24 +539,16 @@ pub fn registry<P: Providers>(env: &Arc<SimEnv>) -> Registry<P> {
             }) as Arc<dyn SourceConnector>)
         });
     }
-    registry.register_key("sim/key@1", "Key of an event.", |event: &SimEvent| {
-        event.key.clone()
+    registry.register_key("sim/key@1", "Key of an event.", |event: &SimEvent| event.key.clone());
+    registry.register_map("sim/branch-a@1", "First parallel branch.", |event: &SimEvent| {
+        Some(event.clone())
     });
-    registry.register_map(
-        "sim/branch-a@1",
-        "First parallel branch.",
-        |event: &SimEvent| Some(event.clone()),
-    );
-    registry.register_map(
-        "sim/branch-b@1",
-        "Second parallel branch.",
-        |event: &SimEvent| Some(event.clone()),
-    );
-    registry.register_key(
-        "sim/all@1",
-        "One key for everything.",
-        |_: &Windowed<u64>| "all".to_owned(),
-    );
+    registry.register_map("sim/branch-b@1", "Second parallel branch.", |event: &SimEvent| {
+        Some(event.clone())
+    });
+    registry.register_key("sim/all@1", "One key for everything.", |_: &Windowed<u64>| {
+        "all".to_owned()
+    });
     let sinks: [(&str, Arc<SinkProbe>, Render); 4] = [
         ("sim/counts@1", env.counts.clone(), render_count),
         ("sim/raw@1", env.raw.clone(), render_event),
@@ -609,11 +557,7 @@ pub fn registry<P: Providers>(env: &Arc<SimEnv>) -> Registry<P> {
     ];
     for (op, probe, render) in sinks {
         let env = env.clone();
-        let latency_ms = if op == "sim/counts@1" {
-            env.sink_latency_ms
-        } else {
-            8
-        };
+        let latency_ms = if op == "sim/counts@1" { env.sink_latency_ms } else { 8 };
         registry.register_sink(op, "Recording sink.", TypeTag::Any, move |context, _| {
             Ok(Arc::new(ChaosSink {
                 env: env.clone(),
@@ -911,21 +855,13 @@ impl Process for WorkerProcess {
                 .filter_map(|ip| ip.parse().ok())
                 .collect();
             addresses.sort();
-            let seed = addresses
-                .first()
-                .map(ToString::to_string)
-                .unwrap_or_default();
+            let seed = addresses.first().map(ToString::to_string).unwrap_or_default();
             let providers = ctx.providers().clone();
             let membership = loop {
                 // A new generation at every boot: what the previous incarnation
                 // gossiped is replaced.
                 let generation = providers.time().now().as_millis() as u64 + 1;
-                let mut gossip = GossipConfig::new(
-                    "sim",
-                    format!("worker-{}", ctx.my_ip()),
-                    generation,
-                    ctx.my_ip(),
-                );
+                let mut gossip = GossipConfig::new("sim", format!("worker-{}", ctx.my_ip()), generation, ctx.my_ip());
                 gossip.seeds = vec![seed.clone()];
                 gossip.gossip_interval = Duration::from_millis(250);
                 gossip.dead_after = Duration::from_millis(2_500);
@@ -987,10 +923,7 @@ impl Driver {
         }
         let (total, last) = {
             let produced = env.produced.lock();
-            (
-                produced.total,
-                produced.counts.keys().map(|(window, _)| *window).max(),
-            )
+            (produced.total, produced.counts.keys().map(|(window, _)| *window).max())
         };
         if env.raw.len() as u64 != total || env.both.len() as u64 != 2 * total {
             return false;
@@ -1082,10 +1015,7 @@ async fn dump(env: &SimEnv) {
         }
     }
     for key in env.kv.keys() {
-        let state = key.ends_with(":log")
-            || key.ends_with(":seal")
-            || key.contains(":idx:")
-            || key.contains(":w:");
+        let state = key.ends_with(":log") || key.ends_with(":seal") || key.contains(":idx:") || key.contains(":w:");
         if !state {
             continue;
         }
@@ -1097,26 +1027,16 @@ async fn dump(env: &SimEnv) {
                 .collect();
             let names: Vec<&str> = fields.iter().map(|(field, _)| field.as_str()).collect();
             if key.ends_with(":log") {
-                eprintln!(
-                    "--- {key}: {} fields, with payload: {heavy:?}",
-                    fields.len()
-                );
+                eprintln!("--- {key}: {} fields, with payload: {heavy:?}", fields.len());
             } else {
-                eprintln!(
-                    "--- {key}: {} fields {:?}",
-                    fields.len(),
-                    &names[..names.len().min(12)]
-                );
+                eprintln!("--- {key}: {} fields {:?}", fields.len(), &names[..names.len().min(12)]);
             }
         }
     }
 }
 
 fn violation(message: String) -> SimulationError {
-    eprintln!(
-        "[VIOLATION] seed={} | {message}",
-        moonpool_sim::current_sim_seed()
-    );
+    eprintln!("[VIOLATION] seed={} | {message}", moonpool_sim::current_sim_seed());
     SimulationError::InvalidState(message)
 }
 
@@ -1132,9 +1052,7 @@ impl Workload for Driver {
         let graph = spec.key();
         let kv: DynKv = env.kv.clone();
         let failed = |error: KvError| violation(error.to_string());
-        kv.set_json(&keys::graph_spec(&graph), &spec)
-            .await
-            .map_err(failed)?;
+        kv.set_json(&keys::graph_spec(&graph), &spec).await.map_err(failed)?;
         kv.hset_json(
             keys::CLUSTER_GRAPHS,
             &graph.to_string(),
@@ -1201,11 +1119,7 @@ impl Workload for Driver {
             let key = format!("key-{}", ctx.random().random_range(0..scenario.keys.max(1)));
             // Events are stamped in the past, as if they had travelled.
             let ts = clock.now_ms() - ctx.random().random_range(0..max_age);
-            let fed = env
-                .log
-                .partitions()
-                .saturating_sub(scenario.silent_partitions)
-                .max(1);
+            let fed = env.log.partitions().saturating_sub(scenario.silent_partitions).max(1);
             let partition = ctx.random().random_range(0..fed);
             // Until the slice of an added partition has committed, the
             // pipeline runs without it: what the partition receives meanwhile
@@ -1263,9 +1177,7 @@ impl Workload for Driver {
         loop {
             // The logs of slices that left the plan must go as well.
             let planned: BTreeSet<String> = store
-                .get_json::<streaming_core::control::GraphPlan>(&keys::graph_plan(
-                    &self.scenario.spec().key(),
-                ))
+                .get_json::<streaming_core::control::GraphPlan>(&keys::graph_plan(&self.scenario.spec().key()))
                 .await
                 .ok()
                 .flatten()
@@ -1284,8 +1196,7 @@ impl Workload for Driver {
                 .filter(|key| {
                     key.contains(":w:")
                         || key.contains(":idx:")
-                        || (key.ends_with(":log")
-                            && !planned.iter().any(|log| key.ends_with(log.as_str())))
+                        || (key.ends_with(":log") && !planned.iter().any(|log| key.ends_with(log.as_str())))
                 })
                 .collect();
             if leaked.is_empty() {
@@ -1305,15 +1216,9 @@ impl Workload for Driver {
             if !key.ends_with(":log") {
                 continue;
             }
-            let fields = store
-                .hgetall(&key)
-                .await
-                .map(|fields| fields.len())
-                .unwrap_or(0);
+            let fields = store.hgetall(&key).await.map(|fields| fields.len()).unwrap_or(0);
             if fields > 60 {
-                return Err(violation(format!(
-                    "commit log `{key}` grew to {fields} fields"
-                )));
+                return Err(violation(format!("commit log `{key}` grew to {fields} fields")));
             }
         }
         Ok(())
@@ -1338,17 +1243,11 @@ impl Workload for Driver {
         if let Some(finding) = audit.first() {
             return Err(violation(finding.clone()));
         }
-        assert_sometimes!(
-            *env.audits.lock() > 10,
-            "the auditor watched the commit logs"
-        );
+        assert_sometimes!(*env.audits.lock() > 10, "the auditor watched the commit logs");
 
         for probe in [&env.counts, &env.raw, &env.both, &env.totals] {
             let conflicts = probe.conflicts();
-            assert_always!(
-                conflicts.is_empty(),
-                "an emit id always carries the same value"
-            );
+            assert_always!(conflicts.is_empty(), "an emit id always carries the same value");
             if let Some(conflict) = conflicts.first() {
                 return Err(violation(conflict.clone()));
             }
@@ -1358,14 +1257,11 @@ impl Workload for Driver {
         let mut counts: BTreeMap<(Window, String), u64> = BTreeMap::new();
         for row in env.counts.values() {
             let mut parts = row.split('|');
-            let (Some(window), Some(key), Some(count)) = (parts.next(), parts.next(), parts.next())
-            else {
+            let (Some(window), Some(key), Some(count)) = (parts.next(), parts.next(), parts.next()) else {
                 return Err(violation(format!("malformed count row `{row}`")));
             };
             let window: Window = window.parse().map_err(violation)?;
-            let count: u64 = count
-                .parse()
-                .map_err(|_| violation(format!("bad count in `{row}`")))?;
+            let count: u64 = count.parse().map_err(|_| violation(format!("bad count in `{row}`")))?;
             if counts.insert((window, key.to_owned()), count).is_some() {
                 return Err(violation(format!(
                     "window {window} key {key} was emitted under two different ids"
@@ -1379,12 +1275,13 @@ impl Workload for Driver {
                 let all = produced.counts.get(at).copied().unwrap_or(0);
                 all.saturating_sub(produced.optional.get(at).copied().unwrap_or(0))
             };
-            counts.iter().all(|(at, count)| {
-                produced.counts.get(at).is_some_and(|all| count <= all) && *count >= certain(at)
-            }) && produced
-                .counts
-                .keys()
-                .all(|at| counts.get(at).copied().unwrap_or(0) >= certain(at))
+            counts
+                .iter()
+                .all(|(at, count)| produced.counts.get(at).is_some_and(|all| count <= all) && *count >= certain(at))
+                && produced
+                    .counts
+                    .keys()
+                    .all(|at| counts.get(at).copied().unwrap_or(0) >= certain(at))
         } else {
             counts == produced.counts
         };
@@ -1406,18 +1303,10 @@ impl Workload for Driver {
         }
 
         // Stateless path: every event once.
-        let mut raw: Vec<u64> = env
-            .raw
-            .values()
-            .iter()
-            .filter_map(|v| v.parse().ok())
-            .collect();
+        let mut raw: Vec<u64> = env.raw.values().iter().filter_map(|v| v.parse().ok()).collect();
         raw.sort_unstable();
         let raw_exact = raw == (0..produced.total).collect::<Vec<u64>>();
-        assert_always!(
-            raw_exact,
-            "the stateless path delivers every event exactly once"
-        );
+        assert_always!(raw_exact, "the stateless path delivers every event exactly once");
         if !raw_exact {
             return Err(violation(format!(
                 "raw sink holds {} ids for {} events",
@@ -1436,23 +1325,18 @@ impl Workload for Driver {
         let both_exact = both.len() as u64 == produced.total && both.values().all(|n| *n == 2);
         assert_always!(both_exact, "a fan-in delivers each branch exactly once");
         if !both_exact {
-            return Err(violation(
-                "the two-branch sink does not hold every event twice".into(),
-            ));
+            return Err(violation("the two-branch sink does not hold every event twice".into()));
         }
 
         // Second-level aggregation over the results of the first.
         let mut totals: BTreeMap<Window, u64> = BTreeMap::new();
         for row in env.totals.values() {
             let mut parts = row.split('|');
-            let (Some(window), Some(_), Some(count)) = (parts.next(), parts.next(), parts.next())
-            else {
+            let (Some(window), Some(_), Some(count)) = (parts.next(), parts.next(), parts.next()) else {
                 return Err(violation(format!("malformed total row `{row}`")));
             };
             let window: Window = window.parse().map_err(violation)?;
-            let count: u64 = count
-                .parse()
-                .map_err(|_| violation(format!("bad total in `{row}`")))?;
+            let count: u64 = count.parse().map_err(|_| violation(format!("bad total in `{row}`")))?;
             if totals.insert(window, count).is_some() {
                 return Err(violation(format!("big window {window} was emitted twice")));
             }
@@ -1465,10 +1349,7 @@ impl Workload for Driver {
             self.expected_totals(&produced.counts)
         };
         let totals_exact = totals == expected_totals;
-        assert_always!(
-            totals_exact,
-            "a second aggregation sees every first-level result once"
-        );
+        assert_always!(totals_exact, "a second aggregation sees every first-level result once");
         if !totals_exact {
             return Err(violation(format!(
                 "second-level totals differ: expected {expected_totals:?}, got {totals:?}"
@@ -1484,29 +1365,14 @@ impl Workload for Driver {
             if key.starts_with("cluster:metrics:")
                 && let Ok(Some(snapshot)) = kv.get_json::<WorkerSnapshot>(&key).await
             {
-                fenced += snapshot
-                    .slices
-                    .iter()
-                    .map(|slice| slice.fenced)
-                    .sum::<u64>();
-                restarts += snapshot
-                    .slices
-                    .iter()
-                    .map(|slice| slice.restarts)
-                    .sum::<u64>();
-                throttled += snapshot
-                    .slices
-                    .iter()
-                    .map(|slice| slice.throttled)
-                    .sum::<u64>();
+                fenced += snapshot.slices.iter().map(|slice| slice.fenced).sum::<u64>();
+                restarts += snapshot.slices.iter().map(|slice| slice.restarts).sum::<u64>();
+                throttled += snapshot.slices.iter().map(|slice| slice.throttled).sum::<u64>();
             }
         }
         assert_sometimes!(fenced > 0, "a worker lost a commit to another worker");
         assert_sometimes!(restarts > 0, "a slice restarted from its last commit");
-        assert_sometimes!(
-            throttled > 0,
-            "a slice stopped reading until emission caught up"
-        );
+        assert_sometimes!(throttled > 0, "a slice stopped reading until emission caught up");
         assert_sometimes!(
             *env.kv_replies_lost.lock() > 0,
             "a KV reply was lost after the command applied"
@@ -1523,10 +1389,7 @@ impl Workload for Driver {
             !produced.optional.is_empty(),
             "a new partition received events before the pipeline read it"
         );
-        assert_sometimes!(
-            *env.redeliveries.lock() > 0,
-            "the source redelivered records"
-        );
+        assert_sometimes!(*env.redeliveries.lock() > 0, "the source redelivered records");
         assert_sometimes!(
             *env.sink_ambiguous.lock() > 0,
             "a sink write failed after being applied"
@@ -1597,8 +1460,7 @@ impl Workload for Operator {
         let graph = spec.key();
         let nodes: Vec<NodeId> = spec.nodes.iter().map(|node| node.id.clone()).collect();
         let failed = |error: KvError| violation(error.to_string());
-        let pause =
-            |low: u64, high: u64| Duration::from_millis(ctx.random().random_range(low..high));
+        let pause = |low: u64, high: u64| Duration::from_millis(ctx.random().random_range(low..high));
 
         let desire = |state: RunState, paused: Option<NodeId>| {
             let kv = kv.clone();
@@ -1625,9 +1487,7 @@ impl Workload for Operator {
                 }
                 1 => {
                     let node = nodes[ctx.random().random_range(0..nodes.len())].clone();
-                    desire(RunState::Running, Some(node))
-                        .await
-                        .map_err(failed)?;
+                    desire(RunState::Running, Some(node)).await.map_err(failed)?;
                     let _ = ctx.time().sleep(pause(300, 2_000)).await;
                     desire(RunState::Running, None).await.map_err(failed)?;
                     "pause-node"
@@ -1642,9 +1502,7 @@ impl Workload for Operator {
                     // The same description under a new version: workers stop
                     // the graph's slices and start them again from their logs.
                     spec.version += 1;
-                    kv.set_json(&keys::graph_spec(&graph), &spec)
-                        .await
-                        .map_err(failed)?;
+                    kv.set_json(&keys::graph_spec(&graph), &spec).await.map_err(failed)?;
                     kv.hset_json(
                         keys::CLUSTER_GRAPHS,
                         &graph.to_string(),
@@ -1723,9 +1581,9 @@ impl Workload for Auditor {
                         || head.sealed < before.sealed
                         || (head.epoch == before.epoch && head.owner != before.owner);
                     if backwards {
-                        env.audit.lock().push(format!(
-                            "slice {slice} went backwards: {before:?} then {head:?}"
-                        ));
+                        env.audit
+                            .lock()
+                            .push(format!("slice {slice} went backwards: {before:?} then {head:?}"));
                     }
                 }
                 seen.insert(key, head);

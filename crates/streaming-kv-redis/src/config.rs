@@ -1,7 +1,6 @@
 //! Client configuration and URL parsing.
 
-use std::fmt;
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use streaming_core::KvError;
 
@@ -128,14 +127,10 @@ impl RedisConfig {
             None => (None, None),
             Some(info) => match info.split_once(':') {
                 None => {
-                    return Err(config_error(
-                        "userinfo must be `user:password` or `:password`",
-                    ));
+                    return Err(config_error("userinfo must be `user:password` or `:password`"));
                 }
                 Some((user, pass)) => (
-                    (!user.is_empty())
-                        .then(|| percent_decode(user))
-                        .transpose()?,
+                    (!user.is_empty()).then(|| percent_decode(user)).transpose()?,
                     Some(percent_decode(pass)?),
                 ),
             },

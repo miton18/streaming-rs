@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use moonpool_core::TokioProviders;
 use streaming_core::{Kv, KvError, MemKv};
-use streaming_kv_redis::testkit::{conformance, conformance_incr_overflow};
-use streaming_kv_redis::{FakeRedis, RedisConfig, RedisKv};
+use streaming_kv_redis::{
+    FakeRedis, RedisConfig, RedisKv,
+    testkit::{conformance, conformance_incr_overflow},
+};
 use tokio_util::sync::CancellationToken;
 
 fn config(addr: &str) -> RedisConfig {
@@ -23,9 +25,7 @@ async fn start_fake(fake: FakeRedis) -> (String, CancellationToken) {
     let token = CancellationToken::new();
     let (a, t) = (addr.clone(), token.clone());
     tokio::spawn(async move {
-        fake.serve(TokioProviders::new(), &a, t)
-            .await
-            .expect("serve");
+        fake.serve(TokioProviders::new(), &a, t).await.expect("serve");
     });
     for _ in 0..200 {
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
@@ -47,9 +47,7 @@ async fn conformance_fake_redis() {
     let (addr, token) = start_fake(fake.clone()).await;
     let kv = RedisKv::new(TokioProviders::new(), config(&addr));
     kv.ping().await.expect("ping");
-    conformance(&kv)
-        .await
-        .expect("RedisKv over FakeRedis conforms");
+    conformance(&kv).await.expect("RedisKv over FakeRedis conforms");
     conformance_incr_overflow(&kv).await.expect("incr overflow");
     // HSCAN really paged (5000 fields, COUNT 500) and DEL really chunked.
     assert!(
@@ -57,11 +55,7 @@ async fn conformance_fake_redis() {
         "hscan calls: {}",
         fake.command_count("HSCAN")
     );
-    assert_eq!(
-        fake.command_count("HGETALL"),
-        0,
-        "hgetall must page with HSCAN"
-    );
+    assert_eq!(fake.command_count("HGETALL"), 0, "hgetall must page with HSCAN");
     token.cancel();
 }
 
@@ -72,9 +66,7 @@ async fn conformance_real_redis() {
     };
     let kv = RedisKv::new(TokioProviders::new(), config(&server.addr));
     kv.ping().await.expect("ping");
-    conformance(&kv)
-        .await
-        .expect("RedisKv over real redis conforms");
+    conformance(&kv).await.expect("RedisKv over real redis conforms");
     conformance_incr_overflow(&kv).await.expect("incr overflow");
 }
 
@@ -91,9 +83,7 @@ async fn conformance_real_redis_small_chunks() {
         ..config(&server.addr)
     };
     let kv = RedisKv::new(TokioProviders::new(), cfg);
-    conformance(&kv)
-        .await
-        .expect("conforms with tiny chunk sizes");
+    conformance(&kv).await.expect("conforms with tiny chunk sizes");
 }
 
 #[tokio::test]
@@ -132,14 +122,8 @@ async fn real_redis_with_password() {
         password: Some("nope".into()),
         ..config(&server.addr)
     };
-    let err = RedisKv::new(TokioProviders::new(), cfg)
-        .ping()
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, KvError::Protocol(ref m) if m.contains("AUTH")),
-        "{err:?}"
-    );
+    let err = RedisKv::new(TokioProviders::new(), cfg).ping().await.unwrap_err();
+    assert!(matches!(err, KvError::Protocol(ref m) if m.contains("AUTH")), "{err:?}");
 
     // No credentials at all: NOAUTH is a protocol error too.
     let err = RedisKv::new(TokioProviders::new(), config(&server.addr))

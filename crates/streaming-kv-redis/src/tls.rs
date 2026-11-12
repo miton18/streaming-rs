@@ -2,8 +2,7 @@
 
 use std::sync::Arc;
 
-use futures_rustls::rustls::pki_types::CertificateDer;
-use futures_rustls::rustls::{ClientConfig, RootCertStore, crypto::ring};
+use futures_rustls::rustls::{ClientConfig, RootCertStore, crypto::ring, pki_types::CertificateDer};
 
 /// Trust anchors: the Mozilla web PKI roots plus `extra_roots_der`.
 /// Crypto provider: ring.

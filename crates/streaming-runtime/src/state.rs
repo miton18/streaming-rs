@@ -66,8 +66,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use streaming_core::{Key, Kv, KvError, NodeId, Position, SliceKey, Timestamp, Window, keys};
 
-use crate::metrics::ts_key;
-use crate::mutation::{Mutant, planted};
+use crate::{
+    metrics::ts_key,
+    mutation::{Mutant, planted},
+};
 
 /// Watermark of a slice that has not seen any event time yet.
 pub(crate) const NO_WATERMARK: Timestamp = i64::MIN;
@@ -161,10 +163,7 @@ pub(crate) async fn read_seal(kv: &dyn Kv, slice: &SliceKey) -> Result<Seal, KvE
     for (field, _) in kv.hgetall(&keys::slice_seal(slice)).await? {
         if let Some(floor) = keys::parse_seal_field(&field) {
             seal.floor = seal.floor.max(floor);
-        } else if let Some(plan) = field
-            .strip_prefix(PLAN_FLOOR)
-            .and_then(|plan| plan.parse().ok())
-        {
+        } else if let Some(plan) = field.strip_prefix(PLAN_FLOOR).and_then(|plan| plan.parse().ok()) {
             seal.plan = seal.plan.max(plan);
         }
     }
@@ -178,11 +177,7 @@ pub(crate) async fn read_seal(kv: &dyn Kv, slice: &SliceKey) -> Result<Seal, KvE
 /// heard of its retirement: it finds its next commit void, and whoever reads
 /// the log from now on finds it empty. Its state is only deleted later (see
 /// [`purge_closed`]), when no write issued before this can still land.
-pub(crate) async fn close_log(
-    kv: &dyn Kv,
-    slice: &SliceKey,
-    generation: u64,
-) -> Result<(), KvError> {
+pub(crate) async fn close_log(kv: &dyn Kv, slice: &SliceKey, generation: u64) -> Result<(), KvError> {
     kv.hset(
         &keys::slice_seal(slice),
         vec![(format!("{PLAN_FLOOR}{generation}"), b"1".to_vec())],
@@ -193,16 +188,9 @@ pub(crate) async fn close_log(
 /// Delete what a slice whose log is closed left in the store. The closing
 /// mark stays, so that the slice can come back under a later plan and start
 /// afresh.
-pub(crate) async fn purge_closed(
-    kv: &dyn Kv,
-    slice: &SliceKey,
-    nodes: &[NodeId],
-) -> Result<(), KvError> {
+pub(crate) async fn purge_closed(kv: &dyn Kv, slice: &SliceKey, nodes: &[NodeId]) -> Result<(), KvError> {
     for node in nodes {
-        let windows: Vec<Window> = indexed_windows(kv, slice, node)
-            .await?
-            .into_keys()
-            .collect();
+        let windows: Vec<Window> = indexed_windows(kv, slice, node).await?.into_keys().collect();
         delete_windows(kv, slice, node, &windows).await?;
         kv.del(vec![keys::slice_window_index(slice, node)]).await?;
     }
@@ -250,11 +238,10 @@ pub(crate) async fn read_log(kv: &dyn Kv, slice: &SliceKey) -> Result<LogView, S
                 view.live.push(epoch);
                 continue;
             }
-            let record: CommitRecord =
-                postcard::from_bytes(&value).map_err(|e| StateError::Corrupt {
-                    slice: slice.to_string(),
-                    reason: format!("field `{field}`: {e}"),
-                })?;
+            let record: CommitRecord = postcard::from_bytes(&value).map_err(|e| StateError::Corrupt {
+                slice: slice.to_string(),
+                reason: format!("field `{field}`: {e}"),
+            })?;
             if record.plan < seal.plan {
                 // The slice was retired and its state is being deleted, or
                 // was: whatever it wrote before is void, like a field below
@@ -306,8 +293,7 @@ pub(crate) async fn try_commit(
         // somebody else's (possibly already emptied or deleted).
         let ours = match kv.hget(&log, &field).await? {
             Some(existing) if !existing.is_empty() => {
-                postcard::from_bytes::<CommitRecord>(&existing)
-                    .is_ok_and(|existing| existing.owner == record.owner)
+                postcard::from_bytes::<CommitRecord>(&existing).is_ok_and(|existing| existing.owner == record.owner)
             }
             _ => false,
         };
@@ -371,11 +357,7 @@ pub(crate) async fn materialize_window(
 
 /// Copy every change of a commit record into the window hashes.
 #[cfg(test)]
-pub(crate) async fn materialize(
-    kv: &dyn Kv,
-    slice: &SliceKey,
-    record: &CommitRecord,
-) -> Result<(), KvError> {
+pub(crate) async fn materialize(kv: &dyn Kv, slice: &SliceKey, record: &CommitRecord) -> Result<(), KvError> {
     for node in &record.changes {
         for changes in &node.windows {
             materialize_window(kv, slice, &node.node, changes, record.epoch).await?;
@@ -386,11 +368,7 @@ pub(crate) async fn materialize(
 
 /// Empty records that are superseded and copied out. Their fields stay and
 /// keep refusing late writers.
-pub(crate) async fn tombstone(
-    kv: &dyn Kv,
-    slice: &SliceKey,
-    epochs: &[u64],
-) -> Result<(), KvError> {
+pub(crate) async fn tombstone(kv: &dyn Kv, slice: &SliceKey, epochs: &[u64]) -> Result<(), KvError> {
     if epochs.is_empty() {
         return Ok(());
     }
@@ -417,8 +395,7 @@ pub(crate) async fn compact(
     previous_floor: u64,
 ) -> Result<(), KvError> {
     let seal = keys::slice_seal(slice);
-    kv.hset(&seal, vec![(keys::seal_field(floor), b"1".to_vec())])
-        .await?;
+    kv.hset(&seal, vec![(keys::seal_field(floor), b"1".to_vec())]).await?;
     let fields: Vec<String> = epochs
         .iter()
         .filter(|epoch| **epoch <= floor)
@@ -450,10 +427,7 @@ pub(crate) async fn sweep(kv: &dyn Kv, slice: &SliceKey, epochs: &[u64]) -> Resu
     }
     kv.hdel(
         &keys::slice_log(slice),
-        epochs
-            .iter()
-            .map(|epoch| keys::commit_field(*epoch))
-            .collect(),
+        epochs.iter().map(|epoch| keys::commit_field(*epoch)).collect(),
     )
     .await
 }
@@ -464,16 +438,10 @@ pub(crate) type WindowState = BTreeMap<Key, (Vec<u8>, u64)>;
 
 fn overlay(state: &mut WindowState, records: &[CommitRecord], node: &NodeId, window: &Window) {
     for record in records {
-        for changes in record
-            .changes
-            .iter()
-            .filter(|changes| &changes.node == node)
-        {
+        for changes in record.changes.iter().filter(|changes| &changes.node == node) {
             for window_changes in changes.windows.iter().filter(|w| &w.window == window) {
                 for entry in &window_changes.entries {
-                    let newer = state
-                        .get(&entry.key)
-                        .is_none_or(|(_, epoch)| *epoch <= record.epoch);
+                    let newer = state.get(&entry.key).is_none_or(|(_, epoch)| *epoch <= record.epoch);
                     if newer {
                         state.insert(entry.key.clone(), (entry.acc.clone(), record.epoch));
                     }
@@ -576,10 +544,7 @@ pub(crate) async fn list_windows(
     node: &NodeId,
     pending: &[CommitRecord],
 ) -> Result<BTreeSet<Window>, KvError> {
-    let mut windows: BTreeSet<Window> = indexed_windows(kv, slice, node)
-        .await?
-        .into_keys()
-        .collect();
+    let mut windows: BTreeSet<Window> = indexed_windows(kv, slice, node).await?.into_keys().collect();
     windows.extend(pending_windows(pending, node));
     Ok(windows)
 }
@@ -636,9 +601,10 @@ pub(crate) async fn unindex_windows(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use futures::executor::block_on;
     use streaming_core::MemKv;
+
+    use super::*;
 
     fn slice() -> SliceKey {
         "acme/g/src.events.0".parse().unwrap()
@@ -690,10 +656,7 @@ mod tests {
                 try_commit(&kv, &slice(), &ours).await.unwrap(),
                 CommitOutcome::Committed
             );
-            assert_eq!(
-                try_commit(&kv, &slice(), &theirs).await.unwrap(),
-                CommitOutcome::Fenced
-            );
+            assert_eq!(try_commit(&kv, &slice(), &theirs).await.unwrap(), CommitOutcome::Fenced);
             // A retry after a lost reply recognises its own record.
             assert_eq!(
                 try_commit(&kv, &slice(), &ours).await.unwrap(),
@@ -715,17 +678,13 @@ mod tests {
             materialize(&kv, &slice(), &second).await.unwrap();
             // A fenced instance finishing late replays the older record.
             materialize(&kv, &slice(), &first).await.unwrap();
-            let state = read_window(&kv, &slice(), &node(), &window, &[])
-                .await
-                .unwrap();
+            let state = read_window(&kv, &slice(), &node(), &window, &[]).await.unwrap();
             assert_eq!((value(&state, "a"), value(&state, "b")), (3, 1));
             assert_eq!(
                 list_windows(&kv, &slice(), &node(), &[]).await.unwrap(),
                 BTreeSet::from([window])
             );
-            delete_windows(&kv, &slice(), &node(), &[window])
-                .await
-                .unwrap();
+            delete_windows(&kv, &slice(), &node(), &[window]).await.unwrap();
             assert!(
                 read_window(&kv, &slice(), &node(), &window, &[])
                     .await
@@ -736,25 +695,14 @@ mod tests {
             let indexed = || async { indexed_windows(&kv, &slice(), &node()).await.unwrap() };
             assert_eq!(indexed().await, BTreeMap::from([(window, None)]));
             // The countdown to forgetting the window is kept in the entry...
-            mark_quiet(&kv, &slice(), &node(), &[window], 1_234)
-                .await
-                .unwrap();
+            mark_quiet(&kv, &slice(), &node(), &[window], 1_234).await.unwrap();
             assert_eq!(indexed().await, BTreeMap::from([(window, Some(1_234))]));
             // ... and a writer entering the window again restarts it.
             materialize(&kv, &slice(), &first).await.unwrap();
             assert_eq!(indexed().await, BTreeMap::from([(window, None)]));
-            delete_windows(&kv, &slice(), &node(), &[window])
-                .await
-                .unwrap();
-            unindex_windows(&kv, &slice(), &node(), &[window])
-                .await
-                .unwrap();
-            assert!(
-                list_windows(&kv, &slice(), &node(), &[])
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+            delete_windows(&kv, &slice(), &node(), &[window]).await.unwrap();
+            unindex_windows(&kv, &slice(), &node(), &[window]).await.unwrap();
+            assert!(list_windows(&kv, &slice(), &node(), &[]).await.unwrap().is_empty());
         });
     }
 
@@ -768,15 +716,11 @@ mod tests {
             materialize(&kv, &slice(), &first).await.unwrap();
             // `second` is committed but not materialized yet.
             let pending = [first.clone(), second.clone()];
-            let state = read_window(&kv, &slice(), &node(), &window, &pending)
-                .await
-                .unwrap();
+            let state = read_window(&kv, &slice(), &node(), &window, &pending).await.unwrap();
             assert_eq!((value(&state, "a"), value(&state, "c")), (2, 7));
             // Overlaying an older record over a newer materialized one changes nothing.
             materialize(&kv, &slice(), &second).await.unwrap();
-            let state = read_window(&kv, &slice(), &node(), &window, &[first])
-                .await
-                .unwrap();
+            let state = read_window(&kv, &slice(), &node(), &window, &[first]).await.unwrap();
             assert_eq!(value(&state, "a"), 2);
         });
     }
@@ -786,9 +730,7 @@ mod tests {
         block_on(async {
             let kv = MemKv::new();
             for epoch in 1..=3 {
-                try_commit(&kv, &slice(), &record(epoch, "o", &[]))
-                    .await
-                    .unwrap();
+                try_commit(&kv, &slice(), &record(epoch, "o", &[])).await.unwrap();
             }
             tombstone(&kv, &slice(), &[1, 2]).await.unwrap();
             let log = read_log(&kv, &slice()).await.unwrap();
@@ -797,10 +739,7 @@ mod tests {
             assert_eq!(log.live, [1, 2, 3]);
             // A worker that fell behind cannot commit an epoch already taken.
             let late = record(2, "late", &[("k", 9, 0)]);
-            assert_eq!(
-                try_commit(&kv, &slice(), &late).await.unwrap(),
-                CommitOutcome::Fenced
-            );
+            assert_eq!(try_commit(&kv, &slice(), &late).await.unwrap(), CommitOutcome::Fenced);
         });
     }
 
@@ -809,9 +748,7 @@ mod tests {
         block_on(async {
             let kv = MemKv::new();
             for epoch in 1..=5 {
-                try_commit(&kv, &slice(), &record(epoch, "o", &[]))
-                    .await
-                    .unwrap();
+                try_commit(&kv, &slice(), &record(epoch, "o", &[])).await.unwrap();
             }
             compact(&kv, &slice(), 4, &[1, 2, 3, 4], 0).await.unwrap();
             let log = read_log(&kv, &slice()).await.unwrap();
@@ -819,10 +756,7 @@ mod tests {
 
             // The field of epoch 2 is gone, so HSETNX alone would accept this.
             let late = record(2, "late", &[("k", 9, 0)]);
-            assert_eq!(
-                try_commit(&kv, &slice(), &late).await.unwrap(),
-                CommitOutcome::Fenced
-            );
+            assert_eq!(try_commit(&kv, &slice(), &late).await.unwrap(), CommitOutcome::Fenced);
             let log = read_log(&kv, &slice()).await.unwrap();
             assert_eq!(log.head().unwrap().epoch, 5);
             assert!(log.sealed.is_empty(), "the revived field was removed");
@@ -845,9 +779,7 @@ mod tests {
             assert_eq!(read_seal(&kv, &slice()).await.unwrap().floor, 4);
             // The next epoch still commits normally.
             assert_eq!(
-                try_commit(&kv, &slice(), &record(6, "o", &[]))
-                    .await
-                    .unwrap(),
+                try_commit(&kv, &slice(), &record(6, "o", &[])).await.unwrap(),
                 CommitOutcome::Committed
             );
         });

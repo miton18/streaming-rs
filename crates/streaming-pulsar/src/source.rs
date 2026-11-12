@@ -1,23 +1,25 @@
 //! `std/pulsar-source@1`.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use magnetar::MessageId;
-use magnetar::proto::pb::command_subscribe::{InitialPosition as PbInitialPosition, SubType};
-use magnetar::proto::{IncomingMessage, SubscribeRequest};
-use magnetar::runtime_moonpool::Consumer;
-use moonpool_core::Providers;
-use streaming_core::{
-    PartitionReader, Position, SourceConnector, SourceError, SourceRecord, Timestamp, datum,
+use magnetar::{
+    MessageId,
+    proto::{
+        IncomingMessage, SubscribeRequest,
+        pb::command_subscribe::{InitialPosition as PbInitialPosition, SubType},
+    },
+    runtime_moonpool::Consumer,
 };
+use moonpool_core::Providers;
+use streaming_core::{PartitionReader, Position, SourceConnector, SourceError, SourceRecord, Timestamp, datum};
 
-use crate::client::{ClientCell, Conn};
-use crate::config::{EventTimeMode, InitialPosition, SourceConfig};
-use crate::position::{end_position_of, partition_topic, position_of};
+use crate::{
+    client::{ClientCell, Conn},
+    config::{EventTimeMode, InitialPosition, SourceConfig},
+    position::{end_position_of, partition_topic, position_of},
+};
 
 /// One message read from a Pulsar topic partition: the output type of
 /// `std/pulsar-source@1`.
@@ -44,10 +46,7 @@ impl PulsarMessage {
     /// Value of the first property named `name`.
     #[must_use]
     pub fn property(&self, name: &str) -> Option<&str> {
-        self.properties
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
+        self.properties.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
     }
 }
 
@@ -91,11 +90,7 @@ impl<P: Providers> SourceConnector for PulsarSource<P> {
         Ok(result?.max(1))
     }
 
-    async fn open(
-        &self,
-        partition: u32,
-        _after: Option<Position>,
-    ) -> Result<Box<dyn PartitionReader>, SourceError> {
+    async fn open(&self, partition: u32, _after: Option<Position>) -> Result<Box<dyn PartitionReader>, SourceError> {
         // `after` is ignored on purpose: the durable subscription's cursor only
         // moves on `ack`, which the runtime calls after its own commit, so the
         // broker redelivers from at or before `after` and the runtime drops what
@@ -183,16 +178,8 @@ pub(crate) fn to_record(
     let id = message.message_id;
     let meta = &message.metadata;
     let (key, properties, event_time) = match &message.single_metadata {
-        Some(single) => (
-            single.partition_key.clone(),
-            &single.properties,
-            single.event_time,
-        ),
-        None => (
-            meta.partition_key.clone(),
-            &meta.properties,
-            meta.event_time,
-        ),
+        Some(single) => (single.partition_key.clone(), &single.properties, single.event_time),
+        None => (meta.partition_key.clone(), &meta.properties, meta.event_time),
     };
     let publish_time_ms = i64::try_from(meta.publish_time).unwrap_or(i64::MAX);
     // Pulsar uses 0 for "no event time".
@@ -206,10 +193,7 @@ pub(crate) fn to_record(
     let value = PulsarMessage {
         key,
         payload: message.payload,
-        properties: properties
-            .iter()
-            .map(|kv| (kv.key.clone(), kv.value.clone()))
-            .collect(),
+        properties: properties.iter().map(|kv| (kv.key.clone(), kv.value.clone())).collect(),
         publish_time_ms,
         event_time_ms,
         topic: topic.to_owned(),
@@ -227,11 +211,7 @@ pub(crate) fn to_record(
 
 #[async_trait]
 impl<P: Providers> PartitionReader for PulsarReader<P> {
-    async fn poll(
-        &mut self,
-        max: usize,
-        max_wait: Duration,
-    ) -> Result<Vec<SourceRecord>, SourceError> {
+    async fn poll(&mut self, max: usize, max_wait: Duration) -> Result<Vec<SourceRecord>, SourceError> {
         // Waits up to `max_wait` (on the providers' clock) for the first
         // message, then drains what is already buffered, up to `max`.
         let messages = self
@@ -255,12 +235,10 @@ impl<P: Providers> PartitionReader for PulsarReader<P> {
         let Some((&position, &id)) = self.delivered.range(..=upto).next_back() else {
             return Ok(());
         };
-        self.consumer.ack_cumulative(id).await.map_err(|e| {
-            err(
-                &format!("cumulative ack of {position} on `{}`", self.topic),
-                e,
-            )
-        })?;
+        self.consumer
+            .ack_cumulative(id)
+            .await
+            .map_err(|e| err(&format!("cumulative ack of {position} on `{}`", self.topic), e))?;
         self.delivered.retain(|delivered, _| *delivered > position);
         Ok(())
     }

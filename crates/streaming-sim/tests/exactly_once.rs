@@ -4,12 +4,9 @@
 //! Run a specific seed with `SIM_SEEDS=42,43 cargo test -p streaming-sim`,
 //! more iterations with `SIM_ITERATIONS=1000`.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport,
-};
+use moonpool_sim::{Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport};
 use parking_lot::Mutex;
 use streaming_sim::{Auditor, Driver, EnvSlot, Operator, Scenario, SimEnv, WorkerProcess};
 
@@ -20,12 +17,7 @@ fn iterations(default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn run(
-    scenario: Scenario,
-    workers: usize,
-    attrition: bool,
-    default_iterations: usize,
-) -> SimulationReport {
+fn run(scenario: Scenario, workers: usize, attrition: bool, default_iterations: usize) -> SimulationReport {
     let slot: EnvSlot = Arc::new(Mutex::new(None));
     let mut builder = SimulationBuilder::new()
         .before_iteration({
@@ -60,12 +52,7 @@ fn run(
     }
     let seeds: Vec<u64> = std::env::var("SIM_SEEDS")
         .ok()
-        .map(|value| {
-            value
-                .split(',')
-                .filter_map(|seed| seed.trim().parse().ok())
-                .collect()
-        })
+        .map(|value| value.split(',').filter_map(|seed| seed.trim().parse().ok()).collect())
         .unwrap_or_default();
     builder = if seeds.is_empty() {
         builder.set_iterations(iterations(default_iterations))
@@ -73,10 +60,7 @@ fn run(
         builder.set_iterations(seeds.len()).set_debug_seeds(seeds)
     };
     let report = builder.run();
-    if report.failed_runs > 0
-        || !report.assertion_violations.is_empty()
-        || std::env::var("SIM_REPORT").is_ok()
-    {
+    if report.failed_runs > 0 || !report.assertion_violations.is_empty() || std::env::var("SIM_REPORT").is_ok() {
         report.eprint();
     }
     report

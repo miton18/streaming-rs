@@ -102,12 +102,7 @@ impl SequenceLayout {
     /// A layout giving `position_bits[i]` bits to component `i` of the
     /// position and `index_bits` bits to the index. At most 63 bits in total.
     pub fn new(position_bits: [u8; 3], index_bits: u8) -> Result<Self, String> {
-        let bits = [
-            position_bits[0],
-            position_bits[1],
-            position_bits[2],
-            index_bits,
-        ];
+        let bits = [position_bits[0], position_bits[1], position_bits[2], index_bits];
         let total: u32 = bits.iter().map(|b| u32::from(*b)).sum();
         if total > 63 {
             return Err(format!(
@@ -179,13 +174,7 @@ mod tests {
         let a = layout.pack([1, 2, 3, 4]).unwrap();
         assert_eq!(a, (1 << 38) | (2 << 18) | (3 << 8) | 4);
         // Order follows (position, index).
-        let samples = [
-            [1, 2, 3, 4],
-            [1, 2, 3, 5],
-            [1, 2, 4, 0],
-            [1, 3, 0, 0],
-            [2, 0, 0, 0],
-        ];
+        let samples = [[1, 2, 3, 4], [1, 2, 3, 5], [1, 2, 4, 0], [1, 3, 0, 0], [2, 0, 0, 0]];
         let seqs: Vec<u64> = samples.iter().map(|c| layout.pack(*c).unwrap()).collect();
         assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
         // Overflow of any component is an error, not a wrap.

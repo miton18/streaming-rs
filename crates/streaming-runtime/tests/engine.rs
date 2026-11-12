@@ -1,20 +1,18 @@
 //! End-to-end run of the engine on tokio with an in-memory KV: one worker,
 //! one graph (source -> key_by -> window -> count -> two sinks), real time.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use moonpool_core::TokioProviders;
 use parking_lot::Mutex;
-use streaming_core::control::{GraphIndexEntry, SliceSnapshot, WorkerSnapshot};
 use streaming_core::{
-    Clock, DynKv, Emit, GraphSpec, MemKv, NoSecrets, Registry, SinkConnector, SinkError,
-    SystemClock, TypeTag, Window, Windowed, WorkerId, datum, keys,
+    Clock, DynKv, Emit, GraphSpec, MemKv, NoSecrets, Registry, SinkConnector, SinkError, SystemClock, TypeTag, Window,
+    Windowed, WorkerId,
+    control::{GraphIndexEntry, SliceSnapshot, WorkerSnapshot},
+    datum, keys,
 };
-use streaming_runtime::memlog::MemLog;
-use streaming_runtime::{NoLoad, RuntimeEnv, Worker, WorkerConfig, builtin};
+use streaming_runtime::{NoLoad, RuntimeEnv, Worker, WorkerConfig, builtin, memlog::MemLog};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
@@ -111,10 +109,7 @@ async fn counts_every_record_exactly_once() {
         });
     }
     registry.register_key("test/key@1", "", |event: &Event| event.key.clone());
-    for (op, sink) in [
-        ("test/collect@1", counts.clone()),
-        ("test/raw@1", raw.clone()),
-    ] {
+    for (op, sink) in [("test/collect@1", counts.clone()), ("test/raw@1", raw.clone())] {
         registry.register_sink(op, "", TypeTag::Any, move |_, _| {
             Ok(sink.clone() as Arc<dyn SinkConnector>)
         });
@@ -179,14 +174,8 @@ async fn counts_every_record_exactly_once() {
     let mut actual: BTreeMap<(Window, String), u64> = BTreeMap::new();
     for (_, value) in counts.seen.lock().values() {
         let windowed = value.as_ref().unwrap();
-        let previous = actual.insert(
-            (windowed.window, windowed.key::<String>().unwrap()),
-            windowed.value,
-        );
-        assert!(
-            previous.is_none(),
-            "a (window, key) was emitted under two ids"
-        );
+        let previous = actual.insert((windowed.window, windowed.key::<String>().unwrap()), windowed.value);
+        assert!(previous.is_none(), "a (window, key) was emitted under two ids");
     }
     assert_eq!(actual, expected);
 
@@ -199,17 +188,8 @@ async fn counts_every_record_exactly_once() {
         .unwrap();
     let slices: Vec<&SliceSnapshot> = snapshot.slices.iter().collect();
     assert_eq!(slices.len(), 4, "three source partitions and one emitter");
-    assert!(
-        slices
-            .iter()
-            .all(|slice| slice.epoch > 0 && slice.fenced == 0)
-    );
-    assert!(
-        snapshot
-            .actors
-            .iter()
-            .any(|actor| actor.node.as_str() == "count")
-    );
+    assert!(slices.iter().all(|slice| slice.epoch > 0 && slice.fenced == 0));
+    assert!(snapshot.actors.iter().any(|actor| actor.node.as_str() == "count"));
     assert_eq!((0..3).map(|p| log.retained(p)).sum::<usize>(), 0);
 
     // Emitted windows are garbage-collected from the KV: their state at once,
@@ -227,11 +207,7 @@ async fn counts_every_record_exactly_once() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(
-        leftovers().is_empty(),
-        "window state left behind: {:?}",
-        leftovers()
-    );
+    assert!(leftovers().is_empty(), "window state left behind: {:?}", leftovers());
 
     shutdown.cancel();
     running.await.unwrap();

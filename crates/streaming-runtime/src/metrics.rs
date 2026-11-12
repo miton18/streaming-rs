@@ -5,14 +5,20 @@
 //! (*backpressured*). The time spent in each is what the control plane uses to
 //! locate the bottleneck of a graph.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use moonpool_core::{Providers, TimeProvider};
 use parking_lot::Mutex;
-use streaming_core::control::{ActorKind, ActorSnapshot, ActorState, EmittedWindow, SliceSnapshot};
-use streaming_core::{GraphId, NodeId, OpRef, Position, SliceId, TenantId, Timestamp};
+use streaming_core::{
+    GraphId, NodeId, OpRef, Position, SliceId, TenantId, Timestamp,
+    control::{ActorKind, ActorSnapshot, ActorState, EmittedWindow, SliceSnapshot},
+};
 use tokio::sync::mpsc;
 
 use crate::mailbox::Msg;
@@ -121,8 +127,7 @@ impl ActorMetrics {
         let now_ns = now.as_nanos() as u64;
         let since = self.phase_since_ns.swap(now_ns, Ordering::Relaxed);
         let previous = self.phase.swap(phase as u8, Ordering::Relaxed);
-        self.phase_ns[usize::from(previous.min(3))]
-            .fetch_add(now_ns.saturating_sub(since), Ordering::Relaxed);
+        self.phase_ns[usize::from(previous.min(3))].fetch_add(now_ns.saturating_sub(since), Ordering::Relaxed);
     }
 
     /// Cumulative nanoseconds per phase, including the phase in progress.
@@ -185,15 +190,11 @@ impl<P: Providers> Meter<P> {
     }
 
     pub(crate) fn records_in(&self, count: usize) {
-        self.metrics
-            .records_in
-            .fetch_add(count as u64, Ordering::Relaxed);
+        self.metrics.records_in.fetch_add(count as u64, Ordering::Relaxed);
     }
 
     pub(crate) fn records_out(&self, count: usize) {
-        self.metrics
-            .records_out
-            .fetch_add(count as u64, Ordering::Relaxed);
+        self.metrics.records_out.fetch_add(count as u64, Ordering::Relaxed);
     }
 }
 
@@ -291,11 +292,7 @@ pub(crate) fn snapshot_actor(
         }
     };
     sample.in_per_sec = rate(sample.records_in, previous.records_in, previous.in_per_sec);
-    sample.out_per_sec = rate(
-        sample.records_out,
-        previous.records_out,
-        previous.out_per_sec,
-    );
+    sample.out_per_sec = rate(sample.records_out, previous.records_out, previous.out_per_sec);
     let (queue_len, queue_cap) = metrics.queue();
     let snapshot = ActorSnapshot {
         tenant: metrics.ident.tenant.clone(),
@@ -429,12 +426,7 @@ mod tests {
         metrics.watch_input(&tx);
         tx.try_send(Msg::Records(Vec::new())).unwrap();
         tx.try_send(Msg::Records(Vec::new())).unwrap();
-        let (snapshot, _) = snapshot_actor(
-            &metrics,
-            None,
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-        );
+        let (snapshot, _) = snapshot_actor(&metrics, None, Duration::from_secs(1), Duration::from_secs(1));
         assert_eq!((snapshot.queue_len, snapshot.queue_cap), (2, 4));
     }
 }

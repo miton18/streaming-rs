@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::lock::Mutex;
-use magnetar::runtime_moonpool::{Client, MoonpoolEngine};
-use magnetar::{ConnectionConfig, SupervisorConfig};
+use magnetar::{
+    ConnectionConfig, SupervisorConfig,
+    runtime_moonpool::{Client, MoonpoolEngine},
+};
 use moonpool_core::{Providers, TaskProvider};
 
 use crate::config::ConnectionSettings;
@@ -97,26 +99,21 @@ pub(crate) fn connection_config(settings: &ConnectionSettings) -> ConnectionConf
     config
 }
 
-async fn connect<P: Providers>(
-    providers: &P,
-    settings: &ConnectionSettings,
-) -> Result<Client<P>, String> {
+async fn connect<P: Providers>(providers: &P, settings: &ConnectionSettings) -> Result<Client<P>, String> {
     let engine = MoonpoolEngine::new(providers.clone());
     let config = connection_config(settings);
     let addr = settings.url.addr();
     let client = if settings.url.tls {
         let tls = match &settings.tls_trust_certs_file {
             Some(path) => {
-                let pem = std::fs::read(path)
-                    .map_err(|e| format!("cannot read tls_trust_certs_file `{path}`: {e}"))?;
+                let pem = std::fs::read(path).map_err(|e| format!("cannot read tls_trust_certs_file `{path}`: {e}"))?;
                 magnetar::runtime_tokio::Client::tls_config_from_pem(&pem)
                     .map_err(|e| format!("invalid tls_trust_certs_file `{path}`: {e}"))?
             }
             None => magnetar::runtime_tokio::default_tls_config()
                 .map_err(|e| format!("cannot build the TLS configuration: {e}"))?,
         };
-        Client::connect_tls_supervised(&engine, &addr, &settings.url.host, tls, config, None, None)
-            .await
+        Client::connect_tls_supervised(&engine, &addr, &settings.url.host, tls, config, None, None).await
     } else {
         Client::connect_plain_supervised(&engine, &addr, config, None, None).await
     };

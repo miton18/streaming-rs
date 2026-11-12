@@ -221,11 +221,7 @@ pub fn crc32(data: &[u8]) -> u32 {
             let mut c = i as u32;
             let mut k = 0;
             while k < 8 {
-                c = if c & 1 != 0 {
-                    0xEDB8_8320 ^ (c >> 1)
-                } else {
-                    c >> 1
-                };
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
                 k += 1;
             }
             table[i] = c;
@@ -262,10 +258,7 @@ pub fn encode_frame(msg: &Message) -> Result<Vec<u8>, WireError> {
 ///
 /// # Errors
 /// [`WireError::FrameTooLarge`] when the announced length exceeds `max`.
-pub fn decode_header(
-    header: [u8; FRAME_HEADER_LEN],
-    max: usize,
-) -> Result<(usize, u32), WireError> {
+pub fn decode_header(header: [u8; FRAME_HEADER_LEN], max: usize) -> Result<(usize, u32), WireError> {
     let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
     let crc = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
     if len > max {
@@ -291,13 +284,9 @@ pub fn decode_payload(payload: &[u8], crc: u32) -> Result<Message, WireError> {
     if version != PROTOCOL_VERSION {
         return Err(WireError::Version(version));
     }
-    let (msg, rest) = postcard::take_from_bytes::<Message>(body)
-        .map_err(|e| WireError::Malformed(e.to_string()))?;
+    let (msg, rest) = postcard::take_from_bytes::<Message>(body).map_err(|e| WireError::Malformed(e.to_string()))?;
     if !rest.is_empty() {
-        return Err(WireError::Malformed(format!(
-            "{} trailing bytes",
-            rest.len()
-        )));
+        return Err(WireError::Malformed(format!("{} trailing bytes", rest.len())));
     }
     Ok(msg)
 }
@@ -326,10 +315,7 @@ pub fn decode_frame(frame: &[u8], max: usize) -> Result<Message, WireError> {
 ///
 /// # Errors
 /// I/O errors.
-pub async fn write_frame<W: AsyncWrite + Unpin + Send>(
-    w: &mut W,
-    msg: &Message,
-) -> Result<usize, WireError> {
+pub async fn write_frame<W: AsyncWrite + Unpin + Send>(w: &mut W, msg: &Message) -> Result<usize, WireError> {
     let frame = encode_frame(msg)?;
     w.write_all(&frame).await?;
     w.flush().await?;
@@ -340,10 +326,7 @@ pub async fn write_frame<W: AsyncWrite + Unpin + Send>(
 ///
 /// # Errors
 /// I/O errors (EOF included), oversize frames, corruption, malformed payload.
-pub async fn read_frame<R: AsyncRead + Unpin + Send>(
-    r: &mut R,
-    max: usize,
-) -> Result<(Message, usize), WireError> {
+pub async fn read_frame<R: AsyncRead + Unpin + Send>(r: &mut R, max: usize) -> Result<(Message, usize), WireError> {
     let mut header = [0u8; FRAME_HEADER_LEN];
     r.read_exact(&mut header).await?;
     let (len, crc) = decode_header(header, max)?;

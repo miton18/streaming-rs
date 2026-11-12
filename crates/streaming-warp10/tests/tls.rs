@@ -4,19 +4,22 @@
 //! skipped with a notice when it is missing). The sink trusts it through
 //! `Warp10Config::tls_extra_roots_der`.
 
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
 
-use futures_rustls::TlsAcceptor;
-use futures_rustls::rustls::ServerConfig;
-use futures_rustls::rustls::crypto::ring;
-use futures_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use futures_rustls::{
+    TlsAcceptor,
+    rustls::{
+        ServerConfig,
+        crypto::ring,
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    },
+};
 use moonpool_core::TokioProviders;
 use streaming_core::{Emit, EmitId, NodeId, Origin, Position, SinkConnector, SliceId, datum};
-use streaming_warp10::fake::{FakeWarp10, PointKey};
-use streaming_warp10::{Gts, GtsValue, Warp10Config, Warp10Sink};
+use streaming_warp10::{
+    Gts, GtsValue, Warp10Config, Warp10Sink,
+    fake::{FakeWarp10, PointKey},
+};
 use tokio::net::TcpListener;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -26,8 +29,7 @@ struct Cert {
 }
 
 fn generate_cert(tag: &str) -> Option<Cert> {
-    let dir: PathBuf =
-        std::env::temp_dir().join(format!("warp10-tls-{}-{tag}", std::process::id()));
+    let dir: PathBuf = std::env::temp_dir().join(format!("warp10-tls-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).ok()?;
     let p = |n: &str| dir.join(n).to_string_lossy().into_owned();
     let run = |args: &[&str]| {
@@ -58,15 +60,7 @@ fn generate_cert(tag: &str) -> Option<Cert> {
         "-addext",
         "basicConstraints=critical,CA:FALSE",
     ])?;
-    run(&[
-        "x509",
-        "-in",
-        &p("cert.pem"),
-        "-outform",
-        "DER",
-        "-out",
-        &p("cert.der"),
-    ])?;
+    run(&["x509", "-in", &p("cert.pem"), "-outform", "DER", "-out", &p("cert.der")])?;
     run(&[
         "pkcs8",
         "-topk8",
@@ -131,8 +125,7 @@ fn emit(n: u64, gts: Gts) -> Emit {
 }
 
 fn sink(host: &str, port: u16, roots: Vec<Vec<u8>>) -> Warp10Sink<TokioProviders> {
-    let mut config =
-        Warp10Config::new(&format!("https://{host}:{port}/api/v0/update"), "tok").unwrap();
+    let mut config = Warp10Config::new(&format!("https://{host}:{port}/api/v0/update"), "tok").unwrap();
     config.tls_extra_roots_der = roots;
     config.timeout = Duration::from_secs(5);
     Warp10Sink::new(TokioProviders::new(), config).unwrap()
@@ -175,10 +168,7 @@ async fn untrusted_or_mismatched_certificates_are_refused() {
     let batch = vec![emit(0, Gts::new("tls.m").at(1).value(1))];
 
     // Unknown issuer: not in the web PKI roots and not added.
-    let err = sink("localhost", port, vec![])
-        .write(&batch)
-        .await
-        .unwrap_err();
+    let err = sink("localhost", port, vec![]).write(&batch).await.unwrap_err();
     assert!(err.0.contains("TLS handshake"), "{err}");
 
     // Trusted certificate, wrong host name (it is issued for `localhost`).
@@ -198,15 +188,9 @@ async fn plain_http_against_a_tls_port_fails_instead_of_hanging() {
     };
     let fake = FakeWarp10::new("tok");
     let port = start_tls_fake(fake.clone(), &cert).await;
-    let mut config =
-        Warp10Config::new(&format!("http://127.0.0.1:{port}/api/v0/update"), "tok").unwrap();
+    let mut config = Warp10Config::new(&format!("http://127.0.0.1:{port}/api/v0/update"), "tok").unwrap();
     config.timeout = Duration::from_millis(500);
     let plain = Warp10Sink::new(TokioProviders::new(), config).unwrap();
-    assert!(
-        plain
-            .write(&[emit(0, Gts::new("m").at(1).value(1))])
-            .await
-            .is_err()
-    );
+    assert!(plain.write(&[emit(0, Gts::new("m").at(1).value(1))]).await.is_err());
     assert!(fake.is_empty());
 }
