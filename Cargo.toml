@@ -37,7 +37,7 @@ moonpool-sim = "0.8.0"
 async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
-parking_lot = "0.12"
+parking_lot = "0.13"
 schemars = { version = "1.2", default-features = false, features = ["derive", "std"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 serde = { version = "1", features = ["derive", "rc"] }
