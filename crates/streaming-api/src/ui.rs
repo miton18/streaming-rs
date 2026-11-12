@@ -35,7 +35,12 @@ pub async fn serve_ui(method: Method, uri: Uri) -> Response {
             .into_response();
     }
     if method != Method::GET && method != Method::HEAD {
-        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+        // The router's 405 layer gives it its body.
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, HeaderValue::from_static("GET,HEAD"))],
+        )
+            .into_response();
     }
     let wanted = path.trim_start_matches('/');
     let wanted = if wanted.is_empty() { "index.html" } else { wanted };

@@ -81,6 +81,10 @@ fn check_against_openapi(method: &str, uri: &str, status: StatusCode, body: &[u8
         std::sync::LazyLock::new(|| serde_json::to_value(streaming_api::openapi()).unwrap());
     let document = &*DOCUMENT;
     let path = uri.split('?').next().unwrap();
+    if status == StatusCode::METHOD_NOT_ALLOWED {
+        // Not an operation of the document, but it keeps the error contract.
+        check_error_contract(method, uri, status, body);
+    }
     let Some(template) = template_of(document, path) else {
         // Served by the UI fallback, which answers 404 under `/api/`.
         assert!(
@@ -347,6 +351,30 @@ fn worker_snapshot(worker: &str, graph: &str) -> WorkerSnapshot {
         )]
         .into(),
     }
+}
+
+#[tokio::test]
+async fn a_method_a_path_does_not_take_answers_405_with_the_error_body() {
+    let env = Env::new().await;
+    let (status, headers, body) = env.raw(Method::POST, "/api/v1/cluster", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["code"], "METHOD_NOT_ALLOWED");
+    assert_eq!(
+        body["context"],
+        json!({"method": "POST", "path": "/api/v1/cluster", "allowed": ["GET", "HEAD"]})
+    );
+    assert_eq!(
+        body["message"],
+        "`/api/v1/cluster` does not take the method POST, only GET, HEAD"
+    );
+    assert_eq!(headers[header::ALLOW], "GET,HEAD");
+    // The UI's paths only take reads.
+    let (status, headers, body) = env.raw(Method::DELETE, "/assets/js/app.js", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(headers[header::ALLOW], "GET,HEAD");
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["context"]["allowed"], json!(["GET", "HEAD"]));
 }
 
 #[tokio::test]

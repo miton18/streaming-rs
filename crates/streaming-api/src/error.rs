@@ -13,7 +13,7 @@
 //! message, no configuration value (it may hold a secret). Those are logged.
 
 use axum::{
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use schemars::JsonSchema;
@@ -149,6 +149,9 @@ codes! {
     STORE_DOCUMENT_UNREADABLE = SERVICE_UNAVAILABLE, "a document of the store is unreadable";
     /// Nothing is served at this path of the API.
     ROUTE_NOT_FOUND = NOT_FOUND, "nothing is served at `{path}`";
+    /// The path exists but does not take this method. `allowed` lists the
+    /// methods it takes, as the `Allow` header does.
+    METHOD_NOT_ALLOWED = METHOD_NOT_ALLOWED, "`{path}` does not take the method {method}, only {allowed}";
     /// This build does not embed the web UI.
     UI_NOT_EMBEDDED = NOT_FOUND, "the web UI is not embedded in this build";
 }
@@ -441,6 +444,37 @@ impl From<KvError> for ApiError {
             _ => Self::new(&STORE_UNAVAILABLE),
         }
     }
+}
+
+/// Middleware giving the router's bare `405` answers (a known path, another
+/// method) the error body, with the methods of their `Allow` header.
+pub async fn method_not_allowed(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = request.method().to_string();
+    let path = echo(request.uri().path());
+    let response = next.run(request).await;
+    if response.status() != StatusCode::METHOD_NOT_ALLOWED || response.headers().contains_key(header::CONTENT_TYPE) {
+        return response;
+    }
+    let allowed: Vec<String> = response
+        .headers()
+        .get(header::ALLOW)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|method| !method.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let allow = response.headers().get(header::ALLOW).cloned();
+    let mut answer = ApiError::new(&METHOD_NOT_ALLOWED)
+        .with("method", echo(&method))
+        .with("path", path)
+        .with("allowed", allowed)
+        .into_response();
+    if let Some(allow) = allow {
+        answer.headers_mut().insert(header::ALLOW, allow);
+    }
+    answer
 }
 
 impl From<ControlError> for ApiError {

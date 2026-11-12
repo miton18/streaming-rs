@@ -67,11 +67,14 @@ pub struct ApiState {
 /// Build the application: API routes, embedded UI as fallback, permissive CORS
 /// and a debug-level request trace.
 pub fn router(state: ApiState) -> Router {
-    routes::routes()
-        .fallback(ui::serve_ui)
+    let app = routes::routes().fallback(ui::serve_ui).with_state(state);
+    // Outside the routes: axum adds the `Allow` header of a 405 after the
+    // layers of a route have run, and this one reads it.
+    Router::new()
+        .fallback_service(app)
+        .layer(axum::middleware::from_fn(error::method_not_allowed))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
-        .with_state(state)
 }
 
 /// Serve [`router`] on `listener` until `shutdown` resolves.

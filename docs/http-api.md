@@ -34,7 +34,8 @@ An error is answered with a 4xx/5xx status and this body:
 
 The codes, their status and template are listed in `crates/streaming-api/src/error.rs`
 and in the description of the `ErrorBody` schema of the OpenAPI document. A
-`405` (method not allowed on a known path) has an empty body.
+`405` (a known path, another method) is `METHOD_NOT_ALLOWED`, with the
+methods the path takes in `context.allowed` and in the `Allow` header.
 
 The machine-readable contract is the OpenAPI 3.2 document served at
 `GET /api/v1/openapi.json` and committed as [`openapi.json`](openapi.json).

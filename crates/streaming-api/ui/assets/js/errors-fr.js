@@ -46,6 +46,7 @@ export const MESSAGES = {
   STORE_UNAVAILABLE: 'le stockage ne répond pas, réessayez plus tard',
   STORE_DOCUMENT_UNREADABLE: 'un document du stockage est illisible',
   ROUTE_NOT_FOUND: "rien n'est servi à l'adresse `{path}`",
+  METHOD_NOT_ALLOWED: "`{path}` n'accepte pas la méthode {method}, seulement {allowed}",
   UI_NOT_EMBEDDED: "l'interface web n'est pas embarquée dans ce binaire",
 };
 
