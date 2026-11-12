@@ -207,6 +207,45 @@ required because the state of one key may be spread over several partitions.
 Sources and sinks implement `SourceConnector` and `SinkConnector`. A graph
 referencing an operator no worker knows is refused at submission.
 
+## Building graphs in Rust
+
+The JSON above is the wire and storage form. From Rust, a graph is built with
+`GraphBuilder`, each node holding a typed operator: a type implementing
+`Operator`, whose `OP` names the registered operator and whose fields are its
+configuration. The factory deserializes the node configuration into the same
+type, so what the builder stores is what the worker runs.
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct Decode;                                          // no configuration
+impl Operator for Decode { const OP: &'static str = "acme/decode@1"; }
+
+registry.register_map(Decode::OP, "Decodes an event.", |bytes: &Vec<u8>| {
+    serde_json::from_slice::<Event>(bytes).ok()
+});
+
+let mut graph = GraphBuilder::new("acme", "count-per-key").settings(GraphSettings {
+    max_pending_windows: 3,
+    ..GraphSettings::default()
+});
+let events = graph.node("events", Events { partitions: 4 }); // your source
+let decode = graph.then(events, "decode", Decode);
+let by_user = graph.then(decode, "by-user", ByUser);
+let window = graph.then(by_user, "window", Tumbling::of(Duration::from_secs(300)));
+let count = graph.then(window, "count", Count);
+let to_row = graph.then(count, "to-row", CountToJson);
+graph.then(to_row, "results", KvSink { retain: 400 });
+let archive = graph.node("archive", Archive);
+graph.edge(decode, archive);                            // any DAG
+let spec: GraphSpec = graph.build()?;                   // ids checked here
+```
+
+`build` checks identifiers and duplicate nodes; `Topology::build` checks the
+graph against the operators of a cluster (kinds, wiring, types). The `std/*`
+operators have their types (`Tumbling`, `Sliding`, `Count`, `Identity`,
+`KvSink`); `crates/streamd/src/demo.rs` builds the demonstration graphs this
+way.
+
 ## Simulation
 
 Everything that does I/O is generic over `moonpool_core::Providers`, so the
