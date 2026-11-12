@@ -70,6 +70,8 @@ struct State {
     consumers: BTreeMap<(u64, u64), Consumer>,
     producers: HashMap<(u64, u64), Producer>,
     dedup: bool,
+    /// Store messages without ever confirming them.
+    silent: bool,
     next_connection: u64,
     next_order: u64,
     /// Connections open now.
@@ -135,6 +137,11 @@ impl Broker {
     /// Turn broker-side deduplication on.
     pub fn deduplicate(&self) {
         self.state.lock().dedup = true;
+    }
+
+    /// Stop confirming what producers send, as a broker that stalls would.
+    pub fn withhold_receipts(&self) {
+        self.state.lock().silent = true;
     }
 
     /// Messages stored on `topic`.
@@ -321,6 +328,9 @@ impl Broker {
                     topic.last_sequence.insert(name, sequence.max(last));
                     Some(topic.messages.len() as u64 - 1)
                 };
+                if state.silent {
+                    return;
+                }
                 let mut out = command(Type::SendReceipt);
                 out.send_receipt = Some(pb::CommandSendReceipt {
                     producer_id: request.producer_id,

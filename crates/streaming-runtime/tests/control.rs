@@ -334,6 +334,42 @@ async fn an_epoch_lingers_to_fill_its_batch() {
     cluster.stop().await;
 }
 
+/// An epoch that does not fill its batch ends when its linger is over, however
+/// long the worker has been running.
+#[tokio::test(flavor = "current_thread")]
+async fn an_epoch_ends_when_its_linger_is_over() {
+    let cluster = Cluster::start(serde_json::json!({"linger": "200ms"})).await;
+    cluster.warm_up().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let started = std::time::Instant::now();
+    cluster.produce(1, 1);
+    eventually("the event is written", async || {
+        cluster.raw.written.load(Ordering::Relaxed) == 2
+    })
+    .await;
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(2_000), "the epoch took {took:?}");
+    cluster.stop().await;
+}
+
+/// An emitter writes results in batches of at most `max_batch` too.
+#[tokio::test(flavor = "current_thread")]
+async fn an_emitter_writes_at_most_max_batch_results() {
+    let cluster = Cluster::start(serde_json::json!({"maxBatch": 2, "maxOutOfOrderness": "0ms"})).await;
+    cluster.produce(30, 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Later events close the window of the first ones.
+    cluster.produce(3, 1);
+    eventually("the window is emitted", async || {
+        cluster.counts.written.load(Ordering::Relaxed) >= 3
+    })
+    .await;
+    let batches = cluster.counts.batches.lock().clone();
+    assert!(batches.iter().all(|&n| n <= 2), "{batches:?}");
+    assert!(batches.contains(&2), "{batches:?}");
+    cluster.stop().await;
+}
+
 /// No epoch holds more than `max_batch` events.
 #[tokio::test(flavor = "current_thread")]
 async fn an_epoch_holds_at_most_max_batch_events() {

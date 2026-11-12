@@ -2,20 +2,27 @@
 //! from their mutants: retries, and the proof that copying out still writes
 //! for the owner of the log.
 
-use super::{ActorCtx, Control, MAX_BACKOFF, MIN_BACKOFF, Retry, bump, copy_out};
+use super::{ActorCtx, Control, Exit, Gate, MAX_BACKOFF, MIN_BACKOFF, Retry, Root, bump, copy_out};
 use crate::{
     RuntimeEnv,
-    metrics::{ActorIdent, ActorMetrics, Meter},
+    mailbox::Outputs,
+    metrics::{ActorIdent, ActorMetrics, Meter, SliceMetrics, ts_key},
     state::{self, CommitRecord, NodeChanges, StateEntry, StateError, WindowChanges},
 };
 use async_trait::async_trait;
 use moonpool_core::{Providers, TimeProvider, TokioProviders};
-use std::{sync::Arc, time::Duration};
+use parking_lot::Mutex;
+use std::{
+    collections::{BTreeSet, VecDeque},
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 use streaming_core::{
     DynKv, GraphId, Key, Kv, KvError, MemKv, NoSecrets, NodeId, OpRef, Position, Registry, SystemClock, TenantId,
     Window, control::ActorKind, keys, spec::GraphSettings,
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 /// Refuses every write to window hashes as too large; the rest goes through.
 struct Refusing(Arc<MemKv>);
@@ -257,4 +264,61 @@ async fn a_write_too_large_fails_the_copy() {
         .await
         .expect("the copy gave up");
     assert!(result.is_err());
+}
+
+/// A root whose only aggregate has closed `windows`, under a limit of `limit`
+/// pending windows.
+fn root(kv: DynKv, limit: usize, windows: &[Window]) -> Root<TokioProviders> {
+    let mut ctx = ctx(kv, Duration::from_secs(60));
+    ctx.settings.max_pending_windows = limit;
+    let (commits, _) = mpsc::unbounded_channel();
+    let (_, committed) = watch::channel(0);
+    Root {
+        ctx,
+        outputs: Outputs::new(Vec::new()),
+        commits,
+        committed,
+        in_flight: VecDeque::new(),
+        epoch: 0,
+        slice: SliceMetrics::new(),
+        exit: Exit {
+            slot: Arc::new(Mutex::new(None)),
+            stop: CancellationToken::new(),
+        },
+        stateful: true,
+        owner: "me".into(),
+        start_epoch: 0,
+        gates: vec![Gate {
+            emitter: "acme/g/agg.count".parse().unwrap(),
+            closed: Arc::new(Mutex::new(windows.iter().copied().collect::<BTreeSet<_>>())),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn a_slice_holds_back_past_its_pending_windows_only() {
+    let kv: DynKv = Arc::new(MemKv::new());
+    let windows = [
+        Window::new(0, 10_000),
+        Window::new(10_000, 20_000),
+        Window::new(20_000, 30_000),
+    ];
+    // The emitter has emitted the first window: two remain, as many as allowed.
+    let emitter: streaming_core::SliceKey = "acme/g/agg.count".parse().unwrap();
+    let mut emitted = record(1, "emitter", "a");
+    emitted.position = Some(Position(ts_key(10_000), ts_key(0), u64::MAX));
+    emitted.changes.clear();
+    state::try_commit(kv.as_ref(), &emitter, &emitted).await.unwrap();
+
+    let mut within = root(kv.clone(), 2, &windows);
+    assert!(!within.throttled().await);
+    assert_eq!(within.gates[0].closed.lock().len(), 2, "emitted windows are forgotten");
+    assert_eq!(within.slice.throttled.load(Ordering::Relaxed), 0);
+
+    let mut beyond = root(kv.clone(), 1, &windows);
+    assert!(beyond.throttled().await);
+    assert_eq!(beyond.slice.throttled.load(Ordering::Relaxed), 1);
+
+    let mut unlimited = root(kv, 0, &windows);
+    assert!(!unlimited.throttled().await);
 }

@@ -705,6 +705,116 @@ mod tests {
         assert_eq!(app.graphs().len(), 2);
     }
 
+    /// Stands for an operator of any kind; its configuration is refused.
+    #[derive(serde::Serialize)]
+    struct Refused(&'static str);
+
+    impl streaming_core::builder::Operator for Refused {
+        const OP: &'static str = "test/refused@1";
+    }
+
+    #[test]
+    fn every_kind_of_operator_checks_its_configuration() {
+        use std::sync::Arc;
+        use streaming_core::{
+            OpError, OpKind, OpRef, TypeTag,
+            builder::Operator,
+            registry::{OpDescriptor, OpFactory},
+        };
+        let refuse = || OpError::Config("refused".into());
+        let kinds = [OpKind::Map, OpKind::KeyBy, OpKind::Window, OpKind::Aggregate];
+        for kind in kinds {
+            let app = App::new()
+                .tenant("acme", "Acme")
+                .operators(move |registry| {
+                    let factory = match kind {
+                        OpKind::Map => OpFactory::Map(Arc::new(move |_: &serde_json::Value| Err(refuse()))),
+                        OpKind::KeyBy => OpFactory::Key(Arc::new(move |_: &serde_json::Value| Err(refuse()))),
+                        OpKind::Window => OpFactory::Window(Arc::new(move |_: &serde_json::Value| Err(refuse()))),
+                        _ => OpFactory::Aggregate(Arc::new(move |_: &serde_json::Value| Err(refuse()))),
+                    };
+                    registry.register_sink(Out::OP, "", TypeTag::Any, |_, _| Err(OpError::Config("unused".into())));
+                    registry.register_key(Keyed::OP, "", |(): &()| 0_u8);
+                    registry.register_source::<()>(Events::OP, "", |_, _| Err(OpError::Config("unused".into())));
+                    registry.register(
+                        OpDescriptor {
+                            op: OpRef::new(Refused::OP).unwrap(),
+                            kind,
+                            input: TypeTag::Any,
+                            output: TypeTag::Any,
+                            description: String::new(),
+                            params: Vec::new(),
+                        },
+                        factory,
+                    );
+                })
+                .graph(refused_graph(kind));
+            let problems = problems(&app);
+            assert!(
+                problems.contains("node `refused` of the graph `acme/g`: invalid operator configuration: refused"),
+                "{kind:?}: {problems}"
+            );
+        }
+    }
+
+    /// A valid graph in which the node `refused` is of kind `kind`.
+    fn refused_graph(kind: streaming_core::OpKind) -> GraphBuilder {
+        use streaming_core::{
+            OpKind,
+            stdops::{Count, Tumbling},
+        };
+        let mut graph = GraphBuilder::new("acme", "g");
+        let events = graph.node("events", Events);
+        let window = std::time::Duration::from_secs(5);
+        let refused = |graph: &mut GraphBuilder, up| graph.then(up, "refused", Refused("r"));
+        let fed = if kind == OpKind::Map {
+            refused(&mut graph, events)
+        } else {
+            events
+        };
+        let keyed = if kind == OpKind::KeyBy {
+            refused(&mut graph, fed)
+        } else {
+            graph.then(fed, "key", Keyed)
+        };
+        let windowed = if kind == OpKind::Window {
+            refused(&mut graph, keyed)
+        } else {
+            graph.then(keyed, "window", Tumbling::of(window))
+        };
+        let counted = if kind == OpKind::Aggregate {
+            refused(&mut graph, windowed)
+        } else {
+            graph.then(windowed, "count", Count)
+        };
+        graph.then(counted, "out", Out);
+        graph
+    }
+
+    /// Stands for a sink.
+    #[derive(serde::Serialize)]
+    struct Out;
+
+    impl streaming_core::builder::Operator for Out {
+        const OP: &'static str = "test/out@1";
+    }
+
+    /// Stands for a key extractor.
+    #[derive(serde::Serialize)]
+    struct Keyed;
+
+    impl streaming_core::builder::Operator for Keyed {
+        const OP: &'static str = "test/key@1";
+    }
+
+    /// Stands for a source.
+    #[derive(serde::Serialize)]
+    struct Events;
+
+    impl streaming_core::builder::Operator for Events {
+        const OP: &'static str = "test/events@1";
+    }
+
     #[test]
     fn an_application_without_graphs_is_valid() {
         App::new().tenant("acme", "Acme").check().unwrap();

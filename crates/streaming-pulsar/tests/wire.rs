@@ -90,6 +90,12 @@ async fn the_source_subscribes_as_configured_on_one_connection() {
     assert_eq!(subscribe.subscription, "subs");
     assert_eq!(subscribe.sub_type, pb::command_subscribe::SubType::Failover as i32);
     assert_eq!(subscribe.durable, Some(true));
+    // The first flow may follow the subscription by a moment.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while broker.seen(Type::Flow).is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no flow was sent");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let flows: u32 = broker
         .seen(Type::Flow)
         .iter()
@@ -166,4 +172,21 @@ async fn the_sink_keeps_one_unbatched_producer() {
     );
     assert_eq!(stored[0].metadata.event_time, None);
     assert_eq!(stored[1].metadata.event_time, Some(42));
+}
+
+/// `sendTimeoutMs` bounds how long a write waits for the broker; 0 waits for
+/// as long as it takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_waits_for_the_broker_as_long_as_configured() {
+    let broker = Broker::start().await;
+    broker.withhold_receipts();
+    let bounded = sink(&broker, json!({"topic": TOPIC, "sendTimeoutMs": 300}));
+    let outcome = tokio::time::timeout(Duration::from_secs(10), bounded.write(&[emit(1, 0)])).await;
+    assert!(
+        matches!(outcome, Ok(Err(_))),
+        "a write the broker never confirms fails after its timeout"
+    );
+    let patient = sink(&broker, json!({"topic": TOPIC, "sendTimeoutMs": 0}));
+    let outcome = tokio::time::timeout(Duration::from_secs(2), patient.write(&[emit(2, 0)])).await;
+    assert!(outcome.is_err(), "without a timeout, a write keeps waiting");
 }
