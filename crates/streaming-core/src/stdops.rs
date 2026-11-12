@@ -304,14 +304,14 @@ mod tests {
         assert_eq!(tumbling.allowed_lateness(), Duration::ZERO);
         let tumbling = build(
             "std/tumbling@1",
-            serde_json::json!({"size": "5m", "allowed_lateness": "2s"}),
+            serde_json::json!({"size": "5m", "allowedLateness": "2s"}),
         );
         assert_eq!(tumbling.allowed_lateness(), Duration::from_secs(2));
         let sliding = build("std/sliding@1", serde_json::json!({"size": "5m", "slide": "1m"}));
         assert_eq!(sliding.allowed_lateness(), Duration::ZERO);
         let sliding = build(
             "std/sliding@1",
-            serde_json::json!({"size": "5m", "slide": "1m", "allowed_lateness": "3s"}),
+            serde_json::json!({"size": "5m", "slide": "1m", "allowedLateness": "3s"}),
         );
         assert_eq!(sliding.allowed_lateness(), Duration::from_secs(3));
 

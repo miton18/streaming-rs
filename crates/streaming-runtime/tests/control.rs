@@ -214,11 +214,11 @@ async fn eventually(what: &str, mut done: impl AsyncFnMut() -> bool) {
 #[tokio::test(flavor = "current_thread")]
 async fn backpressure_crosses_an_aggregate() {
     let cluster = Cluster::start(serde_json::json!({
-        "max_out_of_orderness": "0ms",
+        "maxOutOfOrderness": "0ms",
         "linger": "5ms",
-        "max_batch": 10,
-        "max_pending_windows": 2,
-        "flush_interval": "20ms"
+        "maxBatch": 10,
+        "maxPendingWindows": 2,
+        "flushInterval": "20ms"
     }))
     .await;
     cluster.counts.blocked.store(true, Ordering::Relaxed);
@@ -324,7 +324,7 @@ async fn an_epoch_lingers_to_fill_its_batch() {
 /// No epoch holds more than `max_batch` events.
 #[tokio::test(flavor = "current_thread")]
 async fn an_epoch_holds_at_most_max_batch_events() {
-    let cluster = Cluster::start(serde_json::json!({"linger": "50ms", "max_batch": 4})).await;
+    let cluster = Cluster::start(serde_json::json!({"linger": "50ms", "maxBatch": 4})).await;
     cluster.produce(10, 1);
     eventually("every event is written", async || {
         cluster.raw.written.load(Ordering::Relaxed) == 10
