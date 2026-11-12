@@ -27,7 +27,7 @@ use crate::{
     status::{self, GraphDetail, MemberReport},
 };
 
-/// Error answered as `{"error": "<message>"}`.
+/// Error answered as `{"message": "<message>"}`.
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
@@ -75,12 +75,12 @@ impl From<streaming_core::IdError> for ApiError {
 #[serde(rename_all = "camelCase")]
 struct ErrorBody {
     /// What went wrong, for a person.
-    error: String,
+    message: String,
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, axum::Json(ErrorBody { error: self.message })).into_response()
+        (self.status, axum::Json(ErrorBody { message: self.message })).into_response()
     }
 }
 
@@ -562,7 +562,7 @@ fn api() -> ApiRouter<ApiState> {
 fn info() -> Info {
     Info::new("streaming-rs", env!("CARGO_PKG_VERSION")).description(
         "Control plane of streaming-rs: graphs, their state and their metrics. \
-         Errors are `{\"error\": \"<message>\"}`. There is no authentication: \
+         Errors are `{\"message\": \"<message>\"}`. There is no authentication: \
          do not expose this API publicly.",
     )
 }

@@ -290,13 +290,13 @@
       "ErrorBody": {
         "description": "The body of an error.",
         "properties": {
-          "error": {
+          "message": {
             "description": "What went wrong, for a person.",
             "type": "string"
           }
         },
         "required": [
-          "error"
+          "message"
         ],
         "type": "object"
       },
@@ -1955,7 +1955,7 @@
     }
   },
   "info": {
-    "description": "Control plane of streaming-rs: graphs, their state and their metrics. Errors are `{\"error\": \"<message>\"}`. There is no authentication: do not expose this API publicly.",
+    "description": "Control plane of streaming-rs: graphs, their state and their metrics. Errors are `{\"message\": \"<message>\"}`. There is no authentication: do not expose this API publicly.",
     "title": "streaming-rs",
     "version": "0.1.0"
   },

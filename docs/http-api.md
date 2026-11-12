@@ -5,7 +5,7 @@ reads and writes documents in the KV (see `streaming_core::keys` and
 `streaming_core::control`): any process holding a KV handle can serve it, and
 workers converge on what it writes.
 
-Errors are `{"error": "<message>"}` with a 4xx/5xx status.
+Errors are `{"message": "<message>"}` with a 4xx/5xx status.
 
 The machine-readable contract is the OpenAPI 3.2 document served at
 `GET /api/v1/openapi.json` and committed as [`openapi.json`](openapi.json).
@@ -160,7 +160,7 @@ what feeds it is waiting for it.
 recent `ts` first, then by `key`. `limit` defaults to 200, capped at 2000.
 ```json
 {"id": "agg.count/1790000300000.1790000000000.4/0f...", "ts": 1790000000000,
- "key": "user-42", "value": {"window_start": 1790000000000, "count": 17}}
+ "key": "user-42", "value": {"windowStart": 1790000000000, "count": 17}}
 ```
 
 ### `GET /api/v1/tenants/{tenant}/graphs/{graph}/dot`

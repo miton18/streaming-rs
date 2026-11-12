@@ -35,8 +35,8 @@ fn count_as_json(count: &Windowed<u64>) -> Value {
     json!({
         "key": count.key.display_lossy(),
         "count": count.value,
-        "window_start": count.window.start,
-        "window_end": count.window.end,
+        "windowStart": count.window.start,
+        "windowEnd": count.window.end,
     })
 }
 
@@ -44,7 +44,7 @@ fn count_as_json(count: &Windowed<u64>) -> Value {
 pub fn register<P: Providers>(registry: &mut Registry<P>) {
     registry.register_map(
         "std/count-to-json@1",
-        "Turns a windowed count into a JSON object {key, count, window_start, window_end}.",
+        "Turns a windowed count into a JSON object {key, count, windowStart, windowEnd}.",
         |count: &Windowed<u64>| Some(count_as_json(count)),
     );
     registry.register_map_with(

@@ -36,19 +36,19 @@ const T = {
 };
 // cap: records/s one instance can take; ratio: out/in; fields: config schema
 const OPS = {
-  'demo/generator@1': { kind: 'source', input: T.unit, output: T.raw, description: 'Generates synthetic keyed events at a fixed rate, split over `partitions`.', cap: 40000, fields: { partitions: 'u32', rate_per_sec: 'f64+', keys: 'u32+' } },
+  'demo/generator@1': { kind: 'source', input: T.unit, output: T.raw, description: 'Generates synthetic keyed events at a fixed rate, split over `partitions`.', cap: 40000, fields: { partitions: 'u32', ratePerSec: 'f64+', keys: 'u32+' } },
   'demo/decode@1': { kind: 'map', input: T.raw, output: T.ev, description: 'Decodes raw generator payloads into events.', cap: 3000, fields: {} },
   'demo/key-by@1': { kind: 'key_by', input: T.ev, output: T.ev, description: 'Keys events by their `key` field.', cap: 30000, fields: { field: 'string' } },
   'std/tumbling@1': { kind: 'window', input: '*', output: '*', description: 'Fixed-size, non-overlapping event-time windows.', cap: 40000, fields: { size: 'duration' } },
   'std/sliding@1': { kind: 'window', input: '*', output: '*', description: 'Fixed-size event-time windows starting every `slide`.', cap: 30000, fields: { size: 'duration', slide: 'duration' } },
   'std/count@1': { kind: 'aggregate', input: '*', output: T.wc, description: 'Counts the elements of each key in each window.', cap: 9000, emitCap: 4000, fields: {} },
   'std/identity@1': { kind: 'map', input: '*', output: '*', description: 'Forwards every element unchanged.', cap: 50000, fields: {} },
-  'demo/to-row@1': { kind: 'map', input: T.wc, output: T.json, description: 'Turns a windowed count into a JSON row `{window_start, count}`.', cap: 20000, fields: {} },
+  'demo/to-row@1': { kind: 'map', input: T.wc, output: T.json, description: 'Turns a windowed count into a JSON row `{windowStart, count}`.', cap: 20000, fields: {} },
   'std/kv-sink@1': { kind: 'sink', input: T.json, output: T.unit, description: 'Writes every element to the KV, readable through `GET .../outputs/{node}`.', cap: 4000, fields: { ttl: 'duration' } },
   'demo/to-gts@1': { kind: 'map', input: T.wc, output: T.gts, description: 'Turns a windowed count into Warp 10 GTS points (one per label set).', cap: 20000, ratio: 20, fields: { class: 'string' } },
-  'demo/slow-sink@1': { kind: 'sink', input: '*', output: T.unit, description: 'Discards its input after sleeping `latency_ms` per record: simulates a slow external system.', cap: 50000, fields: { latency_ms: 'u64' } },
+  'demo/slow-sink@1': { kind: 'sink', input: '*', output: T.unit, description: 'Discards its input after sleeping `latencyMs` per record: simulates a slow external system.', cap: 50000, fields: { latencyMs: 'u64' } },
   'demo/parse-json@1': { kind: 'map', input: T.raw, output: T.json, description: 'Parses a raw payload as JSON.', cap: 6000, fields: { strict: 'bool' } },
-  'demo/enrich@1': { kind: 'map', input: '*', output: '*', description: 'Joins each element with a reference table held in memory.', cap: 7000, fields: { table: 'string', cache_size: 'u32+', fields: 'json' } },
+  'demo/enrich@1': { kind: 'map', input: '*', output: '*', description: 'Joins each element with a reference table held in memory.', cap: 7000, fields: { table: 'string', cacheSize: 'u32+', fields: 'json' } },
   'demo/filter@1': { kind: 'map', input: '*', output: '*', description: 'Keeps the elements whose `field` is at least `min`.', cap: 25000, ratio: 0.6, fields: { field: 'string', min: 'f64' } },
   'demo/score@1': { kind: 'map', input: '*', output: T.sig, description: 'Scores each element with a fraud model; emits a signal.', cap: 4500, fields: { model: 'string', threshold: 'f64+', explain: 'bool' } },
   'demo/format@1': { kind: 'map', input: T.wc, output: T.json, description: 'Formats a windowed aggregate as a JSON document.', cap: 20000, fields: { template: 'string' } },
@@ -56,8 +56,8 @@ const OPS = {
 };
 
 const DEFAULT_SETTINGS = {
-  max_out_of_orderness: '500ms', idle_timeout: '30s', max_batch: 1000, linger: '200ms',
-  mailbox_capacity: 8, chunk_size: 256, flush_interval: '1s', max_in_flight_epochs: 2,
+  maxOutOfOrderness: '500ms', idleTimeout: '30s', maxBatch: 1000, linger: '200ms',
+  mailboxCapacity: 8, chunkSize: 256, flushInterval: '1s', maxInFlightEpochs: 2,
 };
 
 function initialGraphs() {
@@ -66,7 +66,7 @@ function initialGraphs() {
     {
       tenant: 'acme', graph: 'count-per-key', version: 3,
       nodes: [
-        n('events', 'demo/generator@1', { partitions: 4, rate_per_sec: 2000, keys: 50 }),
+        n('events', 'demo/generator@1', { partitions: 4, ratePerSec: 2000, keys: 50 }),
         n('decode', 'demo/decode@1'),
         n('by-key', 'demo/key-by@1', { field: 'key' }),
         n('win', 'std/tumbling@1', { size: '10s' }),
@@ -74,14 +74,14 @@ function initialGraphs() {
         n('to-row', 'demo/to-row@1'),
         n('results', 'std/kv-sink@1'),
         n('to-gts', 'demo/to-gts@1', { class: 'demo.count' }),
-        n('warp10', 'demo/slow-sink@1', { latency_ms: 0 }),
+        n('warp10', 'demo/slow-sink@1', { latencyMs: 0 }),
       ],
       edges: [['events', 'decode'], ['decode', 'by-key'], ['by-key', 'win'], ['win', 'count'], ['count', 'to-row'], ['to-row', 'results'], ['count', 'to-gts'], ['to-gts', 'warp10']],
     },
     {
       tenant: 'globex', graph: 'clicks', version: 1,
       nodes: [
-        n('clicks', 'demo/generator@1', { partitions: 2, rate_per_sec: 600, keys: 24 }),
+        n('clicks', 'demo/generator@1', { partitions: 2, ratePerSec: 600, keys: 24 }),
         n('parse', 'demo/parse-json@1', { strict: false }),
         n('by-page', 'demo/key-by@1', { field: 'page' }),
         n('win', 'std/sliding@1', { size: '1m', slide: '10s' }),
@@ -94,13 +94,13 @@ function initialGraphs() {
     {
       tenant: 'globex', graph: 'fraud-scoring', version: 7,
       nodes: [
-        n('payments', 'demo/generator@1', { partitions: 3, rate_per_sec: 4500, keys: 400 }),
+        n('payments', 'demo/generator@1', { partitions: 3, ratePerSec: 4500, keys: 400 }),
         n('parse-pay', 'demo/parse-json@1', { strict: true }),
-        n('enrich-geo', 'demo/enrich@1', { table: 'geoip', cache_size: 100000, fields: ['country', 'asn'] }),
+        n('enrich-geo', 'demo/enrich@1', { table: 'geoip', cacheSize: 100000, fields: ['country', 'asn'] }),
         n('filter-small', 'demo/filter@1', { field: 'amount', min: 10 }),
-        n('logins', 'demo/generator@1', { partitions: 2, rate_per_sec: 1200, keys: 400 }),
+        n('logins', 'demo/generator@1', { partitions: 2, ratePerSec: 1200, keys: 400 }),
         n('parse-login', 'demo/parse-json@1', { strict: true }),
-        n('enrich-device', 'demo/enrich@1', { table: 'devices', cache_size: 50000, fields: { fingerprint: true, os: true } }),
+        n('enrich-device', 'demo/enrich@1', { table: 'devices', cacheSize: 50000, fields: { fingerprint: true, os: true } }),
         n('union', 'std/identity@1'),
         n('score', 'demo/score@1', { model: 'gbt-v3', threshold: 0.82, explain: false }),
         n('by-account', 'demo/key-by@1', { field: 'account' }),
@@ -125,7 +125,7 @@ function initialGraphs() {
     },
     {
       tenant: 'globex', graph: 'legacy-export', version: 2,
-      nodes: [n('orders', 'demo/generator@1', { partitions: 0, rate_per_sec: 100, keys: 10 }), n('fmt', 'std/identity@1'), n('out', 'std/kv-sink@1')],
+      nodes: [n('orders', 'demo/generator@1', { partitions: 0, ratePerSec: 100, keys: 10 }), n('fmt', 'std/identity@1'), n('out', 'std/kv-sink@1')],
       edges: [['orders', 'fmt'], ['fmt', 'out']],
     },
   ];
@@ -157,11 +157,11 @@ function validateConfig(node, cfg) {
       if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) return `${pre}: ${k}: invalid value: ${show}, expected ${ty === 'u64' ? 'u64' : 'u32'}`;
       if (ty === 'u32+' && v === 0) return `${pre}: \`${k}\` must be positive`;
       if (k === 'partitions' && v > 64) return `${pre}: \`partitions\` must not exceed 64`;
-      if (k === 'latency_ms' && v > 60000) return `${pre}: \`latency_ms\` must not exceed 60000`;
+      if (k === 'latencyMs' && v > 60000) return `${pre}: \`latencyMs\` must not exceed 60000`;
     } else if (ty === 'f64' || ty === 'f64+') {
       if (typeof v !== 'number') return `${pre}: ${k}: invalid type: ${typeof v === 'string' ? `string ${show}` : show}, expected f64`;
       if (ty === 'f64+' && v < 0) return `${pre}: \`${k}\` must not be negative`;
-      if (k === 'rate_per_sec' && v > 1e6) return `${pre}: \`rate_per_sec\` must not exceed 1000000`;
+      if (k === 'ratePerSec' && v > 1e6) return `${pre}: \`ratePerSec\` must not exceed 1000000`;
     } else if (ty === 'duration') {
       const d = parseDuration(v);
       if (d == null) return `${pre}: ${k}: invalid duration ${show} (expected e.g. "500ms", "10s", "1m")`;
@@ -186,7 +186,7 @@ function reset() {
     outage: false,
     slowCommit: false,
     workers: ['worker-1', 'worker-2', 'worker-3'].map((w, i) => ({ worker: w, alive: true, generation: now - 3600e3 * (i + 1) - 1234 * i, deadSince: 0 })),
-    placement: { version: 9, computed_by: 'worker-1', computed_ms: now - 600e3, assignments: {} },
+    placement: { version: 9, computedBy: 'worker-1', computedMs: now - 600e3, assignments: {} },
     graphs: new Map(),
     actors: new Map(),   // counters per actor
     slices: new Map(),   // per-slice progress
@@ -212,10 +212,10 @@ function addGraph(spec, updated) {
   const prev = S.graphs.get(key);
   const g = {
     spec: { tenant: spec.tenant, graph: spec.graph, version: spec.version, settings: { ...DEFAULT_SETTINGS, ...(spec.settings || {}) }, nodes: spec.nodes, edges: spec.edges },
-    desired: prev?.desired || { state: 'running', paused_nodes: [], updated_ms: updated },
-    updated_ms: updated,
+    desired: prev?.desired || { state: 'running', pausedNodes: [], updatedMs: updated },
+    updatedMs: updated,
     planError: planErrorOf(spec),
-    planned_ms: updated + 800,
+    plannedMs: updated + 800,
     transition: prev?.transition || null, // {state, at}
     deleting: false,
     lag: prev?.lag || 0,
@@ -272,7 +272,7 @@ function place(now) {
     }
   }
   const changed = JSON.stringify(a) !== JSON.stringify(S.placement.assignments);
-  if (changed) { S.placement = { version: S.placement.version + 1, computed_by: alive[0] || 'worker-1', computed_ms: now, assignments: a }; S.epoch += 1; }
+  if (changed) { S.placement = { version: S.placement.version + 1, computedBy: alive[0] || 'worker-1', computedMs: now, assignments: a }; S.epoch += 1; }
 }
 
 // ------------------------------------------------------------------ flow model
@@ -297,9 +297,9 @@ function snapshot(now) {
       if (g.transition.state === 'starting') phase = age < 2000 ? 'starting' : st;
     }
     if (st === 'stopped' || g.deleting) phase = 'stopped';
-    const mailbox = settings.mailbox_capacity;
-    const flushMs = parseDuration(settings.flush_interval) || 1000;
-    const paused = new Set(g.desired.paused_nodes);
+    const mailbox = settings.mailboxCapacity;
+    const flushMs = parseDuration(settings.flushInterval) || 1000;
+    const paused = new Set(g.desired.pausedNodes);
     let worstF = 1;
 
     for (const sl of slicePlan) {
@@ -323,7 +323,7 @@ function snapshot(now) {
         const kind = members.get(id);
         let din;
         if (id === sl.root && kind === 'source') {
-          din = (node.config?.rate_per_sec ?? 1000) / sl.partitions * jitter(seed, now, 0.05);
+          din = (node.config?.ratePerSec ?? 1000) / sl.partitions * jitter(seed, now, 0.05);
           demandIn.set(id, 0);
           demandOut.set(id, din);
           cap.set(id, op.cap);
@@ -345,7 +345,7 @@ function snapshot(now) {
         din = preds.get(id).reduce((a, p) => a + demandOut.get(p), 0);
         demandIn.set(id, din);
         let c = op.cap;
-        if (node.op === 'demo/slow-sink@1') { const l = node.config?.latency_ms ?? 0; c = l > 0 ? 1000 / l : op.cap; }
+        if (node.op === 'demo/slow-sink@1') { const l = node.config?.latencyMs ?? 0; c = l > 0 ? 1000 / l : op.cap; }
         if (paused.has(id)) c = 0;
         cap.set(id, c);
         demandOut.set(id, kind === 'aggregate' ? 0 : din * (op.ratio ?? 1));
@@ -379,7 +379,7 @@ function snapshot(now) {
         const kind = members.get(id);
         const c = cap.get(id);
         const k = `${key}/${sl.id}/${id}/${kind}`;
-        const acc = S.actors.get(k) || { records_in: 0, records_out: 0, late_dropped: 0, errors: 0, last_error: null };
+        const acc = S.actors.get(k) || { recordsIn: 0, recordsOut: 0, lateDropped: 0, errors: 0, lastError: null };
         S.actors.set(k, acc);
         const throttled = f < 0.999;
         let inR = demandIn.get(id) * f; let outR = demandOut.get(id) * f;
@@ -401,29 +401,29 @@ function snapshot(now) {
           if ((ancestors.has(id) && throttled) || id === limiter || paused.has(id)) qlen = qcap - (Math.sin(now / 700 + seed) > 0.6 ? 1 : 0);
           else qlen = Math.round(qcap * clamp(busy * 0.35));
         }
-        acc.records_in += (kind === 'source' ? 0 : inR) * dt;
-        acc.records_out += (kind === 'aggregate' ? 0 : outR) * dt;
+        acc.recordsIn += (kind === 'source' ? 0 : inR) * dt;
+        acc.recordsOut += (kind === 'aggregate' ? 0 : outR) * dt;
         if (node.op === 'demo/decode@1' && sl.id === 'src.events.2' && Math.random() < 0.02 * dt && inR > 0) {
           acc.errors += 1;
-          acc.last_error = `decode: invalid UTF-8 sequence at byte ${Math.floor(Math.random() * 60)} (offset ${Math.floor(S.actors.get(`${key}/${sl.id}/${sl.root}/source`)?.records_out || 0)})`;
+          acc.lastError = `decode: invalid UTF-8 sequence at byte ${Math.floor(Math.random() * 60)} (offset ${Math.floor(S.actors.get(`${key}/${sl.id}/${sl.root}/source`)?.recordsOut || 0)})`;
         }
-        if (kind === 'aggregate' && throttled && Math.random() < 0.3 * dt) acc.late_dropped += Math.ceil(Math.random() * 4);
+        if (kind === 'aggregate' && throttled && Math.random() < 0.3 * dt) acc.lateDropped += Math.ceil(Math.random() * 4);
         actors.push({
           tenant: g.spec.tenant, graph: g.spec.graph, slice: sl.id, node: id, kind, op: node.op,
           state: paused.has(id) && actorState === 'running' ? 'paused' : actorState,
-          records_in: Math.floor(acc.records_in), records_out: Math.floor(acc.records_out),
-          in_per_sec: r3(kind === 'source' ? 0 : inR), out_per_sec: r3(kind === 'aggregate' ? 0 : outR),
+          recordsIn: Math.floor(acc.recordsIn), recordsOut: Math.floor(acc.recordsOut),
+          inPerSec: r3(kind === 'source' ? 0 : inR), outPerSec: r3(kind === 'aggregate' ? 0 : outR),
           busy: r3(busy), idle: r3(idle), backpressured: r3(bp),
-          queue_len: qlen, queue_cap: qcap, late_dropped: acc.late_dropped, errors: acc.errors, last_error: acc.last_error,
+          queueLen: qlen, queueCap: qcap, lateDropped: acc.lateDropped, errors: acc.errors, lastError: acc.lastError,
           worker: reporting,
         });
       }
       // commit actor
       actors.push({
         tenant: g.spec.tenant, graph: g.spec.graph, slice: sl.id, node: sl.root, kind: 'commit', op: rootNode.op, state: actorState,
-        records_in: 0, records_out: 0, in_per_sec: 0, out_per_sec: 0,
+        recordsIn: 0, recordsOut: 0, inPerSec: 0, outPerSec: 0,
         busy: r3(actorState === 'running' ? commitBusy : 0), idle: r3(actorState === 'running' ? 1 - commitBusy : 1), backpressured: 0,
-        queue_len: 0, queue_cap: 0, late_dropped: 0, errors: 0, last_error: null, worker: reporting,
+        queueLen: 0, queueCap: 0, lateDropped: 0, errors: 0, lastError: null, worker: reporting,
       });
       // slice progress
       const sp = S.slices.get(`${key}/${sl.id}`) || { epoch: 1000 + Math.floor(hash(sl.id) * 5000), commits: 0, acc: 0, restarts: sl.id === 'src.events.2' ? 1 : 0, fenced: sl.id === 'agg.risk' ? 2 : 0 };
@@ -434,22 +434,22 @@ function snapshot(now) {
       }
       const srcActor = S.actors.get(`${key}/${sl.id}/${sl.root}/${sl.id.startsWith('src.') ? 'source' : 'emitter'}`);
       let position = null; let wm = null;
-      const ooo = parseDuration(settings.max_out_of_orderness) || 500;
+      const ooo = parseDuration(settings.maxOutOfOrderness) || 500;
       if (sl.id.startsWith('src.')) {
-        position = [0, Math.floor(srcActor?.records_out || 0), 0];
+        position = [0, Math.floor(srcActor?.recordsOut || 0), 0];
         wm = Math.floor(now - ooo - 300 - g.lag * 1000 - 120 * hash(sl.id));
       } else {
         const win = g.spec.edges.find(([, b]) => b === sl.root)?.[0];
         const size = parseDuration(byId.get(win)?.config?.size) || 10000;
         const end = Math.floor((now - ooo - g.lag * 1000) / size) * size;
-        position = [end, end - size, Math.floor((srcActor?.records_out || 0) % 50)];
+        position = [end, end - size, Math.floor((srcActor?.recordsOut || 0) % 50)];
         wm = end;
       }
       slices.push({
-        tenant: g.spec.tenant, graph: g.spec.graph, slice: sl.id, state: actorState, epoch: sp.epoch, position, watermark_ms: wm,
-        commits: sp.commits, commit_ms: r3(commitMs), in_flight_epochs: f < 0.999 ? settings.max_in_flight_epochs : (Math.sin(now / 800 + seed) > 0.3 ? 1 : 0),
+        tenant: g.spec.tenant, graph: g.spec.graph, slice: sl.id, state: actorState, epoch: sp.epoch, position, watermarkMs: wm,
+        commits: sp.commits, commitMs: r3(commitMs), inFlightEpochs: f < 0.999 ? settings.maxInFlightEpochs : (Math.sin(now / 800 + seed) > 0.3 ? 1 : 0),
         fenced: sp.fenced, restarts: sp.restarts,
-        last_error: sp.restarts ? 'slice restarted from epoch after: decode: invalid UTF-8 sequence' : null,
+        lastError: sp.restarts ? 'slice restarted from epoch after: decode: invalid UTF-8 sequence' : null,
         worker: reporting,
       });
     }
@@ -475,7 +475,7 @@ function graphDetail(key, snap, now) {
   const g = S.graphs.get(key);
   const { actors, slices, slicePlan } = snap.get(key);
   const nodesOut = [];
-  const paused = new Set(g.desired.paused_nodes);
+  const paused = new Set(g.desired.pausedNodes);
   for (const n of g.spec.nodes) {
     const op = OPS[n.op];
     const inst = actors.filter((a) => a.node === n.id && a.kind !== 'commit');
@@ -488,14 +488,14 @@ function graphDetail(key, snap, now) {
     if (inst.length) state = STATE_ORDER.find((s) => inst.some((a) => a.state === s)) || 'running';
     nodesOut.push({
       id: n.id, op: n.op, kind: op?.kind ?? null, description: op?.description ?? '',
-      input_type: op?.input ?? null, output_type: op?.output ?? null, config: n.config ?? {},
+      inputType: op?.input ?? null, outputType: op?.output ?? null, config: n.config ?? {},
       paused: paused.has(n.id), bottleneck: false, state,
       actors: inst.length, workers: [...new Set(inst.map((a) => a.worker))].sort(),
-      records_in: sum(ins, 'records_in'), records_out: sum(outs, 'records_out'),
-      in_per_sec: r3(sum(ins, 'in_per_sec')), out_per_sec: r3(sum(outs, 'out_per_sec')),
+      recordsIn: sum(ins, 'recordsIn'), recordsOut: sum(outs, 'recordsOut'),
+      inPerSec: r3(sum(ins, 'inPerSec')), outPerSec: r3(sum(outs, 'outPerSec')),
       busy: hot ? hot.busy : 0, idle: hot ? hot.idle : 0, backpressured: hot ? hot.backpressured : 0,
-      queue_len: sum(inst, 'queue_len'), queue_cap: sum(inst, 'queue_cap'),
-      late_dropped: sum(inst, 'late_dropped'), errors: sum(inst, 'errors'), last_error: inst.find((a) => a.last_error)?.last_error ?? null,
+      queueLen: sum(inst, 'queueLen'), queueCap: sum(inst, 'queueCap'),
+      lateDropped: sum(inst, 'lateDropped'), errors: sum(inst, 'errors'), lastError: inst.find((a) => a.lastError)?.lastError ?? null,
       instances: inst,
     });
   }
@@ -520,22 +520,22 @@ function graphDetail(key, snap, now) {
     }
   }
   if (bottleneck && byId.has(bottleneck.node)) byId.get(bottleneck.node).bottleneck = true;
-  const edges = g.spec.edges.map(([a, b]) => { const d = byId.get(b); return { from: a, to: b, fill: d.queue_cap ? r3(d.queue_len / d.queue_cap) : 0 }; });
+  const edges = g.spec.edges.map(([a, b]) => { const d = byId.get(b); return { from: a, to: b, fill: d.queueCap ? r3(d.queueLen / d.queueCap) : 0 }; });
   const reported = new Map(slices.map((s) => [s.slice, s]));
   const sliceList = slicePlan.map((sl) => {
     const s = reported.get(sl.id);
     const assigned = S.placement.assignments[`${key}/${sl.id}`] ?? null;
-    if (s) return { ...s, assigned_to: assigned };
-    return { tenant: g.spec.tenant, graph: g.spec.graph, slice: sl.id, state: 'starting', epoch: 0, position: null, watermark_ms: null, commits: 0, commit_ms: 0, in_flight_epochs: 0, fenced: 0, restarts: 0, last_error: null, worker: null, assigned_to: assigned };
+    if (s) return { ...s, assignedTo: assigned };
+    return { tenant: g.spec.tenant, graph: g.spec.graph, slice: sl.id, state: 'starting', epoch: 0, position: null, watermarkMs: null, commits: 0, commitMs: 0, inFlightEpochs: 0, fenced: 0, restarts: 0, lastError: null, worker: null, assignedTo: assigned };
   });
   const src = sliceList.filter((s) => s.slice.startsWith('src.'));
-  const watermark = src.length && src.every((s) => s.watermark_ms != null) ? Math.min(...src.map((s) => s.watermark_ms)) : null;
+  const watermark = src.length && src.every((s) => s.watermarkMs != null) ? Math.min(...src.map((s) => s.watermarkMs)) : null;
   return {
     tenant: g.spec.tenant, graph: g.spec.graph, version: g.spec.version, state: g.deleting ? 'stopped' : g.desired.state,
     spec: g.spec,
-    plan: { spec_version: g.spec.version, partitions: Object.fromEntries(g.spec.nodes.filter((n) => OPS[n.op]?.kind === 'source').map((n) => [n.id, n.config?.partitions ?? 1])), slices: slicePlan.map((s) => s.id), planned_ms: g.planned_ms, error: g.planError },
+    plan: { specVersion: g.spec.version, partitions: Object.fromEntries(g.spec.nodes.filter((n) => OPS[n.op]?.kind === 'source').map((n) => [n.id, n.config?.partitions ?? 1])), slices: slicePlan.map((s) => s.id), plannedMs: g.plannedMs, error: g.planError },
     desired: g.desired,
-    bottleneck, watermark_ms: watermark,
+    bottleneck, watermarkMs: watermark,
     nodes: nodesOut, edges, slices: sliceList,
   };
 }
@@ -546,9 +546,9 @@ function summary(key, snap, now) {
   return {
     tenant: d.tenant, graph: d.graph, version: d.version, state: d.state,
     nodes: d.nodes.length, slices: d.slices.length, actors: snap.get(key).actors.length,
-    in_per_sec: r3(d.nodes.filter((n) => n.kind === 'source').reduce((s, n) => s + n.out_per_sec, 0)),
-    out_per_sec: r3(d.nodes.filter((n) => n.kind === 'sink').reduce((s, n) => s + n.out_per_sec, 0)),
-    bottleneck: d.bottleneck, watermark_ms: d.watermark_ms, updated_ms: g.updated_ms, error: g.planError,
+    inPerSec: r3(d.nodes.filter((n) => n.kind === 'source').reduce((s, n) => s + n.outPerSec, 0)),
+    outPerSec: r3(d.nodes.filter((n) => n.kind === 'sink').reduce((s, n) => s + n.outPerSec, 0)),
+    bottleneck: d.bottleneck, watermarkMs: d.watermarkMs, updatedMs: g.updatedMs, error: g.planError,
   };
 }
 
@@ -556,14 +556,14 @@ function summary(key, snap, now) {
 function sinkRowsFor(key, nodeId, windowStart, keys) {
   const g = S.graphs.get(key);
   const rows = [];
-  const rate = g.spec.nodes.find((n) => OPS[n.op]?.kind === 'source')?.config?.rate_per_sec ?? 100;
+  const rate = g.spec.nodes.find((n) => OPS[n.op]?.kind === 'source')?.config?.ratePerSec ?? 100;
   for (let i = 0; i < keys; i += 1) {
     let k; let value;
     const c = Math.max(1, Math.round((rate * 10 / keys) * (0.6 + 0.8 * hash(`${windowStart}/${i}`))));
-    if (key === 'acme/count-per-key') { k = `user-${String(i).padStart(2, '0')}`; value = { window_start: windowStart, count: c }; }
-    else if (key === 'globex/clicks') { k = `/products/${100 + i}`; value = { window_start: windowStart, window_end: windowStart + 60000, page: `/products/${100 + i}`, views: Math.round(c / 4) }; }
-    else if (nodeId === 'alerts') { k = `acc-${4000 + i * 7}`; value = { account: k, window_start: windowStart, signals: 1 + Math.floor(hash(`${windowStart}a${i}`) * 6), score: Math.round((0.82 + 0.18 * hash(`${windowStart}s${i}`)) * 1000) / 1000, reasons: ['velocity', 'geo-mismatch'].slice(0, 1 + (i % 2)) }; }
-    else { k = `m-${100 + i}`; value = { merchant: k, window_start: windowStart, count: c * 3 }; }
+    if (key === 'acme/count-per-key') { k = `user-${String(i).padStart(2, '0')}`; value = { windowStart: windowStart, count: c }; }
+    else if (key === 'globex/clicks') { k = `/products/${100 + i}`; value = { windowStart: windowStart, windowEnd: windowStart + 60000, page: `/products/${100 + i}`, views: Math.round(c / 4) }; }
+    else if (nodeId === 'alerts') { k = `acc-${4000 + i * 7}`; value = { account: k, windowStart: windowStart, signals: 1 + Math.floor(hash(`${windowStart}a${i}`) * 6), score: Math.round((0.82 + 0.18 * hash(`${windowStart}s${i}`)) * 1000) / 1000, reasons: ['velocity', 'geo-mismatch'].slice(0, 1 + (i % 2)) }; }
+    else { k = `m-${100 + i}`; value = { merchant: k, windowStart: windowStart, count: c * 3 }; }
     rows.push({ id: `agg.${nodeId}/${windowStart + 10000}.${windowStart}.${i}/${Math.floor(hash(`${k}${windowStart}`) * 0xffffffff).toString(16).padStart(8, '0')}`, ts: windowStart + 9999, key: k, value });
   }
   return rows;
@@ -587,7 +587,7 @@ function advanceOutputs(now, snap) {
     if (!gr) continue;
     const o = S.outputs.get(k);
     const end = Math.floor((now - 1500 - gr.lag * 1000) / size) * size;
-    const sinkFlowing = snap.get(key)?.actors.some((a) => a.node === n && a.state === 'running' && a.in_per_sec > 0);
+    const sinkFlowing = snap.get(key)?.actors.some((a) => a.node === n && a.state === 'running' && a.inPerSec > 0);
     if (end > o.lastEnd && sinkFlowing) {
       const fresh = sinkRowsFor(key, n, end - size, keys);
       o.rows = [...fresh.sort((a, b) => a.key.localeCompare(b.key)), ...o.rows].slice(0, 2000);
@@ -611,23 +611,23 @@ function cluster(now, snap) {
     const mine = []; const sl = new Set(); const tenants = {};
     for (const [, s] of snap) for (const a of s.actors) if (a.worker === w.worker) {
       mine.push(a); sl.add(`${a.tenant}/${a.graph}/${a.slice}`);
-      const t = tenants[a.tenant] || (tenants[a.tenant] = { actors: 0, in_per_sec: 0, busy: 0 });
-      t.actors += 1; t.in_per_sec += a.in_per_sec; t.busy += a.busy;
+      const t = tenants[a.tenant] || (tenants[a.tenant] = { actors: 0, inPerSec: 0, busy: 0 });
+      t.actors += 1; t.inPerSec += a.inPerSec; t.busy += a.busy;
     }
-    for (const t of Object.values(tenants)) { t.in_per_sec = r3(t.in_per_sec); t.busy = r3(t.busy); }
+    for (const t of Object.values(tenants)) { t.inPerSec = r3(t.inPerSec); t.busy = r3(t.busy); }
     const busy = mine.reduce((s, a) => s + a.busy, 0);
     const cpu = w.alive ? clamp(0.04 + busy / 4 + 0.02 * Math.sin(now / 2000 + i)) : 0;
     const memBytes = Math.round((96 + mine.length * 3.2 + 8 * Math.sin(now / 5000 + i)) * 1048576);
     return {
       worker: w.worker, alive: w.alive, generation: w.generation,
-      heartbeat_ms: w.alive ? now - Math.floor(((now / 37) + i * 300) % 1000) : w.deadSince - 400,
-      load: { cpu: r3(cpu), memory: r3(memBytes / (1024 * 1048576)), memory_bytes: memBytes },
+      heartbeatMs: w.alive ? now - Math.floor(((now / 37) + i * 300) % 1000) : w.deadSince - 400,
+      load: { cpu: r3(cpu), memory: r3(memBytes / (1024 * 1048576)), memoryBytes: memBytes },
       actors: w.alive ? mine.length : 0, slices: w.alive ? sl.size : 0,
-      api_addr: i === 0 ? '127.0.0.1:8080' : null, version: '0.1.0',
+      apiAddr: i === 0 ? '127.0.0.1:8080' : null, version: '0.1.0',
       tenants: w.alive ? tenants : {},
     };
   });
-  return { epoch: S.epoch, now_ms: now, workers, placement: S.placement, kv: { keys: S.kv.keys, bytes: Math.round(S.kv.bytes), reads: Math.floor(S.kv.reads), writes: Math.floor(S.kv.writes) } };
+  return { epoch: S.epoch, nowMs: now, workers, placement: S.placement, kv: { keys: S.kv.keys, bytes: Math.round(S.kv.bytes), reads: Math.floor(S.kv.reads), writes: Math.floor(S.kv.writes) } };
 }
 
 // ------------------------------------------------------------------ HTTP
@@ -638,7 +638,7 @@ function send(res, status, body, type = 'application/json') {
   res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
   res.end(data);
 }
-const err = (res, status, message) => send(res, status, { error: message });
+const err = (res, status, message) => send(res, status, { message });
 
 function serveStatic(res, urlPath) {
   let rel = urlPath === '/' ? '/index.html' : urlPath;
@@ -662,7 +662,7 @@ function readBody(req) {
   });
 }
 
-function bump(g) { S.epoch += 1; g.desired.updated_ms = Date.now(); }
+function bump(g) { S.epoch += 1; g.desired.updatedMs = Date.now(); }
 
 async function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
@@ -674,7 +674,7 @@ async function handle(req, res) {
     const q = Object.fromEntries(url.searchParams);
     const on = (v) => v === true || v === '1' || v === 'true' || v === 'on';
     if (p === '/__mock/outage') { S.outage = on(body.on ?? q.on); return send(res, 200, { outage: S.outage }); }
-    if (p === '/__mock/commit') { S.slowCommit = on(body.on ?? q.on); return send(res, 200, { slow_commit: S.slowCommit }); }
+    if (p === '/__mock/commit') { S.slowCommit = on(body.on ?? q.on); return send(res, 200, { slowCommit: S.slowCommit }); }
     if (p === '/__mock/worker') {
       const w = S.workers.find((x) => x.worker === (body.worker ?? q.worker));
       if (!w) return err(res, 404, 'unknown worker');
@@ -704,8 +704,8 @@ async function handle(req, res) {
     const ts = new Map();
     for (const [key] of S.graphs) {
       const s = summary(key, snap, now);
-      const t = ts.get(s.tenant) || { tenant: s.tenant, graphs: 0, actors: 0, in_per_sec: 0 };
-      t.graphs += 1; t.actors += s.actors; t.in_per_sec = r3(t.in_per_sec + s.in_per_sec);
+      const t = ts.get(s.tenant) || { tenant: s.tenant, graphs: 0, actors: 0, inPerSec: 0 };
+      t.graphs += 1; t.actors += s.actors; t.inPerSec = r3(t.inPerSec + s.inPerSec);
       ts.set(s.tenant, t);
     }
     return send(res, 200, { tenants: [...ts.values()].sort((a, b) => a.tenant.localeCompare(b.tenant)) });
@@ -773,12 +773,12 @@ async function handle(req, res) {
     const n = g.spec.nodes.find((x) => x.id === node);
     if (!n) return err(res, 404, `node \`${node}\` not found in \`${key}\``);
     if (mm[2] === 'pause' && m === 'POST') {
-      if (!g.desired.paused_nodes.includes(node)) g.desired.paused_nodes = [...g.desired.paused_nodes, node].sort();
-      bump(g); return send(res, 200, { paused_nodes: g.desired.paused_nodes });
+      if (!g.desired.pausedNodes.includes(node)) g.desired.pausedNodes = [...g.desired.pausedNodes, node].sort();
+      bump(g); return send(res, 200, { pausedNodes: g.desired.pausedNodes });
     }
     if (mm[2] === 'resume' && m === 'POST') {
-      g.desired.paused_nodes = g.desired.paused_nodes.filter((x) => x !== node);
-      bump(g); return send(res, 200, { paused_nodes: g.desired.paused_nodes });
+      g.desired.pausedNodes = g.desired.pausedNodes.filter((x) => x !== node);
+      bump(g); return send(res, 200, { pausedNodes: g.desired.pausedNodes });
     }
     if (mm[2] === 'config' && m === 'PATCH') {
       const b = await readBody(req);

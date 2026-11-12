@@ -116,7 +116,7 @@ await step('node selection opens the side panel (and survives polling)', async (
 });
 
 await step('config edit + apply makes the bottleneck appear', async () => {
-  const input = page.locator('.panel input#cfg-warp10-latency_ms');
+  const input = page.locator('.panel input#cfg-warp10-latencyMs');
   await input.fill('80');
   assert(await page.locator('.panel button[type=submit]').isEnabled(), 'apply disabled');
   await page.click('.panel button[type=submit]');
@@ -131,13 +131,13 @@ await step('config edit + apply makes the bottleneck appear', async () => {
 });
 
 await step('API validation error is shown inline and typed input survives polling', async () => {
-  const input = page.locator('.panel input#cfg-warp10-latency_ms');
+  const input = page.locator('.panel input#cfg-warp10-latencyMs');
   expect400 = true;
   await input.fill('99999999');
   await page.click('.panel button[type=submit]');
   await page.waitForSelector('.panel .form-error:not([hidden])', { timeout: 3000 });
   const msg = await page.locator('.panel .form-error').textContent();
-  assert(/latency_ms/.test(msg), `error: ${msg}`);
+  assert(/latencyMs/.test(msg), `error: ${msg}`);
   await wait(2200);
   assert((await input.inputValue()) === '99999999', 'typed value lost on poll');
   assert(await page.locator('.panel .form-error').isVisible(), 'error vanished on poll');
@@ -240,7 +240,7 @@ await step('outage: banner shown, last data kept, recovery', async () => {
 
 await step('commit bottleneck explained', async () => {
   await page.locator('.node[data-node="warp10"]').click();
-  await page.locator('.panel input#cfg-warp10-latency_ms').fill('0');
+  await page.locator('.panel input#cfg-warp10-latencyMs').fill('0');
   await page.click('.panel button[type=submit]');
   await page.waitForSelector('.toast');
   await page.keyboard.press('Escape');

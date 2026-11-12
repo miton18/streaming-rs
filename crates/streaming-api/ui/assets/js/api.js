@@ -64,7 +64,7 @@ async function request(method, url, body) {
   let data = null;
   if (ct.includes('json')) { try { data = await res.json(); } catch { data = null; } } else { data = await res.text(); }
   if (!res.ok) {
-    const msg = data && typeof data === 'object' && data.error ? data.error : (typeof data === 'string' && data ? data : `HTTP ${res.status}`);
+    const msg = data && typeof data === 'object' && data.message ? data.message : (typeof data === 'string' && data ? data : `HTTP ${res.status}`);
     // a 5xx from a proxy in front of the server means the API itself is down
     throw new ApiError(msg, res.status, res.status === 502 || res.status === 503 || res.status === 504);
   }

@@ -431,7 +431,7 @@ async fn put_rejects_invalid_input_with_a_message() {
     body["nodes"][0]["op"] = json!("t/nope@1");
     let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let message = answer["error"].as_str().unwrap();
+    let message = answer["message"].as_str().unwrap();
     assert!(message.contains("unknown operator `t/nope@1`"), "{message}");
 
     // Wiring error.
@@ -439,14 +439,14 @@ async fn put_rejects_invalid_input_with_a_message() {
     body["edges"] = json!([["events", "key"]]);
     let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(answer["error"].as_str().unwrap().contains("key"), "{answer}");
+    assert!(answer["message"].as_str().unwrap().contains("key"), "{answer}");
 
     // Body for another graph, another tenant.
     let (status, answer) = env
         .call(Method::PUT, "/api/v1/tenants/acme/graphs/other", Some(graph_body("g")))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(answer["error"].as_str().unwrap().contains("acme/g"), "{answer}");
+    assert!(answer["message"].as_str().unwrap().contains("acme/g"), "{answer}");
     let (status, _) = env
         .call(Method::PUT, "/api/v1/tenants/globex/graphs/g", Some(graph_body("g")))
         .await;
@@ -457,7 +457,7 @@ async fn put_rejects_invalid_input_with_a_message() {
         .call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(json!({"x": 1})))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(answer["error"].is_string());
+    assert!(answer["message"].is_string());
     let mut body = graph_body("g");
     body["nodes"][0]["id"] = json!("bad id");
     let (status, _) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
@@ -468,7 +468,7 @@ async fn put_rejects_invalid_input_with_a_message() {
         .call(Method::PUT, "/api/v1/tenants/acme/graphs/bad.id", Some(graph_body("g")))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(answer["error"].as_str().unwrap().contains("graph id"), "{answer}");
+    assert!(answer["message"].as_str().unwrap().contains("graph id"), "{answer}");
 
     // Nothing was written.
     assert_eq!(env.epoch().await, 0);
@@ -591,7 +591,7 @@ async fn unknown_resources_are_404_and_bad_ids_400() {
     ] {
         let (status, body) = env.get(uri).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
-        assert!(body["error"].is_string(), "{uri}: {body}");
+        assert!(body["message"].is_string(), "{uri}: {body}");
     }
     for (method, uri) in [
         (Method::POST, "/api/v1/tenants/acme/graphs/nope/state"),
@@ -615,7 +615,7 @@ async fn unknown_resources_are_404_and_bad_ids_400() {
     ] {
         let (status, body) = env.get(uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
-        assert!(body["error"].is_string());
+        assert!(body["message"].is_string());
     }
     assert_eq!(env.epoch().await, 1, "failed writes do not bump the epoch");
 }
@@ -672,7 +672,7 @@ async fn patch_config_merges_removes_and_versions() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].is_string());
+    assert!(body["message"].is_string());
     assert_eq!(env.epoch().await, 3);
 }
 
@@ -694,7 +694,7 @@ async fn patch_revalidates_against_the_catalog() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("unknown operator"));
+    assert!(body["message"].as_str().unwrap().contains("unknown operator"));
 }
 
 #[tokio::test]
@@ -720,7 +720,7 @@ async fn pause_and_resume_nodes() {
 
     let (status, body) = env.call(Method::POST, &format!("{base}/ghost/pause"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body["error"].as_str().unwrap().contains("ghost"));
+    assert!(body["message"].as_str().unwrap().contains("ghost"));
     assert_eq!(env.epoch().await, 1 + 2 + 1);
 }
 
@@ -747,7 +747,7 @@ async fn state_changes() {
             .call(Method::POST, "/api/v1/tenants/acme/graphs/g/state", Some(bad))
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body["error"].is_string());
+        assert!(body["message"].is_string());
     }
     assert_eq!(env.epoch().await, 5);
 }
@@ -771,7 +771,7 @@ async fn delete_marks_the_graph_deleting() {
     // A deleting graph cannot be reconfigured.
     let (status, body) = env.put_graph("g").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("being deleted"));
+    assert!(body["message"].as_str().unwrap().contains("being deleted"));
     let (status, _) = env
         .call(
             Method::POST,
@@ -825,7 +825,7 @@ async fn outputs_are_sorted_and_limited() {
     assert_eq!(body["rows"], json!([]));
     let (status, body) = env.get(&format!("{base}?limit=abc")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("limit"));
+    assert!(body["message"].as_str().unwrap().contains("limit"));
 
     // Cap at 2000.
     let rows: Vec<(String, Vec<u8>)> = (0..2100)
@@ -934,7 +934,7 @@ async fn ui_is_served_with_a_spa_fallback() {
     // Under /api an unknown path is a JSON 404, never the UI.
     let (status, body) = env.get("/api/v1/whatever").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body, json!({"error": "not found"}));
+    assert_eq!(body, json!({"message": "not found"}));
 }
 
 #[tokio::test]
@@ -958,5 +958,5 @@ async fn kv_failures_are_503() {
     env.kv.set(keys::CLUSTER_MEMBERS, b"x".to_vec()).await.unwrap();
     let (status, body) = env.get("/api/v1/cluster").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(body["error"].is_string());
+    assert!(body["message"].is_string());
 }

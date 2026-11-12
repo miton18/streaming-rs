@@ -220,7 +220,7 @@ are type-driven: each argument implements `OperationInput`, the return type
 therefore say what it reads and returns in its prototype: no `Bytes`,
 `RawQuery`, `serde_json::Value` or opaque `Response` (the owner agreed to
 this). `JsonBody<T>` and `QueryParams<T>` replace axum's `Json` and `Query`
-on input to keep `{"error": ...}` answers and to accept bodies without a
+on input to keep `{"message": ...}` answers and to accept bodies without a
 `Content-Type`. Schemas come from `schemars` 1.x: a type crossing the API
 derives `schemars::JsonSchema`; hand-serialized types (ids, `SliceId`,
 `Position`, `TypeTag`, durations) have hand-written schemas that must follow
