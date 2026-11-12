@@ -7,23 +7,38 @@
 use async_trait::async_trait;
 use moonpool_core::Providers;
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeSet, sync::Arc};
 use streaming_core::{
-    DynKv, Emit, GraphKey, OpError, Registry, SinkConnector, SinkError, Timestamp, TypeTag, control::OutputRow, keys,
-    ops::downcast,
+    DynKv, Emit, GraphKey, OpError, Operator, Registry, SinkConnector, SinkError, Timestamp, TypeTag,
+    control::OutputRow, keys, ops::downcast,
 };
 
 fn default_retain() -> usize {
     500
 }
 
-#[derive(Debug, Deserialize)]
-struct KvSinkConfig {
-    /// Number of most recent rows kept.
+/// `std/kv-sink@1`: keeps the most recent elements of a node as JSON rows
+/// readable through the HTTP API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KvSink {
+    /// Number of most recent rows kept (at least one).
     #[serde(default = "default_retain")]
-    retain: usize,
+    pub retain: usize,
+}
+
+impl Default for KvSink {
+    fn default() -> Self {
+        Self {
+            retain: default_retain(),
+        }
+    }
+}
+
+impl Operator for KvSink {
+    const OP: &'static str = "std/kv-sink@1";
 }
 
 /// Writes elements as JSON rows into a KV hash, where the HTTP API reads them.
@@ -31,7 +46,7 @@ struct KvSinkConfig {
 /// Each row lives under its emit id, so writing an element again replaces it:
 /// the sink is idempotent by construction. Only the most recent rows are kept;
 /// this sink is meant for inspecting results, not for archiving them.
-struct KvSink {
+struct KvSinkConnector {
     kv: DynKv,
     key: String,
     retain: usize,
@@ -39,7 +54,7 @@ struct KvSink {
 }
 
 #[async_trait]
-impl SinkConnector for KvSink {
+impl SinkConnector for KvSinkConnector {
     async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
         let err = |error: &dyn std::fmt::Display| SinkError(error.to_string());
         if self.known.lock().is_none() {
@@ -84,19 +99,17 @@ impl SinkConnector for KvSink {
 /// Register the runtime's connectors. `kv` is where `std/kv-sink@1` writes.
 pub fn register<P: Providers>(registry: &mut Registry<P>, kv: DynKv) {
     registry.register_sink(
-        "std/kv-sink@1",
+        KvSink::OP,
         "Keeps the most recent elements as JSON rows readable through the API.",
         TypeTag::of::<Value>(),
         move |context, config| {
-            let config: KvSinkConfig = if config.is_null() {
-                KvSinkConfig {
-                    retain: default_retain(),
-                }
+            let config: KvSink = if config.is_null() {
+                KvSink::default()
             } else {
                 serde_json::from_value(config.clone()).map_err(|e| OpError::Config(e.to_string()))?
             };
             let graph = GraphKey::new(context.tenant.clone(), context.graph.clone());
-            Ok(Arc::new(KvSink {
+            Ok(Arc::new(KvSinkConnector {
                 kv: kv.clone(),
                 key: keys::graph_output(&graph, &context.node),
                 retain: config.retain.max(1),
@@ -105,7 +118,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, kv: DynKv) {
         },
     );
     registry.with_params(
-        "std/kv-sink@1",
+        KvSink::OP,
         [
             streaming_core::ParamSpec::new("retain", "integer", "How many of the most recent rows are kept.")
                 .default(500),

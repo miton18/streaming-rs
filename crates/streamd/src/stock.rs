@@ -11,9 +11,9 @@
 //! | `std/count-to-pulsar@1` | map | `Windowed<u64>` -> `PulsarOutput` | (feature `pulsar`) |
 
 use moonpool_core::Providers;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use streaming_core::{Registry, Windowed};
+use streaming_core::{Operator, Registry, Windowed};
 #[cfg(feature = "pulsar")]
 use streaming_pulsar::{PulsarMessage, PulsarOutput};
 use streaming_warp10::Gts;
@@ -22,13 +22,47 @@ fn default_label() -> String {
     "key".to_owned()
 }
 
-#[derive(Debug, Deserialize)]
-struct CountToGts {
+/// `std/count-to-json@1`: turns a windowed count into a JSON object
+/// `{key, count, windowStart, windowEnd}`.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct CountToJson;
+
+impl Operator for CountToJson {
+    const OP: &'static str = "std/count-to-json@1";
+}
+
+/// `std/count-to-gts@1`: turns a windowed count into a Warp 10 point stamped
+/// at the window start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CountToGts {
     /// Class of the produced series.
-    class: String,
+    pub class: String,
     /// Name of the label carrying the grouping key.
     #[serde(default = "default_label")]
-    label: String,
+    pub label: String,
+}
+
+impl CountToGts {
+    /// Points of class `class`, the key in label `key`.
+    #[must_use]
+    pub fn new(class: impl Into<String>) -> Self {
+        Self {
+            class: class.into(),
+            label: default_label(),
+        }
+    }
+
+    /// Carry the key in label `label` instead.
+    #[must_use]
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+}
+
+impl Operator for CountToGts {
+    const OP: &'static str = "std/count-to-gts@1";
 }
 
 fn count_as_json(count: &Windowed<u64>) -> Value {
@@ -43,12 +77,12 @@ fn count_as_json(count: &Windowed<u64>) -> Value {
 /// Register the glue operators.
 pub fn register<P: Providers>(registry: &mut Registry<P>) {
     registry.register_map(
-        "std/count-to-json@1",
+        CountToJson::OP,
         "Turns a windowed count into a JSON object {key, count, windowStart, windowEnd}.",
         |count: &Windowed<u64>| Some(count_as_json(count)),
     );
     registry.register_map_with(
-        "std/count-to-gts@1",
+        CountToGts::OP,
         "Turns a windowed count into a Warp 10 point stamped at the window start.",
         |config: CountToGts| {
             move |count: &Windowed<u64>, out: &mut Vec<Gts>| {
@@ -82,7 +116,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
         streaming_pulsar::register(registry);
     }
     registry.with_params(
-        "std/count-to-gts@1",
+        CountToGts::OP,
         [
             streaming_core::ParamSpec::new("class", "text", "Class of the series.").required(),
             streaming_core::ParamSpec::new("label", "text", "Label that carries the key.").default("key"),

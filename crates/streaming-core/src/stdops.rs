@@ -8,13 +8,14 @@
 //! | `std/identity@1` | map | none |
 
 use crate::{
+    builder::Operator,
     data::{Datum, Key, Windowed, datum},
     ops::{DynAcc, DynAggregator, DynMap, OpError, WindowAssigner},
     registry::{OpDescriptor, OpFactory, OpKind, Registry, TypeTag},
     time::{Timestamp, Window, duration_str},
 };
 use moonpool_core::Providers;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 
@@ -23,14 +24,14 @@ fn zero() -> Duration {
 }
 
 /// Fixed-size, non-overlapping windows aligned on the epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tumbling {
     /// Window length.
     #[serde(with = "duration_str")]
     pub size: Duration,
     /// How long after its end a window still accepts records.
-    #[serde(with = "duration_str", default = "zero")]
+    #[serde(with = "duration_str", default = "zero", skip_serializing_if = "Duration::is_zero")]
     pub allowed_lateness: Duration,
 }
 
@@ -43,6 +44,10 @@ impl Tumbling {
             allowed_lateness: Duration::ZERO,
         }
     }
+}
+
+impl Operator for Tumbling {
+    const OP: &'static str = "std/tumbling@1";
 }
 
 impl WindowAssigner for Tumbling {
@@ -58,7 +63,7 @@ impl WindowAssigner for Tumbling {
 }
 
 /// Fixed-size windows starting every `slide`, aligned on the epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sliding {
     /// Window length.
@@ -68,8 +73,25 @@ pub struct Sliding {
     #[serde(with = "duration_str")]
     pub slide: Duration,
     /// How long after its end a window still accepts records.
-    #[serde(with = "duration_str", default = "zero")]
+    #[serde(with = "duration_str", default = "zero", skip_serializing_if = "Duration::is_zero")]
     pub allowed_lateness: Duration,
+}
+
+impl Sliding {
+    /// Windows of length `size` starting every `slide`, without allowed
+    /// lateness.
+    #[must_use]
+    pub fn of(size: Duration, slide: Duration) -> Self {
+        Self {
+            size,
+            slide,
+            allowed_lateness: Duration::ZERO,
+        }
+    }
+}
+
+impl Operator for Sliding {
+    const OP: &'static str = "std/sliding@1";
 }
 
 impl WindowAssigner for Sliding {
@@ -96,8 +118,12 @@ fn check_positive(what: &str, duration: Duration) -> Result<(), OpError> {
 }
 
 /// Counts elements of any type. Emits `Windowed<u64>`.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct Count;
+
+impl Operator for Count {
+    const OP: &'static str = "std/count@1";
+}
 
 impl Count {
     fn get(acc: &DynAcc) -> Result<u64, OpError> {
@@ -144,7 +170,13 @@ impl DynAggregator for Count {
     }
 }
 
-struct Identity;
+/// Forwards every element unchanged.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct Identity;
+
+impl Operator for Identity {
+    const OP: &'static str = "std/identity@1";
+}
 
 impl DynMap for Identity {
     fn apply(&self, input: &Datum, out: &mut Vec<Datum>) -> Result<(), OpError> {
@@ -156,7 +188,7 @@ impl DynMap for Identity {
 /// Register the `std/*` operators listed in the module documentation.
 pub fn register<P: Providers>(registry: &mut Registry<P>) {
     registry.register_window(
-        "std/tumbling@1",
+        Tumbling::OP,
         "Fixed-size, non-overlapping event-time windows.",
         |config: Tumbling| {
             check_positive("size", config.size)?;
@@ -164,7 +196,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
         },
     );
     registry.register_window(
-        "std/sliding@1",
+        Sliding::OP,
         "Fixed-size event-time windows starting every `slide`.",
         |config: Sliding| {
             check_positive("size", config.size)?;
@@ -176,7 +208,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
         },
     );
     registry.register_dyn_aggregator(
-        "std/count@1",
+        Count::OP,
         "Counts the elements of each key in each window.",
         TypeTag::Any,
         TypeTag::of::<Windowed<u64>>(),
@@ -184,7 +216,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
     );
     registry.register(
         OpDescriptor {
-            op: crate::ids::OpRef::new("std/identity@1").unwrap_or_else(|e| panic!("{e}")),
+            op: crate::ids::OpRef::new(Identity::OP).unwrap_or_else(|e| panic!("{e}")),
             kind: OpKind::Map,
             input: TypeTag::Any,
             output: TypeTag::Any,
@@ -202,14 +234,14 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
         .default("0s")
     };
     registry.with_params(
-        "std/tumbling@1",
+        Tumbling::OP,
         [
             crate::ParamSpec::new("size", "duration", "Length of each window.").required(),
             lateness(),
         ],
     );
     registry.with_params(
-        "std/sliding@1",
+        Sliding::OP,
         [
             crate::ParamSpec::new("size", "duration", "Length of each window.").required(),
             crate::ParamSpec::new("slide", "duration", "A window starts every `slide`.").required(),

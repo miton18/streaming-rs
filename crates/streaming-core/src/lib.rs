@@ -4,6 +4,7 @@
 //!
 //! - identifiers ([`TenantId`], [`GraphId`], [`NodeId`], [`SliceId`], ...),
 //! - the declarative graph description stored in the KV ([`GraphSpec`]),
+//!   and its typed construction ([`GraphBuilder`], [`Operator`]),
 //! - the operator contracts and their registry ([`Registry`]),
 //! - the key-value store contract ([`Kv`]) with an in-memory implementation,
 //! - the control-plane documents exchanged through the KV ([`control`]).
@@ -11,6 +12,7 @@
 //! Everything a worker, the HTTP API, the CLI or a connector needs to agree on
 //! lives here.
 
+pub mod builder;
 pub mod clock;
 pub mod control;
 pub mod data;
@@ -23,6 +25,7 @@ pub mod spec;
 pub mod stdops;
 pub mod time;
 
+pub use builder::{BuildError, GraphBuilder, Node, Operator};
 pub use clock::{Clock, EnvSecrets, NoSecrets, SecretProvider, StaticSecrets, SystemClock};
 pub use data::{Datum, Emit, EmitId, Key, Origin, Position, Record, Windowed, datum};
 pub use ids::{
@@ -34,5 +37,5 @@ pub use ops::{
     SourceError, SourceRecord, WindowAssigner,
 };
 pub use registry::{Catalog, OpContext, OpDescriptor, OpFactory, OpKind, ParamSpec, Registry, TypeTag};
-pub use spec::{GraphSpec, NodeSpec, SpecError, Topology, WiringRule};
+pub use spec::{GraphSettings, GraphSpec, NodeSpec, SpecError, Topology, WiringRule};
 pub use time::{Timestamp, Window, format_duration, parse_duration};
