@@ -6,6 +6,11 @@
 //! | `std/pulsar-source@1` | source | out: [`PulsarMessage`] | see below |
 //! | `std/pulsar-sink@1` | sink | in: [`PulsarOutput`] | see below |
 //!
+//! The operators are [`PulsarSource`] and [`PulsarSink`], whose fields are
+//! the configuration below. What they do with the broker is carried by two
+//! connectors the engine drives directly, [`PulsarSourceConnector`] (the
+//! source hands it its partition) and [`PulsarSinkConnector`].
+//!
 //! # Engine
 //!
 //! Both connectors are generic over the framework's [`Providers`] and drive
@@ -109,147 +114,204 @@ pub use config::{
 use moonpool_core::Providers;
 pub use position::{end_position_of, partition_topic, position_of};
 pub use sequence::{SequenceLayout, SequenceState};
-pub use sink::{EMIT_ID_PROPERTY, PulsarOutput, PulsarSink, WriteStats, producer_name_for, route};
-pub use source::{PulsarMessage, PulsarSource};
-use std::sync::Arc;
-use streaming_core::{ParamSpec, Registry, SinkConnector, SourceConnector, TypeTag};
+pub use sink::{EMIT_ID_PROPERTY, PulsarOutput, PulsarSinkConnector, WriteStats, producer_name_for, route};
+pub use source::{PulsarMessage, PulsarSourceConnector};
+use streaming_core::{
+    Context, OpError, Operator, Position, Registry, Secret, Sink, SinkPipe, Source, SourceConnector, SourcePipe,
+};
 
 /// Reference of the source operator.
 pub const SOURCE_OP: &str = "std/pulsar-source@1";
 /// Reference of the sink operator.
 pub const SINK_OP: &str = "std/pulsar-sink@1";
 
+/// Reads a Pulsar topic through a durable Failover subscription, one slice
+/// per partition.
+///
+/// What the source does with the broker is carried by
+/// [`PulsarSourceConnector`]; see the crate documentation.
+#[derive(Debug, Clone, PartialEq, Eq, Operator)]
+#[operator("std/pulsar-source@1", check = PulsarSource::check_settings)]
+pub struct PulsarSource {
+    /// Broker to connect to: `pulsar://host:6650`, or
+    /// `pulsar+ssl://host:6651` for TLS. A single host; the port defaults to
+    /// 6650 (6651 with TLS).
+    #[param]
+    pub service_url: String,
+    /// Topic to read, as a full name `persistent://tenant/namespace/name`. A
+    /// partitioned topic gives one slice per partition.
+    #[param]
+    pub topic: String,
+    /// Name of the durable Failover subscription. Its cursor holds the read
+    /// position: keep it stable for the lifetime of the graph.
+    #[param]
+    pub subscription: String,
+    /// JWT sent to the broker for authentication. Absent: no authentication.
+    #[param]
+    pub token: Option<Secret>,
+    /// PEM file holding the certificate authorities to trust instead of the
+    /// system store. Only with a `pulsar+ssl://` serviceUrl.
+    #[param]
+    pub tls_trust_certs_file: Option<String>,
+    /// Event time of a record: `publish` takes the broker's publish time,
+    /// `event` the producer-set event time (the publish time when a message
+    /// has none).
+    #[param(default = "publish")]
+    pub event_time: EventTimeMode,
+    /// Where a subscription that does not exist yet starts: `earliest` reads
+    /// the topic from its oldest retained message, `latest` only what is
+    /// published afterwards.
+    #[param(default = "earliest")]
+    pub initial_position: InitialPosition,
+    /// Messages the broker may push ahead of consumption, per partition.
+    #[param(default = 1000, min = 1)]
+    pub receiver_queue_size: usize,
+}
+
+impl PulsarSource {
+    /// A source reading `topic` on the broker at `service_url` through the
+    /// durable subscription `subscription`, with the defaults for the rest.
+    #[must_use]
+    pub fn new(service_url: impl Into<String>, topic: impl Into<String>, subscription: impl Into<String>) -> Self {
+        Self {
+            service_url: service_url.into(),
+            topic: topic.into(),
+            subscription: subscription.into(),
+            token: None,
+            tls_trust_certs_file: None,
+            event_time: EventTimeMode::default(),
+            initial_position: InitialPosition::default(),
+            receiver_queue_size: 1000,
+        }
+    }
+
+    /// Authenticate with `token`.
+    #[must_use]
+    pub fn token(mut self, token: Secret) -> Self {
+        self.token = Some(token);
+        self
+    }
+
+    /// What can be refused without the token.
+    fn check_settings(&self) -> Result<(), OpError> { SourceConfig::of(self, None).map(drop) }
+
+    fn connector<P: Providers>(&self, ctx: &Context<P>) -> Result<PulsarSourceConnector<P>, OpError> {
+        let token = self.token.as_ref().map(|token| ctx.reveal(token)).transpose()?;
+        Ok(PulsarSourceConnector::new(
+            ctx.providers.clone(),
+            SourceConfig::of(self, token)?,
+        ))
+    }
+}
+
+impl Source for PulsarSource {
+    type Out = PulsarMessage;
+
+    async fn partitions<P: Providers>(&self, ctx: &Context<P>) -> Result<u32, OpError> {
+        self.connector(ctx)?
+            .partitions()
+            .await
+            .map_err(|error| OpError::Failed(error.0))
+    }
+
+    async fn start<P: Providers>(
+        &self,
+        ctx: &Context<P>,
+        partition: u32,
+        after: Option<Position>,
+        out: SourcePipe<PulsarMessage>,
+    ) -> Result<(), OpError> {
+        // The engine reads, acknowledges and asks for the end of the
+        // partition straight from the connector.
+        let connector = self.connector(ctx)?;
+        out.read(&connector, partition, after).await
+    }
+}
+
+/// Publishes elements to a Pulsar topic, tagged with their emit id;
+/// optionally deduplicated by the broker.
+///
+/// What the sink does with the broker is carried by [`PulsarSinkConnector`];
+/// see the crate documentation.
+#[derive(Debug, Clone, PartialEq, Eq, Operator)]
+#[operator("std/pulsar-sink@1", check = PulsarSink::check_settings)]
+pub struct PulsarSink {
+    /// Broker to connect to: `pulsar://host:6650`, or
+    /// `pulsar+ssl://host:6651` for TLS. A single host; the port defaults to
+    /// 6650 (6651 with TLS).
+    #[param]
+    pub service_url: String,
+    /// Topic to publish to, as a full name
+    /// `persistent://tenant/namespace/name` (partitioned or not).
+    #[param]
+    pub topic: String,
+    /// JWT sent to the broker for authentication. Absent: no authentication.
+    #[param]
+    pub token: Option<Secret>,
+    /// PEM file holding the certificate authorities to trust instead of the
+    /// system store. Only with a `pulsar+ssl://` serviceUrl.
+    #[param]
+    pub tls_trust_certs_file: Option<String>,
+    /// Base name of the producers; the slice id is appended to it. Required
+    /// by brokerDedup. Absent: the broker names them.
+    #[param]
+    pub producer_name: Option<String>,
+    /// Milliseconds to wait for the broker to acknowledge a message before
+    /// the write fails and is retried. 0 waits forever.
+    #[param(default = 30000)]
+    pub send_timeout_ms: u64,
+    /// Opt-in broker-side deduplication (effectively-once towards Pulsar),
+    /// e.g. `{"positionBits": [24, 39, 0], "indexBits": 0}`: bits of the
+    /// sequence id given to the three components of the origin position and
+    /// to the index of an element within it (63 bits at most in all). Needs
+    /// producerName and deduplication enabled on the namespace. Absent:
+    /// at-least-once.
+    #[param]
+    pub broker_dedup: Option<DedupConfig>,
+}
+
+impl PulsarSink {
+    /// A sink publishing to `topic` on the broker at `service_url`, with the
+    /// defaults for the rest.
+    #[must_use]
+    pub fn new(service_url: impl Into<String>, topic: impl Into<String>) -> Self {
+        Self {
+            service_url: service_url.into(),
+            topic: topic.into(),
+            token: None,
+            tls_trust_certs_file: None,
+            producer_name: None,
+            send_timeout_ms: 30_000,
+            broker_dedup: None,
+        }
+    }
+
+    /// Authenticate with `token`.
+    #[must_use]
+    pub fn token(mut self, token: Secret) -> Self {
+        self.token = Some(token);
+        self
+    }
+
+    /// What can be refused without the token.
+    fn check_settings(&self) -> Result<(), OpError> { SinkConfig::of(self, None).map(drop) }
+}
+
+impl Sink<PulsarOutput> for PulsarSink {
+    async fn start<P: Providers>(&self, ctx: &Context<P>, mut input: SinkPipe<PulsarOutput>) -> Result<(), OpError> {
+        let token = self.token.as_ref().map(|token| ctx.reveal(token)).transpose()?;
+        let connector = PulsarSinkConnector::new(ctx.providers.clone(), SinkConfig::of(self, token)?);
+        // A failed batch comes back: the same elements are sent again under
+        // the same emit ids.
+        input.write_with(&connector).await;
+        Ok(())
+    }
+}
+
 /// Register `std/pulsar-source@1` and `std/pulsar-sink@1`.
 pub fn register<P: Providers>(registry: &mut Registry<P>) {
-    registry.register_source::<PulsarMessage>(
-        SOURCE_OP,
-        "Reads a Pulsar topic through a durable Failover subscription, one slice per partition.",
-        |context, config| {
-            let config = SourceConfig::from_json(context, config)?;
-            Ok(Arc::new(PulsarSource::new(context.providers.clone(), config)) as Arc<dyn SourceConnector>)
-        },
-    );
-    registry.register_sink(
-        SINK_OP,
-        "Publishes elements to a Pulsar topic, tagged with their emit id; optionally \
-         deduplicated by the broker.",
-        TypeTag::of::<PulsarOutput>(),
-        |context, config| {
-            let config = SinkConfig::from_json(context, config)?;
-            Ok(Arc::new(PulsarSink::new(context.providers.clone(), config)) as Arc<dyn SinkConnector>)
-        },
-    );
-    registry.with_params(SOURCE_OP, source_params());
-    registry.with_params(SINK_OP, sink_params());
-}
-
-/// The connection parameters shared by both operators.
-fn connection_params() -> [ParamSpec; 3] {
-    [
-        ParamSpec::new(
-            "serviceUrl",
-            "text",
-            "Broker to connect to: `pulsar://host:6650`, or `pulsar+ssl://host:6651` for TLS. \
-             A single host; the port defaults to 6650 (6651 with TLS).",
-        )
-        .required(),
-        ParamSpec::new(
-            "token",
-            "secret",
-            "JWT sent to the broker for authentication. Absent: no authentication.",
-        ),
-        ParamSpec::new(
-            "tlsTrustCertsFile",
-            "text",
-            "PEM file holding the certificate authorities to trust instead of the system \
-             store. Only with a `pulsar+ssl://` service_url.",
-        ),
-    ]
-}
-
-/// What the configuration of `std/pulsar-source@1` is made of.
-fn source_params() -> Vec<ParamSpec> {
-    let [service_url, token, tls] = connection_params();
-    vec![
-        service_url,
-        ParamSpec::new(
-            "topic",
-            "text",
-            "Topic to read, as a full name `persistent://tenant/namespace/name`. A partitioned \
-             topic gives one slice per partition.",
-        )
-        .required(),
-        ParamSpec::new(
-            "subscription",
-            "text",
-            "Name of the durable Failover subscription. Its cursor holds the read position: \
-             keep it stable for the lifetime of the graph.",
-        )
-        .required(),
-        token,
-        tls,
-        ParamSpec::new(
-            "eventTime",
-            "text",
-            "Event time of a record: `publish` takes the broker's publish time, `event` the \
-             producer-set event time (the publish time when a message has none).",
-        )
-        .choices(["publish", "event"])
-        .default("publish"),
-        ParamSpec::new(
-            "initialPosition",
-            "text",
-            "Where a subscription that does not exist yet starts: `earliest` reads the topic \
-             from its oldest retained message, `latest` only what is published afterwards.",
-        )
-        .choices(["earliest", "latest"])
-        .default("earliest"),
-        ParamSpec::new(
-            "receiverQueueSize",
-            "integer",
-            "Messages the broker may push ahead of consumption, per partition. Positive.",
-        )
-        .default(1000),
-    ]
-}
-
-/// What the configuration of `std/pulsar-sink@1` is made of.
-fn sink_params() -> Vec<ParamSpec> {
-    let [service_url, token, tls] = connection_params();
-    vec![
-        service_url,
-        ParamSpec::new(
-            "topic",
-            "text",
-            "Topic to publish to, as a full name `persistent://tenant/namespace/name` \
-             (partitioned or not).",
-        )
-        .required(),
-        token,
-        tls,
-        ParamSpec::new(
-            "producerName",
-            "text",
-            "Base name of the producers; the slice id is appended to it. Required by \
-             broker_dedup. Absent: the broker names them.",
-        ),
-        ParamSpec::new(
-            "sendTimeoutMs",
-            "integer",
-            "Milliseconds to wait for the broker to acknowledge a message before the write \
-             fails and is retried. 0 waits forever.",
-        )
-        .default(30_000),
-        ParamSpec::new(
-            "brokerDedup",
-            "json",
-            "Opt-in broker-side deduplication (effectively-once towards Pulsar), e.g. \
-             `{\"positionBits\": [24, 39, 0], \"indexBits\": 0}`: bits of the sequence id \
-             given to the three components of the origin position and to the index of an \
-             element within it (63 bits at most in all). Needs producer_name and deduplication \
-             enabled on the namespace. Absent: at-least-once.",
-        ),
-    ]
+    registry.source::<PulsarSource>();
+    registry.sink::<PulsarOutput, PulsarSink>();
 }
 
 #[cfg(test)]
@@ -257,8 +319,10 @@ mod tests {
     use super::*;
     use moonpool_core::TokioProviders;
     use serde_json::{Value, json};
+    use std::sync::Arc;
     use streaming_core::{
-        GraphId, NodeId, OpContext, OpError, OpFactory, OpKind, OpRef, StaticSecrets, SystemClock, TenantId,
+        GraphId, NodeId, OpContext, OpError, OpFactory, OpKind, OpRef, ParamSpec, StaticSecrets, SystemClock, TenantId,
+        TypeTag,
     };
 
     fn context() -> OpContext<TokioProviders> {
@@ -267,6 +331,8 @@ mod tests {
             providers: TokioProviders::new(),
             clock: Arc::new(SystemClock),
             secrets: Arc::new(StaticSecrets::new().with(&tenant, "pulsar-jwt", "eyJ.secret")),
+            kv: Arc::new(streaming_core::MemKv::new()),
+            shared: Arc::default(),
             tenant,
             graph: GraphId::new("g").unwrap(),
             node: NodeId::new("n").unwrap(),
@@ -303,14 +369,55 @@ mod tests {
         let Some((_, OpFactory::Sink(factory))) = registry.get(&OpRef::new(SINK_OP).unwrap()) else {
             panic!("not a sink");
         };
-        assert!(
-            factory(
-                &context(),
-                &json!({"serviceUrl": "pulsar://localhost:6650",
-                        "topic": "persistent://public/default/out"})
-            )
-            .is_ok()
+        let out = json!({"serviceUrl": "pulsar://localhost:6650", "topic": "persistent://public/default/out"});
+        assert!(factory(&context(), &out).is_ok());
+        // A secret the tenant does not have is refused before the node starts.
+        let mut unknown = out;
+        unknown["token"] = json!({"secret": "missing"});
+        let Err(error) = factory(&context(), &unknown) else {
+            panic!("a missing secret must be refused");
+        };
+        assert_eq!(
+            error.to_string(),
+            "invalid operator configuration: std/pulsar-sink@1: secret `missing` is not defined for tenant `acme`"
         );
+    }
+
+    #[test]
+    fn the_operators_say_what_they_are_configured_with() {
+        let source = PulsarSource::new("pulsar://b", "persistent://p/d/t", "s").token(Secret::named("pulsar-jwt"));
+        assert_eq!(
+            serde_json::to_value(&source).unwrap(),
+            json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t", "subscription": "s",
+                   "token": {"secret": "pulsar-jwt"}, "eventTime": "publish",
+                   "initialPosition": "earliest", "receiverQueueSize": 1000})
+        );
+        let read: PulsarSource = serde_json::from_value(serde_json::to_value(&source).unwrap()).unwrap();
+        assert_eq!(read, source);
+        let sink = PulsarSink {
+            producer_name: Some("writer".into()),
+            broker_dedup: Some(DedupConfig {
+                position_bits: [24, 39, 0],
+                index_bits: 0,
+            }),
+            ..PulsarSink::new("pulsar://b", "persistent://p/d/t")
+        };
+        assert_eq!(
+            serde_json::to_value(&sink).unwrap(),
+            json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t", "producerName": "writer",
+                   "sendTimeoutMs": 30_000, "brokerDedup": {"positionBits": [24, 39, 0], "indexBits": 0}})
+        );
+        let read: PulsarSink = serde_json::from_value(serde_json::to_value(&sink).unwrap()).unwrap();
+        assert_eq!(read, sink);
+        // What the code builds and what a bare configuration gives agree.
+        let bare: PulsarSource =
+            serde_json::from_value(json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t",
+                                          "subscription": "s"}))
+            .unwrap();
+        assert_eq!(bare, PulsarSource::new("pulsar://b", "persistent://p/d/t", "s"));
+        let bare: PulsarSink =
+            serde_json::from_value(json!({"serviceUrl": "pulsar://b", "topic": "persistent://p/d/t"})).unwrap();
+        assert_eq!(bare, PulsarSink::new("pulsar://b", "persistent://p/d/t"));
     }
 
     #[test]

@@ -14,8 +14,14 @@ postcard.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+streaming-macros.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+
+[features]
+# Bugs planted on purpose, for the simulation to notice. Never in production.
+mutants = []

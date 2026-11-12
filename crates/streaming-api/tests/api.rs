@@ -161,6 +161,7 @@ fn descriptor(op: &str, kind: OpKind) -> OpDescriptor {
         output: TypeTag::Any,
         description: format!("fake {op}"),
         params,
+        signatures: Vec::new(),
     }
 }
 

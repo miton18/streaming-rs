@@ -101,6 +101,7 @@ impl Cluster {
         config.controller_grace = Duration::ZERO;
         let worker = Worker::new(
             RuntimeEnv {
+                shared: Arc::default(),
                 providers: TokioProviders::new(),
                 kv: kv.clone(),
                 clock: Arc::new(SystemClock),

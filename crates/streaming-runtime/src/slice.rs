@@ -217,6 +217,8 @@ fn context<P: Providers>(env: &RuntimeEnv<P>, key: &SliceKey, node: &NodeId) -> 
         providers: env.providers.clone(),
         clock: env.clock.clone(),
         secrets: env.secrets.clone(),
+        kv: env.kv.clone(),
+        shared: env.shared.clone(),
         tenant: key.tenant.clone(),
         graph: key.graph.clone(),
         node: node.clone(),
@@ -252,9 +254,15 @@ fn build_op<P: Providers>(
         .spec
         .node(node)
         .ok_or_else(|| OpError::Config(format!("unknown node `{node}`")))?;
+    // An operator written for several types is built for the one it is fed.
+    let fed = topology
+        .inputs
+        .get(node)
+        .and_then(|inputs| inputs.first())
+        .and_then(|input| topology.types.get(input));
     let (_, factory) = env
         .registry
-        .get(&spec.op)
+        .get_for(&spec.op, fed)
         .ok_or_else(|| OpError::Config(format!("operator `{}` is not compiled into this worker", spec.op)))?;
     Ok(match factory {
         OpFactory::Source(factory) => NodeOp::Source(factory(&context(env, key, node), &spec.config)?),

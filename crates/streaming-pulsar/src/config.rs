@@ -1,9 +1,9 @@
 //! Node configurations and their validation.
 
-use crate::sequence::SequenceLayout;
-use serde::Deserialize;
+use crate::{PulsarSink, PulsarSource, sequence::SequenceLayout};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use streaming_core::{OpContext, OpError};
+use streaming_core::{OpContext, OpError, Operator, Param, Secret};
 
 /// How a `pulsar://` / `pulsar+ssl://` service URL was understood.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,8 +95,7 @@ pub struct ConnectionSettings {
 }
 
 /// Which timestamp becomes the record's event time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Param)]
 pub enum EventTimeMode {
     /// The broker-side publish time (always present).
     #[default]
@@ -107,8 +106,7 @@ pub enum EventTimeMode {
 }
 
 /// Where a brand-new subscription starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Param)]
 pub enum InitialPosition {
     /// The oldest retained message (the default: a new graph reads the topic
     /// from its beginning).
@@ -116,27 +114,6 @@ pub enum InitialPosition {
     Earliest,
     /// Only messages published after the subscription is created.
     Latest,
-}
-
-fn default_receiver_queue_size() -> usize { 1000 }
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "camelCase")]
-struct RawSource {
-    service_url: String,
-    topic: String,
-    subscription: String,
-    #[serde(default)]
-    token: Option<Value>,
-    #[serde(default)]
-    tls_trust_certs_file: Option<String>,
-    #[serde(default)]
-    event_time: EventTimeMode,
-    #[serde(default = "default_receiver_queue_size")]
-    receiver_queue_size: usize,
-    #[serde(default)]
-    initial_position: InitialPosition,
 }
 
 /// Validated configuration of `std/pulsar-source@1`.
@@ -157,7 +134,7 @@ pub struct SourceConfig {
 }
 
 /// Opt-in broker-side deduplication settings of the sink.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct DedupConfig {
@@ -170,22 +147,15 @@ pub struct DedupConfig {
     pub index_bits: u8,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "camelCase")]
-struct RawSink {
-    service_url: String,
-    topic: String,
-    #[serde(default)]
-    token: Option<Value>,
-    #[serde(default)]
-    tls_trust_certs_file: Option<String>,
-    #[serde(default)]
-    producer_name: Option<String>,
-    #[serde(default)]
-    broker_dedup: Option<DedupConfig>,
-    #[serde(default)]
-    send_timeout_ms: Option<u64>,
+impl Param for DedupConfig {
+    const KIND: &'static str = "json";
+
+    fn to_json(&self) -> Value { serde_json::json!({"positionBits": self.position_bits, "indexBits": self.index_bits}) }
+
+    fn from_json(value: &Value) -> Result<Self, String> {
+        Self::deserialize(value)
+            .map_err(|error| format!("expected `{{\"positionBits\": [a, b, c], \"indexBits\": d}}` ({error})"))
+    }
 }
 
 /// Validated configuration of `std/pulsar-sink@1`.
@@ -201,10 +171,6 @@ pub struct SinkConfig {
     pub dedup: Option<SequenceLayout>,
     /// Per-message send timeout, `0` disables it.
     pub send_timeout_ms: u64,
-}
-
-fn parse<T: serde::de::DeserializeOwned>(config: &Value) -> Result<T, OpError> {
-    serde_json::from_value(config.clone()).map_err(|e| OpError::Config(e.to_string()))
 }
 
 fn check_topic(topic: &str) -> Result<(), OpError> {
@@ -225,17 +191,12 @@ fn check_topic(topic: &str) -> Result<(), OpError> {
     Ok(())
 }
 
-fn connection<P: moonpool_core::Providers>(
-    context: &OpContext<P>,
+fn connection(
     service_url: &str,
-    token: Option<&Value>,
-    tls_trust_certs_file: Option<String>,
+    token: Option<String>,
+    tls_trust_certs_file: Option<&String>,
 ) -> Result<ConnectionSettings, OpError> {
     let url = ServiceUrl::parse(service_url).map_err(OpError::Config)?;
-    let token = match token {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(context.secret_or_literal(value)?),
-    };
     if tls_trust_certs_file.is_some() && !url.tls {
         return Err(OpError::Config(
             "tlsTrustCertsFile only applies to a `pulsar+ssl://` serviceUrl".into(),
@@ -244,46 +205,72 @@ fn connection<P: moonpool_core::Providers>(
     Ok(ConnectionSettings {
         url,
         token,
-        tls_trust_certs_file,
+        tls_trust_certs_file: tls_trust_certs_file.cloned(),
     })
 }
 
+fn token<P: moonpool_core::Providers>(
+    context: &OpContext<P>,
+    secret: Option<&Secret>,
+) -> Result<Option<String>, OpError> {
+    secret.map(|secret| context.reveal(secret)).transpose()
+}
+
+fn operator<O: Operator>(config: &Value) -> Result<O, OpError> {
+    let operator = O::deserialize(config).map_err(|error| OpError::Config(error.to_string()))?;
+    operator.check()?;
+    Ok(operator)
+}
+
 impl SourceConfig {
-    /// Parse and validate a node configuration, resolving secrets.
-    pub fn from_json<P: moonpool_core::Providers>(context: &OpContext<P>, config: &Value) -> Result<Self, OpError> {
-        let raw: RawSource = parse(config)?;
-        check_topic(&raw.topic)?;
-        if raw.subscription.trim().is_empty() {
+    /// What `source` asks for, validated; `token` is its secret, revealed.
+    ///
+    /// # Errors
+    ///
+    /// The settings cannot be used, said in words.
+    pub fn of(source: &PulsarSource, token: Option<String>) -> Result<Self, OpError> {
+        check_topic(&source.topic)?;
+        if source.subscription.trim().is_empty() {
             return Err(OpError::Config("subscription must not be empty".into()));
         }
-        if raw.receiver_queue_size == 0 {
-            return Err(OpError::Config("receiverQueueSize must be positive".into()));
-        }
         Ok(Self {
-            connection: connection(context, &raw.service_url, raw.token.as_ref(), raw.tls_trust_certs_file)?,
-            topic: raw.topic,
-            subscription: raw.subscription,
-            event_time: raw.event_time,
-            receiver_queue_size: raw.receiver_queue_size,
-            initial_position: raw.initial_position,
+            connection: connection(&source.service_url, token, source.tls_trust_certs_file.as_ref())?,
+            topic: source.topic.clone(),
+            subscription: source.subscription.clone(),
+            event_time: source.event_time,
+            receiver_queue_size: source.receiver_queue_size,
+            initial_position: source.initial_position,
         })
+    }
+
+    /// Parse and validate a node configuration, resolving secrets.
+    ///
+    /// # Errors
+    ///
+    /// The configuration cannot be used, said in words.
+    pub fn from_json<P: moonpool_core::Providers>(context: &OpContext<P>, config: &Value) -> Result<Self, OpError> {
+        let source: PulsarSource = operator(config)?;
+        Self::of(&source, token(context, source.token.as_ref())?)
     }
 }
 
 impl SinkConfig {
-    /// Parse and validate a node configuration, resolving secrets.
-    pub fn from_json<P: moonpool_core::Providers>(context: &OpContext<P>, config: &Value) -> Result<Self, OpError> {
-        let raw: RawSink = parse(config)?;
-        check_topic(&raw.topic)?;
-        if let Some(name) = &raw.producer_name
+    /// What `sink` asks for, validated; `token` is its secret, revealed.
+    ///
+    /// # Errors
+    ///
+    /// The settings cannot be used, said in words.
+    pub fn of(sink: &PulsarSink, token: Option<String>) -> Result<Self, OpError> {
+        check_topic(&sink.topic)?;
+        if let Some(name) = &sink.producer_name
             && name.trim().is_empty()
         {
             return Err(OpError::Config("producerName must not be empty".into()));
         }
-        let dedup = match raw.broker_dedup {
+        let dedup = match sink.broker_dedup {
             None => None,
             Some(dedup) => {
-                if raw.producer_name.is_none() {
+                if sink.producer_name.is_none() {
                     return Err(OpError::Config(
                         "brokerDedup needs a stable producerName: the broker keys its \
                          deduplication state by producer name"
@@ -294,12 +281,22 @@ impl SinkConfig {
             }
         };
         Ok(Self {
-            connection: connection(context, &raw.service_url, raw.token.as_ref(), raw.tls_trust_certs_file)?,
-            topic: raw.topic,
-            producer_name: raw.producer_name,
+            connection: connection(&sink.service_url, token, sink.tls_trust_certs_file.as_ref())?,
+            topic: sink.topic.clone(),
+            producer_name: sink.producer_name.clone(),
             dedup,
-            send_timeout_ms: raw.send_timeout_ms.unwrap_or(30_000),
+            send_timeout_ms: sink.send_timeout_ms,
         })
+    }
+
+    /// Parse and validate a node configuration, resolving secrets.
+    ///
+    /// # Errors
+    ///
+    /// The configuration cannot be used, said in words.
+    pub fn from_json<P: moonpool_core::Providers>(context: &OpContext<P>, config: &Value) -> Result<Self, OpError> {
+        let sink: PulsarSink = operator(config)?;
+        Self::of(&sink, token(context, sink.token.as_ref())?)
     }
 }
 

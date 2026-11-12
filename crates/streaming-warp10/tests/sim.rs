@@ -1,4 +1,4 @@
-//! Deterministic simulation of `Warp10Sink<SimProviders>` against `FakeWarp10`.
+//! Deterministic simulation of `Warp10Writer<SimProviders>` against `FakeWarp10`.
 //!
 //! The fake runs as a crashable `Process` (its state lives outside, in an
 //! `Arc`, and survives reboots). One workload writes a known set of points in
@@ -33,7 +33,7 @@ use std::{
 };
 use streaming_core::{Emit, EmitId, NodeId, Origin, Position, SinkConnector, SliceId, datum};
 use streaming_warp10::{
-    Gts, GtsValue, Warp10Config, Warp10Sink,
+    Gts, GtsValue, Warp10Config, Warp10Writer,
     fake::{FakeWarp10, Fault, PointKey},
 };
 
@@ -209,7 +209,7 @@ impl Workload for Writer {
         config.connect_address = Some(server);
         config.timeout = Duration::from_millis(1500);
         config.max_batch_bytes = 220; // a few points per request: batches get split
-        let sink = Warp10Sink::new(ctx.providers().clone(), config)
+        let sink = Warp10Writer::new(ctx.providers().clone(), config)
             .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
         let fake = self.world.fake().clone();
 

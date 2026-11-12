@@ -16,7 +16,7 @@ use moonpool_core::TokioProviders;
 use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
 use streaming_core::{Emit, EmitId, NodeId, Origin, Position, SinkConnector, SliceId, datum};
 use streaming_warp10::{
-    Gts, GtsValue, Warp10Config, Warp10Sink,
+    Gts, GtsValue, Warp10Config, Warp10Writer,
     fake::{FakeWarp10, PointKey},
 };
 use tokio::net::TcpListener;
@@ -123,11 +123,11 @@ fn emit(n: u64, gts: Gts) -> Emit {
     }
 }
 
-fn sink(host: &str, port: u16, roots: Vec<Vec<u8>>) -> Warp10Sink<TokioProviders> {
+fn sink(host: &str, port: u16, roots: Vec<Vec<u8>>) -> Warp10Writer<TokioProviders> {
     let mut config = Warp10Config::new(&format!("https://{host}:{port}/api/v0/update"), "tok").unwrap();
     config.tls_extra_roots_der = roots;
     config.timeout = Duration::from_secs(5);
-    Warp10Sink::new(TokioProviders::new(), config).unwrap()
+    Warp10Writer::new(TokioProviders::new(), config).unwrap()
 }
 
 #[tokio::test]
@@ -189,7 +189,7 @@ async fn plain_http_against_a_tls_port_fails_instead_of_hanging() {
     let port = start_tls_fake(fake.clone(), &cert).await;
     let mut config = Warp10Config::new(&format!("http://127.0.0.1:{port}/api/v0/update"), "tok").unwrap();
     config.timeout = Duration::from_millis(500);
-    let plain = Warp10Sink::new(TokioProviders::new(), config).unwrap();
+    let plain = Warp10Writer::new(TokioProviders::new(), config).unwrap();
     assert!(plain.write(&[emit(0, Gts::new("m").at(1).value(1))]).await.is_err());
     assert!(fake.is_empty());
 }

@@ -57,8 +57,10 @@ fn every_planted_bug_is_noticed() {
     // applying commands long after their sender gave up; a source whose
     // partitions come and go, with and without a fight; and an application
     // redeployed while it runs, two binaries side by side, with and without
-    // a placement to keep them apart.
-    let scenarios = [
+    // a placement to keep them apart; and a source that pushes into its pipe
+    // now and then, asked over and over where its partitions end.
+    // `SIM_PIPED=1` makes every one of them read its topic that way.
+    let mut scenarios = [
         Scenario {
             duel: true,
             ..Scenario::default()
@@ -102,7 +104,21 @@ fn every_planted_bug_is_noticed() {
             duel: true,
             ..Scenario::default()
         },
+        Scenario {
+            piped: true,
+            partitions: 4,
+            silent_partitions: 1,
+            events: 600,
+            produce_for: Duration::from_secs(60),
+            idle_timeout: Duration::from_millis(300),
+            ..Scenario::default()
+        },
     ];
+    if std::env::var("SIM_PIPED").is_ok() {
+        for scenario in &mut scenarios {
+            scenario.piped = true;
+        }
+    }
     // `SIM_MUTANT=<name>` plants that one only.
     let only = std::env::var("SIM_MUTANT").ok();
     let mut survivors = Vec::new();

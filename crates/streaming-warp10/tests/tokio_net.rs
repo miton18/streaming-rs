@@ -1,4 +1,4 @@
-//! `Warp10Sink<TokioProviders>` against the fake ingress over real localhost
+//! `Warp10Writer<TokioProviders>` against the fake ingress over real localhost
 //! TCP, plus a few hand-written misbehaving servers.
 
 use moonpool_core::{NetworkProvider, Providers, TcpListenerTrait, TokioProviders};
@@ -9,7 +9,7 @@ use streaming_core::{
     SystemClock, TenantId, datum,
 };
 use streaming_warp10::{
-    Gts, GtsValue, Warp10Config, Warp10Sink,
+    Gts, GtsValue, Warp10Config, Warp10Writer,
     fake::{FakeWarp10, PointKey},
 };
 use tokio::{
@@ -98,11 +98,11 @@ async fn start() -> Server {
     Server { fake, port, shutdown }
 }
 
-fn sink_for(port: u16, token: &str, tweak: impl FnOnce(&mut Warp10Config)) -> Warp10Sink<TokioProviders> {
+fn sink_for(port: u16, token: &str, tweak: impl FnOnce(&mut Warp10Config)) -> Warp10Writer<TokioProviders> {
     let mut config = Warp10Config::new(&format!("http://127.0.0.1:{port}/api/v0/update"), token).unwrap();
     config.timeout = Duration::from_secs(5);
     tweak(&mut config);
-    Warp10Sink::new(TokioProviders::new(), config).unwrap()
+    Warp10Writer::new(TokioProviders::new(), config).unwrap()
 }
 
 #[tokio::test]
@@ -381,6 +381,8 @@ async fn registered_in_the_registry_and_builds_from_json() {
         providers: TokioProviders::new(),
         clock: Arc::new(SystemClock),
         secrets: Arc::new(StaticSecrets::new().with(&tenant, "warp-write", TOKEN)),
+        kv: streaming_core::MemKv::shared(),
+        shared: Arc::default(),
         tenant,
         graph: GraphId::new("g").unwrap(),
         node: NodeId::new("out").unwrap(),
@@ -397,7 +399,19 @@ async fn registered_in_the_registry_and_builds_from_json() {
     sink.write(&batch(3)).await.unwrap();
     assert_eq!(server.fake.points(), expected(3));
 
-    // unknown secret, bad config
-    assert!(factory(&context, &json!({"endpoint": "http://h/", "token": {"secret": "nope"}})).is_err());
+    // A retried batch goes through the same sink, and leaves the same points.
+    sink.write(&batch(3)).await.unwrap();
+    assert_eq!(server.fake.points(), expected(3));
+
+    // A configuration that cannot run is refused before anything starts.
     assert!(factory(&context, &json!({"endpoint": "http://h/"})).is_err());
+    assert!(factory(&context, &json!({"endpoint": "ftp://h/", "token": "t"})).is_err());
+    // So is one that names a secret its tenant does not have.
+    let Err(error) = factory(&context, &json!({"endpoint": "http://h/", "token": {"secret": "nope"}})) else {
+        panic!("a missing secret must be refused");
+    };
+    assert_eq!(
+        error.to_string(),
+        "invalid operator configuration: std/warp10-sink@1: secret `nope` is not defined for tenant `acme`"
+    );
 }

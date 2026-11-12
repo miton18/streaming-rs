@@ -8,28 +8,25 @@
 //! | `std/identity@1` | map | none |
 
 use crate::{
-    builder::Operator,
-    data::{Datum, Key, Windowed, datum},
-    ops::{DynAcc, DynAggregator, DynMap, OpError, WindowAssigner},
-    registry::{OpDescriptor, OpFactory, OpKind, Registry, TypeTag},
-    time::{Timestamp, Window, duration_str},
+    Operator,
+    data::Windowed,
+    ops::{OpError, WindowAssigner},
+    pipe::{Keyed, Opaque, Pipe, Transformer, Windows},
+    registry::Registry,
+    time::{Timestamp, Window},
 };
 use moonpool_core::Providers;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{any::Any, time::Duration};
 
-fn zero() -> Duration { Duration::ZERO }
-
-/// Fixed-size, non-overlapping windows aligned on the epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Fixed-size, non-overlapping event-time windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Operator)]
+#[operator("std/tumbling@1")]
 pub struct Tumbling {
-    /// Window length.
-    #[serde(with = "duration_str")]
+    /// Length of each window.
+    #[param(min = "1ms")]
     pub size: Duration,
     /// How long after its end a window still accepts records.
-    #[serde(with = "duration_str", default = "zero", skip_serializing_if = "Duration::is_zero")]
+    #[param(default = "0s")]
     pub allowed_lateness: Duration,
 }
 
@@ -44,10 +41,6 @@ impl Tumbling {
     }
 }
 
-impl Operator for Tumbling {
-    const OP: &'static str = "std/tumbling@1";
-}
-
 impl WindowAssigner for Tumbling {
     fn assign(&self, ts: Timestamp, out: &mut Vec<Window>) {
         let size = self.size.as_millis() as i64;
@@ -58,19 +51,32 @@ impl WindowAssigner for Tumbling {
     fn allowed_lateness(&self) -> Duration { self.allowed_lateness }
 }
 
-/// Fixed-size windows starting every `slide`, aligned on the epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+impl<T: Any + Send + Sync> Transformer<Keyed<T>> for Tumbling {
+    type Out = Windows<T>;
+
+    fn transform(&self, input: Pipe<Keyed<T>>) -> Pipe<Windows<T>> { input.window_with(*self) }
+}
+
+/// Fixed-size event-time windows starting every `slide`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Operator)]
+#[operator("std/sliding@1", check = slide_within_size)]
 pub struct Sliding {
-    /// Window length.
-    #[serde(with = "duration_str")]
+    /// Length of each window.
+    #[param(min = "1ms")]
     pub size: Duration,
-    /// Distance between two window starts.
-    #[serde(with = "duration_str")]
+    /// A window starts every `slide`.
+    #[param(min = "1ms")]
     pub slide: Duration,
     /// How long after its end a window still accepts records.
-    #[serde(with = "duration_str", default = "zero", skip_serializing_if = "Duration::is_zero")]
+    #[param(default = "0s")]
     pub allowed_lateness: Duration,
+}
+
+fn slide_within_size(sliding: &Sliding) -> Result<(), OpError> {
+    if sliding.slide > sliding.size {
+        return Err(OpError::Config("`slide` must not exceed `size`".into()));
+    }
+    Ok(())
 }
 
 impl Sliding {
@@ -84,10 +90,6 @@ impl Sliding {
             allowed_lateness: Duration::ZERO,
         }
     }
-}
-
-impl Operator for Sliding {
-    const OP: &'static str = "std/sliding@1";
 }
 
 impl WindowAssigner for Sliding {
@@ -104,141 +106,55 @@ impl WindowAssigner for Sliding {
     fn allowed_lateness(&self) -> Duration { self.allowed_lateness }
 }
 
-fn check_positive(what: &str, duration: Duration) -> Result<(), OpError> {
-    if duration.as_millis() == 0 {
-        return Err(OpError::Config(format!("`{what}` must be at least 1ms")));
-    }
-    Ok(())
+impl<T: Any + Send + Sync> Transformer<Keyed<T>> for Sliding {
+    type Out = Windows<T>;
+
+    fn transform(&self, input: Pipe<Keyed<T>>) -> Pipe<Windows<T>> { input.window_with(*self) }
 }
 
-/// Counts elements of any type. Emits `Windowed<u64>`.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+/// Counts the elements of each key in each window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/count@1")]
 pub struct Count;
 
-impl Operator for Count {
-    const OP: &'static str = "std/count@1";
-}
+impl<T: Any + Send + Sync> Transformer<Windows<T>> for Count {
+    type Out = Windowed<u64>;
 
-impl Count {
-    fn get(acc: &DynAcc) -> Result<u64, OpError> {
-        acc.downcast_ref::<u64>()
-            .copied()
-            .ok_or(OpError::Type { expected: "u64" })
-    }
-}
-
-impl DynAggregator for Count {
-    fn init(&self) -> DynAcc { Box::new(0_u64) }
-
-    fn add(&self, acc: &mut DynAcc, _item: &Datum) -> Result<(), OpError> {
-        let count = acc.downcast_mut::<u64>().ok_or(OpError::Type { expected: "u64" })?;
-        *count += 1;
-        Ok(())
-    }
-
-    fn merge(&self, into: &mut DynAcc, other: &DynAcc) -> Result<(), OpError> {
-        let other = Self::get(other)?;
-        let count = into.downcast_mut::<u64>().ok_or(OpError::Type { expected: "u64" })?;
-        *count += other;
-        Ok(())
-    }
-
-    fn finish(&self, acc: &DynAcc, window: Window, key: &Key) -> Result<Datum, OpError> {
-        Ok(datum(Windowed {
-            window,
-            key: key.clone(),
-            value: Self::get(acc)?,
-        }))
-    }
-
-    fn encode(&self, acc: &DynAcc) -> Result<Vec<u8>, OpError> {
-        postcard::to_allocvec(&Self::get(acc)?).map_err(|e| OpError::Failed(e.to_string()))
-    }
-
-    fn decode(&self, bytes: &[u8]) -> Result<DynAcc, OpError> {
-        postcard::from_bytes::<u64>(bytes)
-            .map(|count| Box::new(count) as DynAcc)
-            .map_err(|e| OpError::Failed(format!("cannot decode count: {e}")))
+    fn transform(&self, input: Pipe<Windows<T>>) -> Pipe<Windowed<u64>> {
+        input.aggregate(
+            || 0_u64,                       // the state of one key in one window
+            |count, _element| *count += 1,  // an element comes
+            |count, other| *count += other, // two partitions each held a part of the window
+        )
     }
 }
 
 /// Forwards every element unchanged.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/identity@1")]
 pub struct Identity;
 
-impl Operator for Identity {
-    const OP: &'static str = "std/identity@1";
+impl<T: Any + Send + Sync> Transformer<T> for Identity {
+    type Out = T;
+
+    fn transform(&self, input: Pipe<T>) -> Pipe<T> { input }
 }
 
-impl DynMap for Identity {
-    fn apply(&self, input: &Datum, out: &mut Vec<Datum>) -> Result<(), OpError> {
-        out.push(input.clone());
-        Ok(())
-    }
-}
-
-/// Register the `std/*` operators listed in the module documentation.
+/// Register the `std/*` operators listed in the module documentation, each
+/// for any type of element.
 pub fn register<P: Providers>(registry: &mut Registry<P>) {
-    registry.register_window(
-        Tumbling::OP,
-        "Fixed-size, non-overlapping event-time windows.",
-        |config: Tumbling| {
-            check_positive("size", config.size)?;
-            Ok(config)
-        },
-    );
-    registry.register_window(
-        Sliding::OP,
-        "Fixed-size event-time windows starting every `slide`.",
-        |config: Sliding| {
-            check_positive("size", config.size)?;
-            check_positive("slide", config.slide)?;
-            if config.slide > config.size {
-                return Err(OpError::Config("`slide` must not exceed `size`".into()));
-            }
-            Ok(config)
-        },
-    );
-    registry.register_dyn_aggregator(
-        Count::OP,
-        "Counts the elements of each key in each window.",
-        TypeTag::Any,
-        TypeTag::of::<Windowed<u64>>(),
-        |_config: &Value| Ok(Arc::new(Count) as Arc<dyn DynAggregator>),
-    );
-    registry.register(
-        OpDescriptor {
-            op: crate::ids::OpRef::new(Identity::OP).unwrap_or_else(|e| panic!("{e}")),
-            kind: OpKind::Map,
-            input: TypeTag::Any,
-            output: TypeTag::Any,
-            description: "Forwards every element unchanged.".to_owned(),
-            params: Vec::new(),
-        },
-        OpFactory::Map(Arc::new(|_config: &Value| Ok(Arc::new(Identity) as Arc<dyn DynMap>))),
-    );
-    let lateness = || {
-        crate::ParamSpec::new(
-            "allowedLateness",
-            "duration",
-            "How long after its end a window still accepts records.",
-        )
-        .default("0s")
-    };
-    registry.with_params(
-        Tumbling::OP,
-        [
-            crate::ParamSpec::new("size", "duration", "Length of each window.").required(),
-            lateness(),
-        ],
-    );
-    registry.with_params(
-        Sliding::OP,
-        [
-            crate::ParamSpec::new("size", "duration", "Length of each window.").required(),
-            crate::ParamSpec::new("slide", "duration", "A window starts every `slide`.").required(),
-            lateness(),
-        ],
+    let second = Duration::from_secs(1);
+    let registered = [
+        registry.transformer::<Keyed<Opaque>, _>(&Tumbling::of(second)).err(),
+        registry
+            .transformer::<Keyed<Opaque>, _>(&Sliding::of(second, second))
+            .err(),
+        registry.transformer::<Windows<Opaque>, _>(&Count).err(),
+        registry.transformer::<Opaque, _>(&Identity).err(),
+    ];
+    debug_assert!(
+        registered.iter().all(Option::is_none),
+        "a stock operator is not one step"
     );
 }
 
@@ -332,17 +248,52 @@ mod tests {
 
     #[test]
     fn count_merges_and_round_trips() {
-        let count = Count;
+        let registry = crate::registry::Registry::<moonpool_core::TokioProviders>::standard();
+        let op = crate::ids::OpRef::new("std/count@1").unwrap();
+        let Some((descriptor, crate::registry::OpFactory::Aggregate(factory))) = registry.get(&op) else {
+            panic!("std/count@1 is not an aggregate");
+        };
+        // Registered for any type of element, it counts whatever comes.
+        assert_eq!(descriptor.input, crate::TypeTag::Any);
+        assert_eq!(descriptor.output, crate::TypeTag::of::<Windowed<u64>>());
+        assert_eq!(
+            descriptor.description,
+            "Counts the elements of each key in each window."
+        );
+        let count = factory(&serde_json::Value::Null).unwrap();
         let mut a = count.init();
         let mut b = count.init();
         for _ in 0..3 {
-            count.add(&mut a, &datum("x")).unwrap();
+            count.add(&mut a, &crate::datum("x")).unwrap();
         }
-        count.add(&mut b, &datum(7_u8)).unwrap();
+        count.add(&mut b, &crate::datum(7_u8)).unwrap();
         count.merge(&mut a, &b).unwrap();
-        let restored = count.decode(&count.encode(&a).unwrap()).unwrap();
-        let key = Key::encode(&"k".to_owned()).unwrap();
+        let bytes = count.encode(&a).unwrap();
+        assert_eq!(bytes, postcard::to_allocvec(&4_u64).unwrap());
+        let restored = count.decode(&bytes).unwrap();
+        let key = crate::Key::encode(&"k".to_owned()).unwrap();
         let out = count.finish(&restored, Window::new(0, 10), &key).unwrap();
         assert_eq!(out.downcast_ref::<Windowed<u64>>().unwrap().value, 4);
+    }
+
+    #[test]
+    fn the_stock_operators_describe_themselves() {
+        let catalog = crate::registry::Registry::<moonpool_core::TokioProviders>::standard().catalog();
+        let get = |op: &str| catalog.get(&crate::ids::OpRef::new(op).unwrap()).unwrap().clone();
+        let tumbling = get("std/tumbling@1");
+        assert_eq!(tumbling.kind, crate::OpKind::Window);
+        assert_eq!(tumbling.description, "Fixed-size, non-overlapping event-time windows.");
+        let names: Vec<(&str, bool)> = tumbling.params.iter().map(|p| (p.name.as_str(), p.required)).collect();
+        assert_eq!(names, [("size", true), ("allowedLateness", false)]);
+        assert_eq!(tumbling.params[1].default, Some(serde_json::json!("0s")));
+        let sliding = get("std/sliding@1");
+        let names: Vec<&str> = sliding.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["size", "slide", "allowedLateness"]);
+        let identity = get("std/identity@1");
+        assert_eq!(
+            (identity.kind, identity.input, identity.output),
+            (crate::OpKind::Map, crate::TypeTag::Any, crate::TypeTag::Any)
+        );
+        assert!(identity.signatures.is_empty());
     }
 }

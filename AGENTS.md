@@ -69,20 +69,34 @@ size) from those a restart absorbs. The comparison with Flink, Beam, Kafka
 Streams, Temporal and others that led there is a Claude Doc of the project,
 "Graphes : représentation stockée ou code ?".
 
+**Then the owner reshaped the SDK (2026-11-12).** The `Operator` trait stays
+("it gives the thing a name"). Two traits require it: `Source`, whose `start`
+is handed a pipe to push into, and `Sink`, whose `start` receives a pipe;
+everything else is a `Transformer`, which takes a pipe and returns a pipe.
+Parameters are real fields of the operator's structure, not a list built
+next to it: `#[derive(Operator)]` with `#[operator("ref")]` and
+`#[param(default, min, max)]` (the owner saw the whole shape in the thread
+before it was written, and asked for the fields). A field without `#[param]`
+is fixed by the code, invisible to the API and the UI: proposed, never
+contradicted, not explicitly confirmed. Agreed for later, still: telling
+apart the exposed parameters that break the state; `#[param(breaks_state)]`
+was suggested as its place.
+
 ## Layout
 
 | Crate | Role |
 |---|---|
-| `streaming-core` | Ids, time, `Kv` trait (9 commands) + `MemKv`, operator traits, `Registry`/`Catalog` (+ `ParamSpec`), `GraphSpec`/`Topology`, KV key layout (`keys`), control-plane documents (`control`) |
-| `streaming-runtime` | The engine: `slice.rs` (actors, epochs, commits), `state.rs` (commit log, seal, window state), `worker.rs`, `controller.rs`, `metrics.rs`, `memlog.rs`, `inspect.rs`, `mutation.rs` |
-| `streaming-sim` | Moonpool harness: fault-injecting KV/source/sinks, `Scenario`, `Driver`, `Operator`, `Auditor`; `tests/exactly_once.rs`, `tests/mutants.rs` |
+| `streaming-core` | Ids, time, `Kv` trait (9 commands) + `MemKv`, the SDK traits (`Operator`, `Source`, `Sink`, `Transformer`, `Param`) and their pipes (`pipe`), the typed `GraphBuilder`, the engine-level operator traits, `Registry`/`Catalog` (+ `ParamSpec`), `GraphSpec`/`Topology`, KV key layout (`keys`), control-plane documents (`control`), the planted bugs (`mutation`) |
+| `streaming-macros` | `#[derive(Operator)]` and `#[derive(Param)]` |
+| `streaming-runtime` | The engine: `slice.rs` (actors, epochs, commits), `state.rs` (commit log, seal, window state), `worker.rs`, `controller.rs`, `metrics.rs`, `memlog.rs`, `inspect.rs` |
+| `streaming-sim` | Moonpool harness: fault-injecting KV, source and sinks written on the SDK traits, `Scenario`, `Driver`, `Operator`, `Auditor`; `tests/exactly_once.rs`, `tests/mutants.rs` |
 | `streaming-gossip` | Scuttlebutt membership, simulable |
 | `streaming-kv-redis` | `RedisKv` (RESP client, TLS feature), conformance kit |
 | `streaming-warp10` | `std/warp10-sink@1` |
 | `streaming-pulsar` | `std/pulsar-source@1`, `std/pulsar-sink@1` on Magnetar |
 | `streaming-api` | axum API, status aggregation, embedded UI in `ui/` (vanilla JS) |
 | `streaming-openapi` (+ `-macros`) | `#[route(GET, "/path")]` on a handler: registers it and derives its OpenAPI 3.2 operation from the signature |
-| `streaming` | The SDK: `App` (tenants, operators, graphs; publication at start; the `standalone` and `worker` commands), stock operators (`stock`), examples `demo` (the two demonstration graphs) and `pulsar-e2e` |
+| `streaming` | The application side of the SDK: `App` (tenants, graphs and the operators they name; publication at start; the `standalone` and `worker` commands), stock operators (`stock`), examples `demo` (the two demonstration graphs) and `pulsar-e2e` |
 
 Rust 1.95 minimum, edition 2024. Everything that does I/O is generic over
 `moonpool_core::Providers`: use `moonpool_core::select!`, never
@@ -192,12 +206,83 @@ exactly-once.
     share it. Every new version is a new plan generation, which is what
     fences an instance still running the previous description.
 
-`streaming_runtime::mutation` holds sixteen **planted bugs** in its bench, one per precaution
+## The SDK layer, and what must not be broken
+
+The engine knows nothing of `Source`, `Sink` and `Transformer`: it drives
+`SourceConnector`/`PartitionReader`, `SinkConnector` and type-erased
+`DynMap`/`DynKey`/`WindowAssigner`/`DynAggregator` built by a `Registry`. The
+traits are adapted to these in `streaming-core/src/pipe.rs`
+(`Registry::source`, `sink`, `transformer`; a `GraphBuilder` calls them for
+the operators it names, `App` collects them).
+
+1. **The code of a source or a sink runs inside the engine's calls**
+   (`poll`, `ack`, `end_position`, `write`): its future is polled there and
+   nowhere else. No task is spawned, so nothing outlives a simulated crash,
+   a run is deterministic, and backpressure is exact: a source is never more
+   than one read ahead of the engine (`SourcePipe::send` waits once the pipe
+   holds what the last `poll` asked for).
+2. **A batch is written once its sink said so** (`Batch::done`). A sink that
+   says it failed, asks for the next batch, returns, or whose write the
+   engine gave up, leaves the batch unwritten: the engine sends it again, to
+   a sink started again in the last two cases. Planted bug:
+   `ConfirmWithoutTheSink`.
+3. **A source learns of a commit after it happened**, through
+   `SourcePipe::committed` (the latest position when several were missed).
+   The engine does not wait for the source to have acknowledged: a source
+   that pushes acknowledges during the following calls.
+4. **Where a partition ends** is what the source said last (`SourcePipe::end`)
+   and never before the last record it pushed: a record waiting in the pipe
+   must not let the engine take the partition for idle and close windows
+   over it. A source that says nothing is idle as soon as it has pushed
+   nothing more. Saying an end older than a record the source has not read
+   yet is the source's mistake, and closes windows too early.
+5. **A source built on a connector hands it the partition**
+   (`SourcePipe::read`): every call of the engine then goes straight to the
+   connector's reader, with the exact contract the engine was validated
+   against, and a commit received while the partition was being opened is
+   passed on. This is what Pulsar does; the simulation runs both ways
+   (`Scenario::piped`). Likewise `SinkPipe::write_with` for sinks (Warp 10,
+   Pulsar).
+6. **A transformer is one node, hence one kind**: any number of maps and
+   filters in a row (fused), or one `key_by`, or one window, or one
+   aggregate. `Registry::transformer` calls `transform` on an example to
+   learn the kind and the types; what a transformer is must not depend on
+   its configuration (a node whose configuration changes its kind is refused
+   when it starts). `Keyed<T>` and `Windows<T>` only exist for the compiler:
+   the values that flow are `T`.
+7. **An operator written for several types has one factory per type**
+   (registry *variants*: `impl<T> Sink<T>`, `impl<T> Transformer<Windows<T>>
+   for Count`). The engine and `App::check` pick the one registered for what
+   feeds the node (`Registry::get_for`, `OpDescriptor::signatures`,
+   `output_for`). `Opaque` registers a type-agnostic transformer once for any
+   type, which is how `Registry::standard()` serves graphs written by hand.
+8. **The stored configuration of a node is its operator as JSON**: camelCase
+   names, unknown fields refused, a parameter that may be absent and has no
+   value left out. This is part of the declaration fingerprint: changing how
+   an operator serializes makes every graph naming it a new declaration.
+   A configuration is checked (bounds, then `check = ...`) by the factory of
+   every kind and by `App::check` when the binary starts
+   (`Registry::accepts`); a secret its tenant lacks is refused when a source
+   or a sink is built, before anything starts.
+
+`streaming-core/tests/pipes.rs` holds the adapters to these points one by
+one; the simulation holds them under faults.
+
+`streaming_core::mutation` (shown as `streaming_runtime::mutation`) holds seventeen **planted bugs** in its bench, one per precaution
 above (`SIM_MUTANT=<name>` plants a single one). `CloseWithoutClaim` is
 noticed by the `Auditor`: closing a log without the claim voids its head, and
 a log that still holds fields but no head is history going backwards (every
 run of the two repartition scenarios of the bench). When you add a precaution, add its mutant and make the simulation
 notice it.
+
+One precaution has no planted bug, point 4 of the SDK layer (the end of a
+partition is never before what its source pushed). The engine asks for the
+end right after a read that emptied the pipe, and in a simulation nothing
+runs between the two calls: a source can only push in between when
+something outside the engine's task feeds it, another thread say. Planted,
+the bug went unnoticed in 144 runs, as it had to. The precaution is held by
+`the_end_of_a_partition_is_what_the_source_says_and_never_before_what_it_pushed`
+in `streaming-core/tests/pipes.rs`.
 
 ## Verifying
 
@@ -206,8 +291,10 @@ cargo +nightly fmt --all                                  # rustfmt.toml uses ni
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p streaming-sim --features mutants --all-targets -- -D warnings
 cargo test --workspace                                   # every crate, a few minutes
+cargo test -p streaming-core --test pipes                # the pipes of sources and sinks, in a second
 SIM_ITERATIONS=200 SIM_CONFIGS=40 cargo test --release -p streaming-sim --test exactly_once
 SIM_ITERATIONS=8 cargo test --release -p streaming-sim --features mutants --test mutants -- --nocapture
+SIM_PIPED=1 SIM_MUTANT=<name> ...                        # the bench, every scenario reading through a source that pushes
 SIM_SEEDS=<seed> cargo test -p streaming-sim --test exactly_once <test> -- --nocapture   # replay
 SIM_CONFIG_SEED=<n> cargo test -p streaming-sim --test exactly_once exactly_once_in_random_configurations
 SIM_REPORT=1 ...                                         # print coverage of the assert_sometimes
@@ -246,7 +333,16 @@ The harness (`streaming-sim/src/lib.rs`):
 - **Faults**: reboots (Moonpool attrition); KV commands lost, applied without
   reply, applied *after their sender was told they failed* (even after its
   death), stalled for seconds; source redeliveries and cut batches; sinks
-  failing half-way; drifting worker clocks.
+  failing half-way, and not confirming a batch in each of the three ways a
+  sink has (saying so, asking for the next one, stopping); drifting worker
+  clocks.
+- **Operators**: the source, the sinks and the transformers of the simulated
+  graph are written on the SDK traits and found through the registry like
+  any application's; their world reaches them through `Shared`. The source
+  reads its topic in one of two ways (`Scenario::piped`, drawn in random
+  configurations): handing its partition to the connector the engine drives
+  (`ChaosSource`, as before the traits), or pushing into its pipe, with the
+  same faults.
 - **Checks**: every event counted exactly once on four paths (windowed count,
   stateless, diamond, second-level aggregation); committed history never goes
   backwards nor loses its head (`Auditor`, every 100 ms); nothing acknowledged before being
@@ -254,7 +350,8 @@ The harness (`streaming-sim/src/lib.rs`):
   lands); no window state or orphan log left after settling; logs stay small;
   a commit under the plan in force comes from a binary that declares the
   description this plan was computed from (also checked as it lands).
-- **Scenarios**: twenty-two hand-written ones plus random configurations
+- **Scenarios**: twenty-seven hand-written ones (five of them with a source
+  that pushes) plus random configurations
   (`Scenario::random`). A failing run prints `[VIOLATION] seed=...` and a
   dump of the cluster state. With `Scenario::deploy` the workers are
   instances of an application: they publish the graph of their release when
@@ -270,8 +367,31 @@ The harness (`streaming-sim/src/lib.rs`):
   workloads wait on `ctx.shutdown()`; without pinned seeds each run explores
   new ones; a "did not settle" may be a configuration too slow for the
   900 s timeout rather than a deadlock — look at whether progress is made.
+- Simulated time only passes when every task waits. A fault that answers at
+  once must therefore be bounded, or a seed never ends: the simulated broker
+  rewound at every read, redelivered more than it delivered when asked for a
+  single record (an engine one record short of a full batch, lingering for
+  the last), and the engine read redeliveries for ever at the same instant.
+  It now rewinds only once it has delivered again what it rewound over
+  (`may_rewind`). Seed 5278357632631441426 of the second scenario of the
+  bench, with `SIM_PIPED=1`, lasted over seven minutes before that; the
+  handed reader did the same.
 
-Last validated state (declarations): 3,000 runs of the two deployment
+Last validated state (SDK traits): the hand-written suite at 200 seeds per
+scenario; 2,700 runs of the bench's scenarios
+without a planted bug, half of them through a source that pushes, none
+lasting more than a fraction of a second; the sixteen planted bugs noticed
+one at a time over 72 runs each, from `ForgetAtOnce` (2 runs),
+`JoinWithoutWatermark` (5) and `CommitBelowTheSeal` (6) to
+`AckBeforeCommit`, `DeleteByTheIndexEntry` and `DeleteWithoutClosing` (all
+72), `ConfirmWithoutTheSink` in 53 of 72 through the handed connector and
+55 of 72 through a source that pushes. The simulated operators having moved
+to the SDK traits and the broker's redeliveries being bounded, the six least
+noticed were run on the previous harness too, at the same rates
+(`ForgetAtOnce`: 15 runs of 256 before, 12 of 288 after). The sixteen were
+noticed with `SIM_PIPED=1` as well, at the same rates.
+
+Before that (declarations): 3,000 runs of the two deployment
 scenarios, the hand-written suite, 680 random configurations, and the four
 planted bugs of the declarations noticed one at a time (`RunAnotherDeclaration`
 and `AsideByTheIndexEntry` in nearly every deployment run,
@@ -366,6 +486,33 @@ After changing anything under `crates/streaming-api/ui/`, rebuild the
 application (the UI is embedded) and check it in a real browser.
 
 ## Known limits and open questions
+
+- **The API accepts a value its operator refuses.** The catalogue says the
+  name, kind, default and choices of a parameter, not its bounds
+  (`#[param(min, max)]`) nor what `check = ...` refuses: `PATCH
+  .../nodes/{node}/config` with `latencyMs: 70000` on the demo's slow sink is
+  stored, and the slices of the node then fail to start, saying
+  "`latencyMs` must be at most 60000" until the field is set again. It was so
+  before the traits (the factory refused). Natural next step, offered to the
+  owner: carry the bounds in `ParamSpec`, refuse in the API with new error
+  codes, and bound the inputs of the UI.
+- **A source that pushes acknowledges late, and answers for its end.** The
+  engine does not wait for it after a commit (point 3 of the SDK layer): the
+  last acknowledgement before a slice stops may never reach the broker, which
+  then redelivers, and the engine drops what it already processed. And the
+  engine believes what the source says of the end of its partition (point 4).
+  A source on a real broker should be built on a connector
+  (`SourcePipe::read`), as Pulsar is, until the pipe carries both exchanges
+  as questions the engine waits on.
+- `SourcePipe::read` and `Pipe` rely on things the compiler does not check:
+  the connector handed a partition must give values of the source's `Out`
+  (a mismatch is refused by the first operator downstream, at run time), and
+  `map`, `filter` and `key_by` asked of a `Pipe<Keyed<_>>` or
+  `Pipe<Windows<_>>` compile, and are refused when the operator is
+  registered (the markers are recognized by their type name).
+- A tuple structure, a generic one and an enumeration cannot derive
+  `Operator`; an operator with generic behaviour implements its traits for
+  several types instead (`impl<T> Sink<T>`).
 
 - **No algorithm splits a node into several actors.** Parallelism follows
   the source partitions; the controller only moves whole slices off a worker

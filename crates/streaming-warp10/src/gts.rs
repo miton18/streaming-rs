@@ -112,7 +112,7 @@ impl From<String> for GtsValue {
 
 /// Time unit of the Warp 10 platform (`warp.timeunits`). The default of Warp 10
 /// is microseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, streaming_core::Param)]
 pub enum TimeUnit {
     /// Milliseconds.
     Ms,

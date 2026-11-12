@@ -1,17 +1,59 @@
 //! streaming-rs, the SDK: a cluster's graphs are Rust code.
 //!
-//! An application declares its tenants, its operators and its graphs, then
-//! hands control to [`App::main`], which turns the binary into a worker:
+//! An application declares its tenants and its graphs, then hands control to
+//! [`App::main`], which turns the binary into a worker. An operator is a
+//! structure: its name and its fields are its reference and its
+//! configuration ([`core::Operator`]), and what it does is a trait, a
+//! [`core::Source`], a [`core::Sink`], or a [`core::Transformer`] for
+//! everything in between. Naming an operator in a graph registers it.
 //!
 //! ```no_run
-//! use streaming::{App, core::{GraphBuilder, stdops::{Count, Tumbling}}};
-//! # fn my_graph() -> GraphBuilder { unimplemented!() }
+//! use std::time::Duration;
+//! use streaming::{
+//!     App,
+//!     core::{GraphBuilder, Keyed, Operator, Pipe, Transformer, stdops::{Count, Tumbling}},
+//!     runtime::builtin::KvSink,
+//!     stock::CountToJson,
+//! };
+//! # use streaming::core::{Context, OpError, Position, Source, SourcePipe, moonpool_core::Providers};
+//! # #[derive(Debug, Clone, Operator)]
+//! # #[operator("acme/words@1")]
+//! # struct Words;
+//! # impl Source for Words {
+//! #     type Out = String;
+//! #     async fn partitions<P: Providers>(&self, _: &Context<P>) -> Result<u32, OpError> { Ok(1) }
+//! #     async fn start<P: Providers>(&self, _: &Context<P>, _: u32, _: Option<Position>, out: SourcePipe<String>) -> Result<(), OpError> {
+//! #         out.closed().await;
+//! #         Ok(())
+//! #     }
+//! # }
+//!
+//! /// Groups words by their first letter.
+//! #[derive(Debug, Clone, Operator)]
+//! #[operator("acme/by-initial@1")]
+//! struct ByInitial;
+//!
+//! impl Transformer<String> for ByInitial {
+//!     type Out = Keyed<String>;
+//!
+//!     fn transform(&self, input: Pipe<String>) -> Pipe<Keyed<String>> { input.key_by(|word| word.chars().next()) }
+//! }
+//!
+//! fn words_per_initial() -> GraphBuilder {
+//!     let mut graph = GraphBuilder::new("acme", "words-per-initial");
+//!     let words = graph.source("words", Words);
+//!     let by_initial = graph.then(words, "by-initial", ByInitial);
+//!     let window = graph.then(by_initial, "window", Tumbling::of(Duration::from_secs(300)));
+//!     let count = graph.then(window, "count", Count);
+//!     let rows = graph.then(count, "rows", CountToJson);
+//!     graph.sink(rows, "results", KvSink::default());
+//!     graph
+//! }
 //!
 //! fn main() -> std::process::ExitCode {
 //!     App::new()
 //!         .tenant("acme", "Acme Corporation")
-//!         .operators(|registry| { /* registry.register_map(...) */ })
-//!         .graph(my_graph())
+//!         .graph(words_per_initial())
 //!         .main()
 //! }
 //! ```
@@ -37,8 +79,8 @@
 //! - `worker` runs one worker against a Redis-protocol store (Redis or
 //!   Materia KV), and the HTTP API and web UI with `--listen`.
 //!
-//! Besides the connectors, the stock operators of [`stock`] are registered in
-//! every application.
+//! The connectors and the stock operators of [`stock`] come with every
+//! application.
 
 pub mod stock;
 
@@ -60,8 +102,8 @@ use streaming_api::{
 };
 pub use streaming_core as core;
 use streaming_core::{
-    Clock, DynKv, EnvSecrets, GraphBuilder, GraphKey, GraphSpec, Kv, MemKv, OpFactory, Registry, SecretProvider,
-    SystemClock, TenantId, WorkerId,
+    Clock, DynKv, EnvSecrets, GraphBuilder, GraphKey, GraphSpec, Kv, MemKv, Operators, Registry, SecretProvider,
+    Shared, SystemClock, TenantId, WorkerId,
 };
 use streaming_kv_redis::{RedisConfig, RedisKv};
 #[cfg(feature = "pulsar")]
@@ -72,13 +114,10 @@ pub use streaming_warp10 as warp10;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-/// A store for registries built only to read their catalog.
-fn scratch_kv() -> DynKv { MemKv::shared() }
-
 /// The registry the operators of an application are registered in.
 pub type AppRegistry = Registry<TokioProviders>;
 
-type Operators = Arc<dyn Fn(&mut AppRegistry) + Send + Sync>;
+type Registered = Arc<dyn Fn(&mut AppRegistry) + Send + Sync>;
 
 /// How often a worker checks that the store still holds what its code
 /// declares, to publish again when it does not.
@@ -91,9 +130,13 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Default)]
 pub struct App {
     tenants: Vec<(TenantId, Option<String>)>,
-    operators: Vec<Operators>,
+    operators: Vec<Registered>,
+    /// The operators the nodes of each graph name.
+    named: Vec<(GraphKey, Operators)>,
     graphs: Vec<GraphSpec>,
     problems: Vec<String>,
+    /// What the operators of this process share, whatever the worker.
+    shared: Arc<Shared>,
 }
 
 impl App {
@@ -115,23 +158,29 @@ impl App {
         self
     }
 
-    /// Register operators. `register` is called once for every worker the
-    /// process runs, on a registry that already holds the stock operators.
+    /// Register operators by hand: those no graph names, or built at a lower
+    /// level than [`streaming_core::Source`], [`streaming_core::Sink`] and
+    /// [`streaming_core::Transformer`], which a graph registers by naming
+    /// them. `register` is called once for every worker the process runs, on
+    /// a registry that already holds the stock operators.
     #[must_use]
     pub fn operators(mut self, register: impl Fn(&mut AppRegistry) + Send + Sync + 'static) -> Self {
         self.operators.push(Arc::new(register));
         self
     }
 
-    /// Add a graph.
+    /// Add a graph, and the operators its nodes name.
     #[must_use]
     pub fn graph(mut self, graph: GraphBuilder) -> Self {
-        match graph.build() {
-            Ok(spec) if self.graphs.iter().any(|known| known.key() == spec.key()) => {
+        match graph.into_parts() {
+            Ok((spec, _)) if self.graphs.iter().any(|known| known.key() == spec.key()) => {
                 self.problems
                     .push(format!("the graph `{}` is declared twice", spec.key()));
             }
-            Ok(spec) => self.graphs.push(spec),
+            Ok((spec, operators)) => {
+                self.named.push((spec.key(), operators));
+                self.graphs.push(spec);
+            }
             Err(error) => self.problems.push(format!("a graph is invalid: {error}")),
         }
         self
@@ -141,18 +190,28 @@ impl App {
     #[must_use]
     pub fn graphs(&self) -> &[GraphSpec] { &self.graphs }
 
-    /// The operators of the application, stock ones included, for a worker
-    /// whose store is `kv`.
+    /// The operators of the application, stock ones included: those
+    /// registered by hand, then those its graphs name.
     #[must_use]
-    pub fn registry(&self, kv: &DynKv) -> AppRegistry {
+    pub fn registry(&self) -> AppRegistry { self.registered().0 }
+
+    /// The registry, and the operators of the graphs that cannot be
+    /// registered, said in words.
+    fn registered(&self) -> (AppRegistry, Vec<String>) {
         let mut registry = AppRegistry::standard();
-        builtin::register(&mut registry, kv.clone());
+        builtin::register(&mut registry);
         streaming_warp10::register(&mut registry);
         stock::register(&mut registry);
         for register in &self.operators {
             register(&mut registry);
         }
-        registry
+        let mut problems = Vec::new();
+        for (graph, operators) in &self.named {
+            for (node, error) in operators.register(&mut registry) {
+                problems.push(format!("node `{node}` of the graph `{graph}`: {error}"));
+            }
+        }
+        (registry, problems)
     }
 
     /// Why the application cannot run: a declaration that is invalid, or a
@@ -164,7 +223,8 @@ impl App {
     pub fn check(&self) -> Result<(), Error> {
         let mut problems = self.problems.clone();
         let declared: BTreeSet<&TenantId> = self.tenants.iter().map(|(tenant, _)| tenant).collect();
-        let registry = self.registry(&scratch_kv());
+        let (registry, unregistered) = self.registered();
+        problems.extend(unregistered);
         let catalog = registry.catalog();
         for spec in &self.graphs {
             if !declared.contains(&spec.tenant) {
@@ -174,21 +234,23 @@ impl App {
                     spec.tenant
                 ));
             }
-            if let Err(error) = streaming_core::Topology::build(spec, &catalog) {
-                problems.push(format!("the graph `{}` is invalid: {error}", spec.key()));
-                continue;
-            }
-            // What the code stored is what the operators accept. Sources and
-            // sinks are built against a store and a clock: they check their
-            // configuration when their instances start.
+            let topology = match streaming_core::Topology::build(spec, &catalog) {
+                Ok(topology) => topology,
+                Err(error) => {
+                    problems.push(format!("the graph `{}` is invalid: {error}", spec.key()));
+                    continue;
+                }
+            };
+            // What the code stored is what the operators accept. What a
+            // source or a sink needs the outside world for (a secret, a
+            // broker) is found when its instances start.
             for node in &spec.nodes {
-                let accepted = match registry.get(&node.op).map(|(_, factory)| factory) {
-                    Some(OpFactory::Map(factory)) => factory(&node.config).map(drop),
-                    Some(OpFactory::Key(factory)) => factory(&node.config).map(drop),
-                    Some(OpFactory::Window(factory)) => factory(&node.config).map(drop),
-                    Some(OpFactory::Aggregate(factory)) => factory(&node.config).map(drop),
-                    _ => Ok(()),
-                };
+                let fed = topology
+                    .inputs
+                    .get(&node.id)
+                    .and_then(|inputs| inputs.first())
+                    .and_then(|input| topology.types.get(input));
+                let accepted = registry.accepts(&node.op, fed, &node.config);
                 if let Err(error) = accepted {
                     problems.push(format!("node `{}` of the graph `{}`: {error}", node.id, spec.key()));
                 }
@@ -214,7 +276,7 @@ impl App {
     /// on stderr what changed (`again`: only what changed since the previous
     /// publication of this process).
     async fn publish(&self, kv: &dyn Kv, clock: &dyn Clock, publisher: &Publisher, again: bool) -> Result<(), Error> {
-        let catalog = self.registry(&scratch_kv()).catalog();
+        let catalog = self.registry().catalog();
         let publication = control::publish(kv, clock, &catalog, &self.tenants, &self.graphs, publisher).await?;
         for tenant in &publication.created_tenants {
             eprintln!("  tenant {tenant} created");
@@ -409,8 +471,10 @@ pub enum Mode {
     },
 }
 
-fn environment(kv: DynKv, registry: AppRegistry, secrets: Arc<dyn SecretProvider>) -> RuntimeEnv<TokioProviders> {
+fn environment(app: &App, kv: DynKv, secrets: Arc<dyn SecretProvider>) -> RuntimeEnv<TokioProviders> {
+    let registry = app.registry();
     RuntimeEnv {
+        shared: app.shared.clone(),
         providers: TokioProviders::new(),
         kv,
         clock: Arc::new(SystemClock),
@@ -516,7 +580,7 @@ async fn standalone(
         let mut config = WorkerConfig::new(id.clone());
         config.api_addr = Some(address.to_string());
         config.declared = Some(app.declared());
-        let mut worker = Worker::new(environment(kv.clone(), app.registry(&kv), Arc::new(EnvSecrets)), config);
+        let mut worker = Worker::new(environment(&app, kv.clone(), Arc::new(EnvSecrets)), config);
         if gossip_port != 0 {
             // The in-process workers gossip over loopback, like separate
             // machines would: the first one is everybody's seed.
@@ -617,10 +681,7 @@ async fn worker(
     }
 
     let worker_id = worker_config.worker.clone();
-    let mut worker = Worker::new(
-        environment(kv.clone(), app.registry(&kv), Arc::new(EnvSecrets)),
-        worker_config,
-    );
+    let mut worker = Worker::new(environment(&app, kv.clone(), Arc::new(EnvSecrets)), worker_config);
     if let Some(gossip_listen) = gossip.listen {
         let advertise = gossip.advertise.unwrap_or_else(|| gossip_listen.clone());
         let config = gossip_config(&gossip.cluster, &worker_id, &gossip_listen, &advertise, gossip.seeds);
@@ -658,13 +719,16 @@ mod tests {
     }
 
     fn graph(tenant: &str, name: &str, window: &str) -> GraphBuilder {
-        use streaming_core::stdops::{Count, Identity, Tumbling};
+        use streaming_core::{
+            Keyed,
+            stdops::{Count, Identity, Tumbling},
+        };
         let mut graph = GraphBuilder::new(tenant, name);
         // `std/identity@1` stands for a source and a key: only the wiring
         // and the configurations are looked at here.
-        let events = graph.node("events", Identity);
-        let window = graph.then(events, window, Tumbling::of(std::time::Duration::from_secs(5)));
-        graph.then(window, "count", Count);
+        let events = graph.node("events", Identity).typed::<Keyed<u8>>();
+        let windows = graph.then(events, window, Tumbling::of(std::time::Duration::from_secs(5)));
+        graph.then(windows, "count", Count);
         graph
     }
 
@@ -697,120 +761,245 @@ mod tests {
         assert_eq!(app.graphs().len(), 2);
     }
 
-    /// Stands for an operator of any kind; its configuration is refused.
-    #[derive(serde::Serialize)]
-    struct Refused(&'static str);
-
-    impl streaming_core::builder::Operator for Refused {
-        const OP: &'static str = "test/refused@1";
-    }
-
-    #[test]
-    fn every_kind_of_operator_checks_its_configuration() {
-        use std::sync::Arc;
+    mod standins {
         use streaming_core::{
-            OpError, OpKind, OpRef, TypeTag,
-            builder::Operator,
-            registry::{OpDescriptor, OpFactory},
+            Context, Keyed, OpError, Operator, Pipe, Position, Sink, SinkPipe, Source, SourcePipe, Transformer,
+            Windowed, Windows, moonpool_core::Providers,
         };
-        let refuse = || OpError::Config("refused".into());
-        let kinds = [OpKind::Map, OpKind::KeyBy, OpKind::Window, OpKind::Aggregate];
-        for kind in kinds {
-            let app = App::new()
-                .tenant("acme", "Acme")
-                .operators(move |registry| {
-                    let factory = match kind {
-                        OpKind::Map => OpFactory::Map(Arc::new(move |_: &serde_json::Value| Err(refuse()))),
-                        OpKind::KeyBy => OpFactory::Key(Arc::new(move |_: &serde_json::Value| Err(refuse()))),
-                        OpKind::Window => OpFactory::Window(Arc::new(move |_: &serde_json::Value| Err(refuse()))),
-                        _ => OpFactory::Aggregate(Arc::new(move |_: &serde_json::Value| Err(refuse()))),
-                    };
-                    registry.register_sink(Out::OP, "", TypeTag::Any, |_, _| Err(OpError::Config("unused".into())));
-                    registry.register_key(Keyed::OP, "", |(): &()| 0_u8);
-                    registry.register_source::<()>(Events::OP, "", |_, _| Err(OpError::Config("unused".into())));
-                    registry.register(
-                        OpDescriptor {
-                            op: OpRef::new(Refused::OP).unwrap(),
-                            kind,
-                            input: TypeTag::Any,
-                            output: TypeTag::Any,
-                            description: String::new(),
-                            params: Vec::new(),
-                        },
-                        factory,
-                    );
-                })
-                .graph(refused_graph(kind));
-            let problems = problems(&app);
-            assert!(
-                problems.contains("node `refused` of the graph `acme/g`: invalid operator configuration: refused"),
-                "{kind:?}: {problems}"
-            );
+
+        /// What a configuration that cannot run is refused with.
+        fn refuse<T>(_: &T) -> Result<(), OpError> { Err(OpError::Config("refused".into())) }
+
+        /// Stands for a source.
+        #[derive(Operator)]
+        #[operator("test/events@1")]
+        pub struct Events;
+
+        /// Stands for a source whose configuration is refused.
+        #[derive(Operator)]
+        #[operator("test/refused-events@1", check = refuse)]
+        pub struct RefusedEvents;
+
+        macro_rules! sources {
+            ($($source:ty),*) => {$(
+                impl Source for $source {
+                    type Out = u8;
+
+                    async fn partitions<P: Providers>(&self, _: &Context<P>) -> Result<u32, OpError> { Ok(1) }
+
+                    async fn start<P: Providers>(
+                        &self,
+                        _: &Context<P>,
+                        _: u32,
+                        _: Option<Position>,
+                        out: SourcePipe<u8>,
+                    ) -> Result<(), OpError> {
+                        out.closed().await;
+                        Ok(())
+                    }
+                }
+            )*};
         }
+        sources!(Events, RefusedEvents);
+
+        /// Stands for a map whose configuration is refused.
+        #[derive(Operator)]
+        #[operator("test/refused-map@1", check = refuse)]
+        pub struct RefusedMap;
+
+        impl Transformer<u8> for RefusedMap {
+            type Out = u8;
+
+            fn transform(&self, input: Pipe<u8>) -> Pipe<u8> { input.map(|value| *value) }
+        }
+
+        /// Stands for a key extractor.
+        #[derive(Operator)]
+        #[operator("test/key@1")]
+        pub struct ByValue;
+
+        /// Stands for a key extractor whose configuration is refused.
+        #[derive(Operator)]
+        #[operator("test/refused-key@1", check = refuse)]
+        pub struct RefusedKey;
+
+        macro_rules! keys {
+            ($($key:ty),*) => {$(
+                impl Transformer<u8> for $key {
+                    type Out = Keyed<u8>;
+
+                    fn transform(&self, input: Pipe<u8>) -> Pipe<Keyed<u8>> { input.key_by(|value| *value) }
+                }
+            )*};
+        }
+        keys!(ByValue, RefusedKey);
+
+        /// Stands for a window whose configuration is refused.
+        #[derive(Operator)]
+        #[operator("test/refused-window@1", check = refuse)]
+        pub struct RefusedWindow;
+
+        impl Transformer<Keyed<u8>> for RefusedWindow {
+            type Out = Windows<u8>;
+
+            fn transform(&self, input: Pipe<Keyed<u8>>) -> Pipe<Windows<u8>> {
+                input.window(std::time::Duration::ZERO, |_, _| {})
+            }
+        }
+
+        /// Stands for an aggregate whose configuration is refused.
+        #[derive(Operator)]
+        #[operator("test/refused-count@1", check = refuse)]
+        pub struct RefusedCount;
+
+        impl Transformer<Windows<u8>> for RefusedCount {
+            type Out = Windowed<u64>;
+
+            fn transform(&self, input: Pipe<Windows<u8>>) -> Pipe<Windowed<u64>> {
+                input.aggregate(|| 0_u64, |count, _| *count += 1, |count, other| *count += other)
+            }
+        }
+
+        /// Stands for a sink.
+        #[derive(Operator)]
+        #[operator("test/out@1")]
+        pub struct Out;
+
+        /// Stands for a sink whose configuration is refused.
+        #[derive(Operator)]
+        #[operator("test/refused-out@1", check = refuse)]
+        pub struct RefusedOut;
+
+        macro_rules! sinks {
+            ($($sink:ty),*) => {$(
+                impl Sink<Windowed<u64>> for $sink {
+                    async fn start<P: Providers>(
+                        &self,
+                        _: &Context<P>,
+                        mut input: SinkPipe<Windowed<u64>>,
+                    ) -> Result<(), OpError> {
+                        while let Some(batch) = input.next().await {
+                            batch.done();
+                        }
+                        Ok(())
+                    }
+                }
+            )*};
+        }
+        sinks!(Out, RefusedOut);
     }
 
-    /// A valid graph in which the node `refused` is of kind `kind`.
+    /// A valid graph in which the node `refused`, of kind `kind`, has a
+    /// configuration its operator refuses.
     fn refused_graph(kind: streaming_core::OpKind) -> GraphBuilder {
+        use standins::*;
         use streaming_core::{
             OpKind,
             stdops::{Count, Tumbling},
         };
         let mut graph = GraphBuilder::new("acme", "g");
-        let events = graph.node("events", Events);
-        let window = std::time::Duration::from_secs(5);
-        let refused = |graph: &mut GraphBuilder, up| graph.then(up, "refused", Refused("r"));
+        let events = if kind == OpKind::Source {
+            graph.source("refused", RefusedEvents)
+        } else {
+            graph.source("events", Events)
+        };
         let fed = if kind == OpKind::Map {
-            refused(&mut graph, events)
+            graph.then(events, "refused", RefusedMap)
         } else {
             events
         };
         let keyed = if kind == OpKind::KeyBy {
-            refused(&mut graph, fed)
+            graph.then(fed, "refused", RefusedKey)
         } else {
-            graph.then(fed, "key", Keyed)
+            graph.then(fed, "key", ByValue)
         };
-        let windowed = if kind == OpKind::Window {
-            refused(&mut graph, keyed)
+        let windows = if kind == OpKind::Window {
+            graph.then(keyed, "refused", RefusedWindow)
         } else {
-            graph.then(keyed, "window", Tumbling::of(window))
+            graph.then(keyed, "window", Tumbling::of(std::time::Duration::from_secs(5)))
         };
-        let counted = if kind == OpKind::Aggregate {
-            refused(&mut graph, windowed)
+        let counts = if kind == OpKind::Aggregate {
+            graph.then(windows, "refused", RefusedCount)
         } else {
-            graph.then(windowed, "count", Count)
+            graph.then(windows, "count", Count)
         };
-        graph.then(counted, "out", Out);
+        if kind == OpKind::Sink {
+            graph.sink(counts, "refused", RefusedOut);
+        } else {
+            graph.sink(counts, "out", Out);
+        }
         graph
     }
 
-    /// Stands for a sink.
-    #[derive(serde::Serialize)]
-    struct Out;
-
-    impl streaming_core::builder::Operator for Out {
-        const OP: &'static str = "test/out@1";
+    /// An application is refused when it starts, whatever the kind of the
+    /// operator that refuses the configuration its code gives it.
+    #[test]
+    fn every_kind_of_operator_checks_its_configuration() {
+        use streaming_core::OpKind;
+        let kinds = [
+            (OpKind::Source, "test/refused-events@1"),
+            (OpKind::Map, "test/refused-map@1"),
+            (OpKind::KeyBy, "test/refused-key@1"),
+            (OpKind::Window, "test/refused-window@1"),
+            (OpKind::Aggregate, "test/refused-count@1"),
+            (OpKind::Sink, "test/refused-out@1"),
+        ];
+        for (kind, op) in kinds {
+            let app = App::new().tenant("acme", "Acme").graph(refused_graph(kind));
+            assert_eq!(
+                problems(&app),
+                format!("node `refused` of the graph `acme/g`: invalid operator configuration: {op}: refused"),
+                "{kind:?}"
+            );
+        }
+        // The same graphs are accepted once nothing refuses.
+        let mut graph = GraphBuilder::new("acme", "g");
+        let events = graph.source("events", standins::Events);
+        let keyed = graph.then(events, "key", standins::ByValue);
+        let windows = graph.then(
+            keyed,
+            "window",
+            streaming_core::stdops::Tumbling::of(std::time::Duration::from_secs(5)),
+        );
+        let counts = graph.then(windows, "count", streaming_core::stdops::Count);
+        graph.sink(counts, "out", standins::Out);
+        App::new()
+            .tenant("acme", "Acme")
+            .graph(graph)
+            .check()
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
-    /// Stands for a key extractor.
-    #[derive(serde::Serialize)]
-    struct Keyed;
-
-    impl streaming_core::builder::Operator for Keyed {
-        const OP: &'static str = "test/key@1";
-    }
-
-    /// Stands for a source.
-    #[derive(serde::Serialize)]
-    struct Events;
-
-    impl streaming_core::builder::Operator for Events {
-        const OP: &'static str = "test/events@1";
+    /// An operator registered by hand, below the traits, is still there, and
+    /// a graph may name it without saying what flows.
+    #[test]
+    fn operators_are_still_registered_by_hand() {
+        use streaming_core::{
+            Operator,
+            stdops::{Count, Tumbling},
+        };
+        #[derive(Operator)]
+        #[operator("test/by-hand@1")]
+        struct ByHand;
+        let mut graph = GraphBuilder::new("acme", "g");
+        let events = graph.source("events", standins::Events);
+        let keyed = graph.node("key", ByHand).typed::<streaming_core::Keyed<u8>>();
+        graph.edge(events, keyed);
+        let windows = graph.then(keyed, "window", Tumbling::of(std::time::Duration::from_secs(5)));
+        let counts = graph.then(windows, "count", Count);
+        graph.sink(counts, "out", standins::Out);
+        let app = App::new().tenant("acme", "Acme").graph(graph);
+        assert!(problems(&app).contains("test/by-hand@1"), "{}", problems(&app));
+        let app = app.operators(|registry| {
+            registry.register_key(ByHand::OP, "By value.", |value: &u8| *value);
+        });
+        app.check().unwrap_or_else(|error| panic!("{error}"));
     }
 
     #[test]
     fn an_application_without_graphs_is_valid() {
         App::new().tenant("acme", "Acme").check().unwrap();
-        assert!(App::new().registry(&scratch_kv()).catalog().ops.len() >= 8);
+        assert!(App::new().registry().catalog().ops.len() >= 8);
     }
 
     #[test]

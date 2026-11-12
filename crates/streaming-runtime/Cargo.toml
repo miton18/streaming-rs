@@ -11,7 +11,7 @@ default = ["gossip"]
 # Membership through the Scuttlebutt gossip of `streaming-gossip`.
 gossip = ["dep:streaming-gossip"]
 # Bugs planted on purpose, for the simulation to notice. Never in production.
-mutants = []
+mutants = ["streaming-core/mutants"]
 
 [dependencies]
 streaming-core.workspace = true

@@ -2,18 +2,29 @@
 //! description (`acme/decode-event@1`) and the Rust code compiled into a worker.
 
 use crate::{
+    builder::Operator,
     clock::{Clock, SecretProvider},
     data::{Datum, Key, datum},
     ids::{GraphId, NodeId, OpRef, TenantId},
+    kv::DynKv,
     ops::{
         Aggregator, DynAggregator, DynKey, DynMap, OpError, SinkConnector, SourceConnector, TypedAggregator,
         WindowAssigner, downcast,
     },
+    param::Secret,
+    pipe::{self, Built, Sink, Source, Transformer},
 };
-use moonpool_core::Providers;
+use moonpool_core::{Providers, TimeProvider};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::{any::Any, collections::BTreeMap, fmt, sync::Arc};
+use std::{
+    any::{Any, TypeId},
+    collections::{BTreeMap, HashMap},
+    fmt,
+    sync::Arc,
+    time::Duration,
+};
 
 /// What a node does in a graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema)]
@@ -121,10 +132,45 @@ pub struct OpDescriptor {
     /// One-line human description.
     #[serde(default)]
     pub description: String,
-    /// The parameters of its configuration, for tools that build graphs.
-    /// Empty when the operator takes none, or does not say.
+    /// The parameters of its configuration the API and the UI may change.
+    /// Empty when the operator exposes none.
     #[serde(default)]
     pub params: Vec<ParamSpec>,
+    /// What the operator takes and gives, case by case, when it is written
+    /// for several types and its output depends on its input. Empty
+    /// otherwise: `input` and `output` say it all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signatures: Vec<Signature>,
+}
+
+/// One of the types an operator accepts, and what it produces from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Signature {
+    /// Type of the accepted values.
+    pub input: TypeTag,
+    /// Type of the values produced from them.
+    pub output: TypeTag,
+}
+
+impl OpDescriptor {
+    /// What the operator produces from values of type `produced`, when it
+    /// accepts them. [`TypeTag::Any`] stands for "the type it was given".
+    #[must_use]
+    pub fn output_for(&self, produced: &TypeTag) -> Option<TypeTag> {
+        if self.signatures.is_empty() {
+            return produced.flows_into(&self.input).then(|| self.output.clone());
+        }
+        self.signatures
+            .iter()
+            .find(|signature| signature.input == *produced)
+            .or_else(|| {
+                self.signatures
+                    .iter()
+                    .find(|signature| produced.flows_into(&signature.input))
+            })
+            .map(|signature| signature.output.clone())
+    }
 }
 
 /// One parameter of an operator's configuration, as a tool presents it.
@@ -205,7 +251,52 @@ impl Catalog {
     pub fn insert(&mut self, descriptor: OpDescriptor) { self.ops.insert(descriptor.op.clone(), descriptor); }
 }
 
-/// What a connector factory receives when a node is instantiated.
+/// Values the operators of a process share, one per type: a pool of
+/// connections, the topics of an in-memory broker.
+#[derive(Default)]
+pub struct Shared {
+    values: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+}
+
+impl Shared {
+    /// The value of type `T`, created on first use.
+    #[must_use]
+    pub fn get<T: Default + Send + Sync + 'static>(&self) -> Arc<T> {
+        let mut values = self.values.lock();
+        let value = values
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Arc::new(T::default()) as Arc<dyn Any + Send + Sync>)
+            .clone();
+        drop(values);
+        value.downcast::<T>().unwrap_or_else(|_| Arc::new(T::default()))
+    }
+}
+
+impl Shared {
+    /// The value of type `T`, if one was given or created.
+    #[must_use]
+    pub fn find<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        let value = self.values.lock().get(&TypeId::of::<T>()).cloned()?;
+        value.downcast::<T>().ok()
+    }
+
+    /// Give the value of type `T`, in place of the one created on first use.
+    pub fn insert<T: Send + Sync + 'static>(&self, value: Arc<T>) {
+        self.values
+            .lock()
+            .insert(TypeId::of::<T>(), value as Arc<dyn Any + Send + Sync>);
+    }
+}
+
+impl fmt::Debug for Shared {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Shared")
+            .field("values", &self.values.lock().len())
+            .finish()
+    }
+}
+
+/// What an operator receives when a node is instantiated.
 pub struct OpContext<P: Providers> {
     /// Runtime providers (network, time, tasks, randomness, storage).
     pub providers: P,
@@ -213,6 +304,11 @@ pub struct OpContext<P: Providers> {
     pub clock: Arc<dyn Clock>,
     /// Secret resolution, to be called with [`OpContext::tenant`].
     pub secrets: Arc<dyn SecretProvider>,
+    /// The store of the worker, for operators that keep what they are given
+    /// where the API reads it.
+    pub kv: DynKv,
+    /// What the operators of this process share.
+    pub shared: Arc<Shared>,
     /// Tenant owning the graph.
     pub tenant: TenantId,
     /// Graph being instantiated.
@@ -221,7 +317,45 @@ pub struct OpContext<P: Providers> {
     pub node: NodeId,
 }
 
+impl<P: Providers> Clone for OpContext<P> {
+    fn clone(&self) -> Self {
+        Self {
+            providers: self.providers.clone(),
+            clock: self.clock.clone(),
+            secrets: self.secrets.clone(),
+            kv: self.kv.clone(),
+            shared: self.shared.clone(),
+            tenant: self.tenant.clone(),
+            graph: self.graph.clone(),
+            node: self.node.clone(),
+        }
+    }
+}
+
 impl<P: Providers> OpContext<P> {
+    /// The value of type `T` the operators of this process share, created on
+    /// first use.
+    #[must_use]
+    pub fn shared<T: Default + Send + Sync + 'static>(&self) -> Arc<T> { self.shared.get::<T>() }
+
+    /// Wait, on the clock of the runtime (simulated in a simulation).
+    pub async fn sleep(&self, duration: Duration) { let _ = self.providers.time().sleep(duration).await; }
+
+    /// The text of a secret of the configuration.
+    ///
+    /// # Errors
+    ///
+    /// The tenant has no secret of that name.
+    pub fn reveal(&self, secret: &Secret) -> Result<String, OpError> {
+        match secret {
+            Secret::Literal(text) => Ok(text.clone()),
+            Secret::Named(name) => self
+                .secrets
+                .get(&self.tenant, name)
+                .ok_or_else(|| OpError::Config(format!("secret `{name}` is not defined for tenant `{}`", self.tenant))),
+        }
+    }
+
     /// Resolve a configuration value that is either a literal string or a
     /// `{"secret": "<name>"}` reference to one of the tenant's secrets.
     pub fn secret_or_literal(&self, value: &Value) -> Result<String, OpError> {
@@ -279,17 +413,110 @@ impl<P: Providers> Clone for OpFactory<P> {
     }
 }
 
+/// One way of building an operator: for the type it takes.
+struct Variant<P: Providers> {
+    signature: Signature,
+    factory: OpFactory<P>,
+}
+
+/// A registered operator. It has one variant, or one per type it was
+/// registered for when it is written for several.
+struct Entry<P: Providers> {
+    descriptor: OpDescriptor,
+    variants: Vec<Variant<P>>,
+    /// Whether a configuration can run, for an operator whose factory needs
+    /// the context of a node to say so: a source or a sink.
+    accepts: Option<Accepts>,
+}
+
+/// Refuses a configuration that cannot run.
+type Accepts = Arc<dyn Fn(&Value) -> Result<(), OpError> + Send + Sync>;
+
+impl<P: Providers> Clone for Entry<P> {
+    fn clone(&self) -> Self {
+        Self {
+            descriptor: self.descriptor.clone(),
+            variants: self
+                .variants
+                .iter()
+                .map(|variant| Variant {
+                    signature: variant.signature.clone(),
+                    factory: variant.factory.clone(),
+                })
+                .collect(),
+            accepts: self.accepts.clone(),
+        }
+    }
+}
+
+impl<P: Providers> Entry<P> {
+    fn single(descriptor: OpDescriptor, factory: OpFactory<P>) -> Self {
+        let signature = Signature {
+            input: descriptor.input.clone(),
+            output: descriptor.output.clone(),
+        };
+        Self {
+            descriptor,
+            variants: vec![Variant { signature, factory }],
+            accepts: None,
+        }
+    }
+
+    /// The variant for values of type `produced`: the one registered for
+    /// that very type, else one that takes any, else the first.
+    fn variant(&self, produced: Option<&TypeTag>) -> Option<&Variant<P>> {
+        let any = || {
+            self.variants
+                .iter()
+                .find(|variant| variant.signature.input == TypeTag::Any)
+        };
+        match produced {
+            Some(produced) => self
+                .variants
+                .iter()
+                .find(|variant| variant.signature.input == *produced)
+                .or_else(any),
+            None => any(),
+        }
+        .or_else(|| self.variants.first())
+    }
+
+    /// Say in the descriptor what the variants have in common.
+    fn summarize(&mut self) {
+        let common = |pick: fn(&Signature) -> &TypeTag| {
+            let mut tags = self.variants.iter().map(|variant| pick(&variant.signature));
+            let first = tags.next().cloned().unwrap_or(TypeTag::Any);
+            if tags.all(|tag| *tag == first) {
+                first
+            } else {
+                TypeTag::Any
+            }
+        };
+        let (input, output) = (
+            common(|signature| &signature.input),
+            common(|signature| &signature.output),
+        );
+        self.descriptor.signatures = if self.variants.len() > 1 {
+            self.variants.iter().map(|variant| variant.signature.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        self.descriptor.input = input;
+        self.descriptor.output = output;
+    }
+}
+
 /// The operators compiled into a worker, by reference.
 pub struct Registry<P: Providers> {
-    ops: BTreeMap<OpRef, (OpDescriptor, OpFactory<P>)>,
+    ops: BTreeMap<OpRef, Entry<P>>,
 }
 
 impl<P: Providers> Registry<P> {
     /// Say what the configuration of a registered operator is made of, so
     /// that tools can offer a form for it. Unknown references are ignored.
     pub fn with_params(&mut self, op: &str, params: impl IntoIterator<Item = ParamSpec>) -> &mut Self {
-        if let Some((descriptor, _)) = op.parse::<OpRef>().ok().and_then(|op| self.ops.get_mut(&op)) {
-            descriptor.params = params.into_iter().collect();
+        if let Some(entry) = op.parse::<OpRef>().ok().and_then(|op| self.ops.get_mut(&op)) {
+            entry.descriptor.params = params.into_iter().collect();
         }
         self
     }
@@ -301,6 +528,32 @@ impl<P: Providers> Clone for Registry<P> {
 
 impl<P: Providers> Default for Registry<P> {
     fn default() -> Self { Self::empty() }
+}
+
+/// An operator read from the configuration of a node, and checked.
+fn configured<O: Operator>(config: &Value) -> Result<O, OpError> {
+    let operator: O = parse_config(config).map_err(|error| match error {
+        OpError::Config(reason) => OpError::Config(format!("{}: {reason}", O::OP)),
+        other => other,
+    })?;
+    operator.check().map_err(|error| match error {
+        OpError::Config(reason) => OpError::Config(format!("{}: {reason}", O::OP)),
+        other => other,
+    })?;
+    Ok(operator)
+}
+
+/// An operator read from the configuration of a node, whose tenant has every
+/// secret it names: a node that lacks one is refused before it starts.
+fn with_its_secrets<P: Providers, O: Operator>(config: &Value, context: &OpContext<P>) -> Result<O, OpError> {
+    let operator = configured::<O>(config)?;
+    for secret in operator.secrets() {
+        context.reveal(secret).map_err(|error| match error {
+            OpError::Config(reason) => OpError::Config(format!("{}: {reason}", O::OP)),
+            other => other,
+        })?;
+    }
+    Ok(operator)
 }
 
 fn parse_config<C: DeserializeOwned>(config: &Value) -> Result<C, OpError> {
@@ -358,8 +611,171 @@ impl<P: Providers> Registry<P> {
     /// Register an operator from its descriptor and factory. Replaces any
     /// operator already registered under the same reference.
     pub fn register(&mut self, descriptor: OpDescriptor, factory: OpFactory<P>) -> &mut Self {
-        self.ops.insert(descriptor.op.clone(), (descriptor, factory));
+        self.ops
+            .insert(descriptor.op.clone(), Entry::single(descriptor, factory));
         self
+    }
+
+    /// Register an operator for the type its descriptor says it takes, next
+    /// to what the same reference is already registered for: an operator
+    /// written for several types has one factory per type. Registering it
+    /// again for a type replaces that one.
+    pub fn register_variant(&mut self, descriptor: OpDescriptor, factory: OpFactory<P>) -> &mut Self {
+        let same_kind = self
+            .ops
+            .get(&descriptor.op)
+            .is_some_and(|entry| entry.descriptor.kind == descriptor.kind);
+        if !same_kind {
+            return self.register(descriptor, factory);
+        }
+        let Some(entry) = self.ops.get_mut(&descriptor.op) else {
+            return self;
+        };
+        let signature = Signature {
+            input: descriptor.input.clone(),
+            output: descriptor.output.clone(),
+        };
+        match entry
+            .variants
+            .iter_mut()
+            .find(|variant| variant.signature.input == signature.input)
+        {
+            Some(variant) => {
+                variant.signature = signature;
+                variant.factory = factory;
+            }
+            None => entry.variants.push(Variant { signature, factory }),
+        }
+        entry.descriptor.description = descriptor.description;
+        entry.descriptor.params = descriptor.params;
+        entry.summarize();
+        self
+    }
+
+    fn describe_operator<O: Operator>(kind: OpKind, input: TypeTag, output: TypeTag) -> OpDescriptor {
+        let mut descriptor = Self::describe(O::OP, kind, input, output, O::ABOUT);
+        descriptor.params = O::params();
+        descriptor
+    }
+
+    /// Register a [`Source`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `S::OP` is not a valid operator reference.
+    pub fn source<S: Source>(&mut self) -> &mut Self {
+        self.register(
+            Self::describe_operator::<S>(OpKind::Source, TypeTag::Any, TypeTag::of::<S::Out>()),
+            OpFactory::Source(Arc::new(|context: &OpContext<P>, config: &Value| {
+                Ok(pipe::source_connector(
+                    with_its_secrets::<P, S>(config, context)?,
+                    context,
+                ))
+            })),
+        );
+        self.accepting::<S>()
+    }
+
+    /// Let the registry say whether a configuration of `O` can run without
+    /// the context of a node.
+    fn accepting<O: Operator>(&mut self) -> &mut Self {
+        if let Ok(op) = OpRef::new(O::OP)
+            && let Some(entry) = self.ops.get_mut(&op)
+        {
+            entry.accepts = Some(Arc::new(|config: &Value| configured::<O>(config).map(drop)));
+        }
+        self
+    }
+
+    /// Whether the node of a graph may run `op` with `config`, fed with
+    /// values of type `produced` (see [`Registry::get_for`]): what the
+    /// operator checks of its configuration, and nothing that needs the
+    /// outside world. An operator that is not registered accepts nothing.
+    ///
+    /// # Errors
+    ///
+    /// Why the configuration is refused, in words.
+    pub fn accepts(&self, op: &OpRef, produced: Option<&TypeTag>, config: &Value) -> Result<(), OpError> {
+        let unknown = || OpError::Config(format!("`{op}` is not a registered operator"));
+        let entry = self.ops.get(op).ok_or_else(unknown)?;
+        match &entry.variant(produced).ok_or_else(unknown)?.factory {
+            OpFactory::Map(factory) => factory(config).map(drop),
+            OpFactory::Key(factory) => factory(config).map(drop),
+            OpFactory::Window(factory) => factory(config).map(drop),
+            OpFactory::Aggregate(factory) => factory(config).map(drop),
+            OpFactory::Source(_) | OpFactory::Sink(_) => {
+                entry.accepts.as_ref().map_or(Ok(()), |accepts| accepts(config))
+            }
+        }
+    }
+
+    /// Register a [`Sink`] for values of type `In`. A sink written for any
+    /// type is registered once per type it is given.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `S::OP` is not a valid operator reference.
+    pub fn sink<In: Any + Send + Sync, S: Sink<In>>(&mut self) -> &mut Self {
+        self.register_variant(
+            Self::describe_operator::<S>(OpKind::Sink, pipe::tag::<In>(), TypeTag::Any),
+            OpFactory::Sink(Arc::new(|context: &OpContext<P>, config: &Value| {
+                Ok(pipe::sink_connector::<P, In, S>(
+                    with_its_secrets::<P, S>(config, context)?,
+                    context,
+                ))
+            })),
+        );
+        self.accepting::<S>()
+    }
+
+    /// Register a [`Transformer`] for what flows in as `In`. `example` is any
+    /// value of it: its `transform` is called once to learn what the
+    /// transformer is (a map, a `key_by`, a window or an aggregate) and the
+    /// types it takes and gives.
+    ///
+    /// # Errors
+    ///
+    /// The transformer does several things at once.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T::OP` is not a valid operator reference.
+    pub fn transformer<In: 'static, T: Transformer<In>>(&mut self, example: &T) -> Result<&mut Self, OpError> {
+        let (built, input, output) = pipe::build::<In, T>(example)?;
+        let kind = built.kind();
+        let other = move || {
+            OpError::Config(format!(
+                "what `{}` is depends on its configuration: it was registered as a {kind}",
+                T::OP
+            ))
+        };
+        let factory = match built {
+            Built::Map(_) => OpFactory::Map(Arc::new(move |config: &Value| {
+                match pipe::build::<In, T>(&configured::<T>(config)?)?.0 {
+                    Built::Map(map) => Ok(map),
+                    _ => Err(other()),
+                }
+            })),
+            Built::Key(_) => OpFactory::Key(Arc::new(move |config: &Value| {
+                match pipe::build::<In, T>(&configured::<T>(config)?)?.0 {
+                    Built::Key(key) => Ok(key),
+                    _ => Err(other()),
+                }
+            })),
+            Built::Window(_) => OpFactory::Window(Arc::new(move |config: &Value| {
+                match pipe::build::<In, T>(&configured::<T>(config)?)?.0 {
+                    Built::Window(window) => Ok(window),
+                    _ => Err(other()),
+                }
+            })),
+            Built::Aggregate(_) => OpFactory::Aggregate(Arc::new(move |config: &Value| {
+                match pipe::build::<In, T>(&configured::<T>(config)?)?.0 {
+                    Built::Aggregate(aggregate) => Ok(aggregate),
+                    _ => Err(other()),
+                }
+            })),
+        };
+        Ok(self.register_variant(Self::describe_operator::<T>(kind, input, output), factory))
     }
 
     fn describe(op: &str, kind: OpKind, input: TypeTag, output: TypeTag, about: &str) -> OpDescriptor {
@@ -370,6 +786,7 @@ impl<P: Providers> Registry<P> {
             output,
             description: about.to_owned(),
             params: Vec::new(),
+            signatures: Vec::new(),
         }
     }
 
@@ -584,10 +1001,20 @@ impl<P: Providers> Registry<P> {
         self
     }
 
-    /// Look an operator up.
+    /// Look an operator up. For one registered for several types, the way
+    /// of building it that takes any type when there is one, else the first:
+    /// see [`Registry::get_for`].
     #[must_use]
-    pub fn get(&self, op: &OpRef) -> Option<(&OpDescriptor, &OpFactory<P>)> {
-        self.ops.get(op).map(|(descriptor, factory)| (descriptor, factory))
+    pub fn get(&self, op: &OpRef) -> Option<(&OpDescriptor, &OpFactory<P>)> { self.get_for(op, None) }
+
+    /// Look an operator up, as built for values of type `produced` (what the
+    /// node feeding it produces, `None` when it has no input or its type is
+    /// not known).
+    #[must_use]
+    pub fn get_for(&self, op: &OpRef, produced: Option<&TypeTag>) -> Option<(&OpDescriptor, &OpFactory<P>)> {
+        let entry = self.ops.get(op)?;
+        let variant = entry.variant(produced)?;
+        Some((&entry.descriptor, &variant.factory))
     }
 
     /// The descriptors of every registered operator.
@@ -597,7 +1024,7 @@ impl<P: Providers> Registry<P> {
             ops: self
                 .ops
                 .iter()
-                .map(|(op, (descriptor, _))| (op.clone(), descriptor.clone()))
+                .map(|(op, entry)| (op.clone(), entry.descriptor.clone()))
                 .collect(),
         }
     }
@@ -651,6 +1078,8 @@ mod tests {
             providers: TokioProviders::new(),
             clock: Arc::new(crate::clock::SystemClock),
             secrets: Arc::new(crate::clock::StaticSecrets::new().with(&tenant, "token", "s3cr3t")),
+            kv: crate::kv::MemKv::shared(),
+            shared: Arc::default(),
             tenant,
             graph: GraphId::new("g").unwrap(),
             node: NodeId::new("n").unwrap(),

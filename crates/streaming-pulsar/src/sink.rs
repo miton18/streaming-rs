@@ -112,14 +112,14 @@ pub struct WriteStats {
 }
 
 /// The connector: one producer per destination partition, opened lazily.
-pub struct PulsarSink<P: Providers> {
+pub struct PulsarSinkConnector<P: Providers> {
     config: SinkConfig,
     client: ClientCell<P>,
     state: Mutex<SinkState<P>>,
     last: parking_lot::Mutex<WriteStats>,
 }
 
-impl<P: Providers> PulsarSink<P> {
+impl<P: Providers> PulsarSinkConnector<P> {
     /// A sink writing to `config`, connecting lazily through `providers`.
     #[must_use]
     pub fn new(providers: P, config: SinkConfig) -> Self {
@@ -279,7 +279,7 @@ async fn wait_all(pending: &mut Vec<SendFut>) -> Result<(), String> {
 }
 
 #[async_trait]
-impl<P: Providers> SinkConnector for PulsarSink<P> {
+impl<P: Providers> SinkConnector for PulsarSinkConnector<P> {
     async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
         if batch.is_empty() {
             return Ok(());

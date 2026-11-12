@@ -4,132 +4,100 @@
 //! |---|---|---|---|
 //! | `std/kv-sink@1` | sink | `serde_json::Value` | `{"retain": 500}` |
 
-use async_trait::async_trait;
 use moonpool_core::Providers;
-use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, sync::Arc};
+use std::collections::BTreeSet;
 use streaming_core::{
-    DynKv, Emit, GraphKey, OpError, Operator, Registry, SinkConnector, SinkError, Timestamp, TypeTag,
-    control::OutputRow, keys, ops::downcast,
+    Batch, Context, DynKv, GraphKey, OpError, Operator, Registry, Sink, SinkPipe, Timestamp, control::OutputRow, keys,
 };
 
-fn default_retain() -> usize { 500 }
-
-/// `std/kv-sink@1`: keeps the most recent elements of a node as JSON rows
-/// readable through the HTTP API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KvSink {
-    /// Number of most recent rows kept (at least one).
-    #[serde(default = "default_retain")]
-    pub retain: usize,
-}
-
-impl Default for KvSink {
-    fn default() -> Self {
-        Self {
-            retain: default_retain(),
-        }
-    }
-}
-
-impl Operator for KvSink {
-    const OP: &'static str = "std/kv-sink@1";
-}
-
-/// Writes elements as JSON rows into a KV hash, where the HTTP API reads them.
+/// Keeps the most recent elements as JSON rows readable through the API.
 ///
 /// Each row lives under its emit id, so writing an element again replaces it:
 /// the sink is idempotent by construction. Only the most recent rows are kept;
 /// this sink is meant for inspecting results, not for archiving them.
-struct KvSinkConnector {
-    kv: DynKv,
-    key: String,
-    retain: usize,
-    known: Mutex<Option<BTreeSet<(Timestamp, String)>>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Operator)]
+#[operator("std/kv-sink@1")]
+pub struct KvSink {
+    /// How many of the most recent rows are kept.
+    #[param(default = 500, min = 1)]
+    pub retain: usize,
 }
 
-#[async_trait]
-impl SinkConnector for KvSinkConnector {
-    async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
-        let err = |error: &dyn std::fmt::Display| SinkError(error.to_string());
-        if self.known.lock().is_none() {
-            let existing: Vec<(String, OutputRow)> = self.kv.hgetall_json(&self.key).await.map_err(|e| err(&e))?;
-            self.known
-                .lock()
-                .get_or_insert_with(|| existing.into_iter().map(|(id, row)| (row.ts, id)).collect());
-        }
-        let mut entries = Vec::with_capacity(batch.len());
-        for emit in batch {
-            let value = downcast::<Value>(&emit.value).map_err(|e| err(&e))?;
-            let row = OutputRow {
-                id: emit.id.to_string(),
-                ts: emit.ts,
-                key: emit.key.as_ref().map(streaming_core::Key::display_lossy),
-                value: value.clone(),
-            };
-            entries.push((row.id.clone(), serde_json::to_vec(&row).map_err(|e| err(&e))?));
-        }
-        self.kv.hset(&self.key, entries).await.map_err(|e| err(&e))?;
+impl Default for KvSink {
+    fn default() -> Self { Self { retain: 500 } }
+}
 
-        let expired: Vec<String> = {
-            let mut guard = self.known.lock();
-            let known = guard.get_or_insert_with(BTreeSet::new);
-            known.extend(batch.iter().map(|emit| (emit.ts, emit.id.to_string())));
-            let mut expired = Vec::new();
-            while known.len() > self.retain {
-                match known.pop_first() {
-                    Some((_, id)) => expired.push(id),
-                    None => break,
-                }
+impl KvSink {
+    /// Write a batch and forget the rows beyond `retain`. `known` is what the
+    /// hash holds, read on the first write.
+    async fn write(
+        &self,
+        kv: &DynKv,
+        key: &str,
+        known: &mut Option<BTreeSet<(Timestamp, String)>>,
+        batch: &Batch<Value>,
+    ) -> Result<(), OpError> {
+        let failed = |error: &dyn std::fmt::Display| OpError::Failed(error.to_string());
+        let known = match known {
+            Some(known) => known,
+            None => {
+                let existing: Vec<(String, OutputRow)> = kv.hgetall_json(key).await.map_err(|e| failed(&e))?;
+                known.insert(existing.into_iter().map(|(id, row)| (row.ts, id)).collect())
             }
-            expired
         };
+        let mut entries = Vec::with_capacity(batch.len());
+        for element in batch.iter() {
+            let row = OutputRow {
+                id: element.id.to_string(),
+                ts: element.ts,
+                key: element.key.map(streaming_core::Key::display_lossy),
+                value: element.value.clone(),
+            };
+            entries.push((row.id.clone(), serde_json::to_vec(&row).map_err(|e| failed(&e))?));
+        }
+        kv.hset(key, entries).await.map_err(|e| failed(&e))?;
+
+        known.extend(batch.iter().map(|element| (element.ts, element.id.to_string())));
+        let mut expired = Vec::new();
+        while known.len() > self.retain.max(1) {
+            match known.pop_first() {
+                Some((_, id)) => expired.push(id),
+                None => break,
+            }
+        }
         if !expired.is_empty() {
-            self.kv.hdel(&self.key, expired).await.map_err(|e| err(&e))?;
+            kv.hdel(key, expired).await.map_err(|e| failed(&e))?;
         }
         Ok(())
     }
 }
 
-/// Register the runtime's connectors. `kv` is where `std/kv-sink@1` writes.
-pub fn register<P: Providers>(registry: &mut Registry<P>, kv: DynKv) {
-    registry.register_sink(
-        KvSink::OP,
-        "Keeps the most recent elements as JSON rows readable through the API.",
-        TypeTag::of::<Value>(),
-        move |context, config| {
-            let config: KvSink = if config.is_null() {
-                KvSink::default()
-            } else {
-                serde_json::from_value(config.clone()).map_err(|e| OpError::Config(e.to_string()))?
-            };
-            let graph = GraphKey::new(context.tenant.clone(), context.graph.clone());
-            Ok(Arc::new(KvSinkConnector {
-                kv: kv.clone(),
-                key: keys::graph_output(&graph, &context.node),
-                retain: config.retain.max(1),
-                known: Mutex::new(None),
-            }) as Arc<dyn SinkConnector>)
-        },
-    );
-    registry.with_params(
-        KvSink::OP,
-        [
-            streaming_core::ParamSpec::new("retain", "integer", "How many of the most recent rows are kept.")
-                .default(500),
-        ],
-    );
+impl Sink<Value> for KvSink {
+    async fn start<P: Providers>(&self, ctx: &Context<P>, mut input: SinkPipe<Value>) -> Result<(), OpError> {
+        let graph = GraphKey::new(ctx.tenant.clone(), ctx.graph.clone());
+        let key = keys::graph_output(&graph, &ctx.node);
+        let mut known = None;
+        while let Some(batch) = input.next().await {
+            // A failure ends the sink: the engine starts it again with the
+            // same batch, and it reads again what the hash holds.
+            self.write(&ctx.kv, &key, &mut known, &batch).await?;
+            batch.done();
+        }
+        Ok(())
+    }
 }
+
+/// Register the runtime's connectors.
+pub fn register<P: Providers>(registry: &mut Registry<P>) { registry.sink::<Value, KvSink>(); }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use moonpool_core::TokioProviders;
+    use std::sync::Arc;
     use streaming_core::{
-        EmitId, GraphId, Kv, MemKv, NodeId, OpContext, OpRef, Origin, Position, SliceId, TenantId,
+        Emit, EmitId, GraphId, Kv, MemKv, NodeId, OpContext, OpRef, Origin, Position, SinkConnector, SliceId, TenantId,
         clock::{NoSecrets, SystemClock},
         datum,
         registry::OpFactory,
@@ -137,7 +105,7 @@ mod tests {
 
     fn sink(kv: &Arc<MemKv>, config: Value) -> Arc<dyn SinkConnector> {
         let mut registry = Registry::<TokioProviders>::empty();
-        register(&mut registry, kv.clone());
+        register(&mut registry);
         let op = OpRef::new("std/kv-sink@1").unwrap();
         let Some((_, OpFactory::Sink(factory))) = registry.get(&op) else {
             panic!("std/kv-sink@1 is not registered as a sink");
@@ -146,6 +114,8 @@ mod tests {
             providers: TokioProviders::new(),
             clock: Arc::new(SystemClock),
             secrets: Arc::new(NoSecrets),
+            kv: kv.clone(),
+            shared: Arc::default(),
             tenant: TenantId::new("acme").unwrap(),
             graph: GraphId::new("g").unwrap(),
             node: NodeId::new("out").unwrap(),

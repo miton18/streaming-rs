@@ -72,6 +72,7 @@ fn ctx(kv: DynKv, gc_grace: Duration) -> ActorCtx<TokioProviders> {
     ActorCtx {
         meter: Meter::new(&providers, metrics),
         env: Arc::new(RuntimeEnv {
+            shared: Arc::default(),
             providers,
             kv,
             clock: Arc::new(SystemClock),

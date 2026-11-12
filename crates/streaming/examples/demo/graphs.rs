@@ -6,12 +6,15 @@
 //! | `demo/decode@1` | map | `Vec<u8>` -> `Event` | |
 //! | `demo/by-user@1` | key_by | `Event` | |
 //! | `demo/slow-sink@1` | sink | any | `{"latencyMs": 0}` |
+//!
+//! Each operator is a structure whose fields are its configuration, and one
+//! trait saying what it does: [`Source`], [`Transformer`] or [`Sink`]. A
+//! graph registers the operators it names.
 
-use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use std::{
+    any::Any,
     collections::HashMap,
     sync::{
         Arc,
@@ -22,8 +25,8 @@ use std::{
 use streaming::{
     App,
     core::{
-        Clock, Emit, GraphBuilder, GraphSettings, OpError, Operator, Registry, SinkConnector, SinkError,
-        SourceConnector, SystemClock, TypeTag, datum,
+        Clock, Context, GraphBuilder, GraphSettings, Keyed, OpError, Operator, Pipe, Position, Sink, SinkPipe, Source,
+        SourcePipe, SystemClock, Transformer, datum,
         stdops::{Count, Sliding, Tumbling},
     },
     moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider},
@@ -44,6 +47,9 @@ pub struct Event {
 
 /// Records a partition may hold unread before the generator stops feeding it.
 const BACKLOG_CAP: usize = 200_000;
+/// How long a source with nothing to read waits before it looks again at
+/// what the engine committed.
+const IDLE_WAIT: Duration = Duration::from_millis(100);
 
 struct Topic {
     log: Arc<MemLog>,
@@ -53,62 +59,144 @@ struct Topic {
     dropped: AtomicU64,
 }
 
-/// The in-process topics behind the `demo/generator@1` sources of a process.
+/// The in-process topics behind the `demo/generator@1` sources of a process:
+/// one per node, whichever worker of the process runs its partitions.
 #[derive(Default)]
 pub struct Generators {
     topics: Mutex<HashMap<String, Arc<Topic>>>,
 }
 
-fn default_partitions() -> u32 { 4 }
-fn default_rate() -> u64 { 2_000 }
-fn default_keys() -> u64 { 50 }
-
-/// `demo/generator@1`: synthetic events, as JSON bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Synthetic events at a configurable rate, as JSON bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Operator)]
+#[operator("demo/generator@1")]
 pub struct Generator {
-    /// Number of partitions, from 1 to 64.
-    #[serde(default = "default_partitions")]
+    /// Number of partitions.
+    #[param(default = 4, min = 1, max = 64)]
     pub partitions: u32,
-    /// Events per second, at most 200,000.
-    #[serde(default = "default_rate")]
+    /// Events per second.
+    #[param(default = 2000, max = 200000)]
     pub rate_per_sec: u64,
     /// Number of distinct users.
-    #[serde(default = "default_keys")]
+    #[param(default = 50)]
     pub keys: u64,
 }
 
-impl Operator for Generator {
-    const OP: &'static str = "demo/generator@1";
+impl Generator {
+    /// The topic of the node, created and fed on first use, at the rate this
+    /// configuration asks for.
+    fn topic<P: Providers>(&self, ctx: &Context<P>) -> Arc<Topic> {
+        let name = format!("{}/{}/{}/{}", ctx.tenant, ctx.graph, ctx.node, self.partitions);
+        let topic = ctx
+            .shared::<Generators>()
+            .topics
+            .lock()
+            .entry(name.clone())
+            .or_insert_with(|| {
+                Arc::new(Topic {
+                    log: MemLog::with_retention(self.partitions, true),
+                    rate_per_sec: AtomicU64::new(0),
+                    keys: AtomicU64::new(1),
+                    started: AtomicBool::new(false),
+                    dropped: AtomicU64::new(0),
+                })
+            })
+            .clone();
+        topic.rate_per_sec.store(self.rate_per_sec, Ordering::Relaxed);
+        topic.keys.store(self.keys.max(1), Ordering::Relaxed);
+        if !topic.started.swap(true, Ordering::Relaxed) {
+            drop(ctx.providers.task().spawn_task(
+                &format!("generator/{name}"),
+                generate(ctx.providers.clone(), topic.clone()),
+            ));
+        }
+        topic
+    }
 }
 
-/// `demo/decode@1`: decodes the JSON bytes of a generator into an [`Event`].
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+impl Source for Generator {
+    type Out = Vec<u8>;
+
+    async fn partitions<P: Providers>(&self, ctx: &Context<P>) -> Result<u32, OpError> {
+        Ok(self.topic(ctx).log.partitions())
+    }
+
+    async fn start<P: Providers>(
+        &self,
+        ctx: &Context<P>,
+        partition: u32,
+        after: Option<Position>,
+        out: SourcePipe<Vec<u8>>,
+    ) -> Result<(), OpError> {
+        let topic = self.topic(ctx);
+        let mut next = after.map_or(0, |position| position.1);
+        loop {
+            // What the engine committed will never be read again.
+            if let Some(position) = out.take_committed() {
+                topic.log.ack(partition, position);
+            }
+            // Asked for before reading, so that no append is missed.
+            let appended = topic.log.appended();
+            let records = topic.log.read(partition, next, out.room());
+            out.end(topic.log.end(partition));
+            if records.is_empty() {
+                let _ = ctx.providers.time().timeout(IDLE_WAIT, appended).await;
+                continue;
+            }
+            for record in records {
+                next = record.position.1;
+                let Some(bytes) = record.value.downcast_ref::<Vec<u8>>() else {
+                    continue;
+                };
+                // Waits while downstream is full.
+                out.send(record.position, record.event_time, bytes.clone()).await?;
+            }
+        }
+    }
+}
+
+/// Decodes a JSON event.
+#[derive(Debug, Clone, Copy, Default, Operator)]
+#[operator("demo/decode@1")]
 pub struct Decode;
 
-impl Operator for Decode {
-    const OP: &'static str = "demo/decode@1";
+impl Transformer<Vec<u8>> for Decode {
+    type Out = Event;
+
+    fn transform(&self, input: Pipe<Vec<u8>>) -> Pipe<Event> {
+        input.filter_map(|bytes| serde_json::from_slice::<Event>(bytes).ok())
+    }
 }
 
-/// `demo/by-user@1`: groups events by user.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+/// Groups events by user.
+#[derive(Debug, Clone, Copy, Default, Operator)]
+#[operator("demo/by-user@1")]
 pub struct ByUser;
 
-impl Operator for ByUser {
-    const OP: &'static str = "demo/by-user@1";
+impl Transformer<Event> for ByUser {
+    type Out = Keyed<Event>;
+
+    fn transform(&self, input: Pipe<Event>) -> Pipe<Keyed<Event>> { input.key_by(|event| event.user.clone()) }
 }
 
-/// `demo/slow-sink@1`: discards what it receives after a delay per batch.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Discards what it receives after a configurable delay per batch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("demo/slow-sink@1")]
 pub struct SlowSink {
-    /// Delay of each write, in milliseconds, at most 60,000.
-    #[serde(default)]
+    /// Delay of each write, in milliseconds.
+    #[param(default = 0, max = 60000)]
     pub latency_ms: u64,
 }
 
-impl Operator for SlowSink {
-    const OP: &'static str = "demo/slow-sink@1";
+impl<T: Any + Send + Sync> Sink<T> for SlowSink {
+    async fn start<P: Providers>(&self, ctx: &Context<P>, mut input: SinkPipe<T>) -> Result<(), OpError> {
+        while let Some(batch) = input.next().await {
+            if self.latency_ms > 0 {
+                ctx.sleep(Duration::from_millis(self.latency_ms)).await;
+            }
+            batch.done();
+        }
+        Ok(())
+    }
 }
 
 const ACTIONS: [&str; 4] = ["view", "click", "cart", "purchase"];
@@ -149,114 +237,6 @@ async fn generate<P: Providers>(providers: P, generator: Arc<Topic>) {
     }
 }
 
-struct SlowSinkConnector<P: Providers> {
-    providers: P,
-    latency: Duration,
-    written: AtomicU64,
-}
-
-#[async_trait]
-impl<P: Providers> SinkConnector for SlowSinkConnector<P> {
-    async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
-        if !self.latency.is_zero() {
-            let _ = self.providers.time().sleep(self.latency).await;
-        }
-        self.written.fetch_add(batch.len() as u64, Ordering::Relaxed);
-        Ok(())
-    }
-}
-
-fn parse<C: for<'de> Deserialize<'de>>(config: &Value) -> Result<C, OpError> {
-    let config = if config.is_null() { json!({}) } else { config.clone() };
-    serde_json::from_value(config).map_err(|error| OpError::Config(error.to_string()))
-}
-
-fn check_generator(config: &Generator) -> Result<(), OpError> {
-    if config.partitions == 0 || config.partitions > 64 {
-        return Err(OpError::Config("`partitions` must be between 1 and 64".into()));
-    }
-    if config.rate_per_sec > 200_000 {
-        return Err(OpError::Config("`ratePerSec` must be at most 200000".into()));
-    }
-    Ok(())
-}
-
-fn check_slow_sink(config: &SlowSink) -> Result<(), OpError> {
-    if config.latency_ms > 60_000 {
-        return Err(OpError::Config("`latencyMs` must be at most 60000".into()));
-    }
-    Ok(())
-}
-
-/// Register the demonstration operators.
-pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Generators>) {
-    registry.register_source::<Vec<u8>>(
-        Generator::OP,
-        "Synthetic events at a configurable rate, as JSON bytes.",
-        move |context, config| {
-            let config: Generator = parse(config)?;
-            check_generator(&config)?;
-            let topic = format!(
-                "{}/{}/{}/{}",
-                context.tenant, context.graph, context.node, config.partitions
-            );
-            let generator = generators
-                .topics
-                .lock()
-                .entry(topic.clone())
-                .or_insert_with(|| {
-                    Arc::new(Topic {
-                        log: MemLog::with_retention(config.partitions, true),
-                        rate_per_sec: AtomicU64::new(0),
-                        keys: AtomicU64::new(1),
-                        started: AtomicBool::new(false),
-                        dropped: AtomicU64::new(0),
-                    })
-                })
-                .clone();
-            generator.rate_per_sec.store(config.rate_per_sec, Ordering::Relaxed);
-            generator.keys.store(config.keys.max(1), Ordering::Relaxed);
-            if !generator.started.swap(true, Ordering::Relaxed) {
-                drop(context.providers.task().spawn_task(
-                    &format!("generator/{topic}"),
-                    generate(context.providers.clone(), generator.clone()),
-                ));
-            }
-            Ok(generator.log.source(context.providers.clone()) as Arc<dyn SourceConnector>)
-        },
-    );
-    registry.register_map(Decode::OP, "Decodes a JSON event.", |bytes: &Vec<u8>| {
-        serde_json::from_slice::<Event>(bytes).ok()
-    });
-    registry.register_key(ByUser::OP, "Groups events by user.", |event: &Event| event.user.clone());
-    registry.register_sink(
-        SlowSink::OP,
-        "Discards what it receives after a configurable delay per batch.",
-        TypeTag::Any,
-        |context, config| {
-            let config: SlowSink = parse(config)?;
-            check_slow_sink(&config)?;
-            Ok(Arc::new(SlowSinkConnector {
-                providers: context.providers.clone(),
-                latency: Duration::from_millis(config.latency_ms),
-                written: AtomicU64::new(0),
-            }) as Arc<dyn SinkConnector>)
-        },
-    );
-    registry.with_params(
-        Generator::OP,
-        [
-            streaming_core::ParamSpec::new("partitions", "integer", "Number of partitions.").default(4),
-            streaming_core::ParamSpec::new("ratePerSec", "integer", "Events per second.").default(2000),
-            streaming_core::ParamSpec::new("keys", "integer", "Number of distinct users.").default(50),
-        ],
-    );
-    registry.with_params(
-        SlowSink::OP,
-        [streaming_core::ParamSpec::new("latencyMs", "integer", "Delay of each write, in milliseconds.").default(0)],
-    );
-}
-
 /// The demonstration application: two tenants, a graph each, fed by
 /// in-process generators.
 #[must_use]
@@ -274,12 +254,9 @@ pub fn app() -> App {
         max_pending_windows: 3,
         ..GraphSettings::default()
     };
-    // One set of topics per process, shared by the workers it runs.
-    let generators = Arc::new(Generators::default());
     App::new()
         .tenant("acme", "Acme Corporation")
         .tenant("globex", "Globex")
-        .operators(move |registry| register(registry, generators.clone()))
         .graph(count_per_key(settings.clone()))
         .graph(clicks(settings))
 }
@@ -288,7 +265,7 @@ pub fn app() -> App {
 /// API and sent to a stand-in for Warp 10, the decoded events archived.
 fn count_per_key(settings: GraphSettings) -> GraphBuilder {
     let mut graph = GraphBuilder::new("acme", "count-per-key").settings(settings);
-    let events = graph.node(
+    let events = graph.source(
         "events",
         Generator {
             partitions: 4,
@@ -296,22 +273,22 @@ fn count_per_key(settings: GraphSettings) -> GraphBuilder {
             keys: 50,
         },
     );
-    let decode = graph.then(events, "decode", Decode);
-    let by_user = graph.then(decode, "by-user", ByUser);
-    let window = graph.then(by_user, "window", Tumbling::of(Duration::from_secs(10)));
-    let count = graph.then(window, "count", Count);
-    let to_row = graph.then(count, "to-row", CountToJson);
-    graph.then(to_row, "results", KvSink { retain: 400 });
-    let to_gts = graph.then(count, "to-gts", CountToGts::new("events.count").label("user"));
-    graph.then(to_gts, "warp10", SlowSink::default());
-    graph.then(decode, "archive", SlowSink::default());
+    let decoded = graph.then(events, "decode", Decode);
+    let by_user = graph.then(decoded, "by-user", ByUser);
+    let windows = graph.then(by_user, "window", Tumbling::of(Duration::from_secs(10)));
+    let counts = graph.then(windows, "count", Count);
+    let rows = graph.then(counts, "to-row", CountToJson);
+    graph.sink(rows, "results", KvSink { retain: 400 });
+    let points = graph.then(counts, "to-gts", CountToGts::new("events.count").label("user"));
+    graph.sink(points, "warp10", SlowSink::default());
+    graph.sink(decoded, "archive", SlowSink::default());
     graph
 }
 
 /// Clicks counted per user over 20-second windows sliding every 5 seconds.
 fn clicks(settings: GraphSettings) -> GraphBuilder {
     let mut graph = GraphBuilder::new("globex", "clicks").settings(settings);
-    let clicks = graph.node(
+    let clicks = graph.source(
         "clicks",
         Generator {
             partitions: 2,
@@ -319,24 +296,80 @@ fn clicks(settings: GraphSettings) -> GraphBuilder {
             keys: 12,
         },
     );
-    let decode = graph.then(clicks, "decode", Decode);
-    let by_user = graph.then(decode, "by-user", ByUser);
-    let sliding = graph.then(
+    let decoded = graph.then(clicks, "decode", Decode);
+    let by_user = graph.then(decoded, "by-user", ByUser);
+    let windows = graph.then(
         by_user,
         "sliding",
         Sliding::of(Duration::from_secs(20), Duration::from_secs(5)),
     );
-    let count = graph.then(sliding, "count", Count);
-    let to_row = graph.then(count, "to-row", CountToJson);
-    graph.then(to_row, "results", KvSink { retain: 200 });
+    let counts = graph.then(windows, "count", Count);
+    let rows = graph.then(counts, "to-row", CountToJson);
+    graph.sink(rows, "results", KvSink { retain: 200 });
     graph
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moonpool_core::TokioProviders;
-    use streaming_core::{OpFactory, SinkConnector, TenantId};
+    use serde_json::{Value, json};
+    use streaming::{
+        core::{
+            Emit, EmitId, GraphId, MemKv, NodeId, OpContext, OpFactory, OpRef, Origin, Registry, SinkConnector,
+            SliceId, SourceConnector, StaticSecrets, TenantId,
+        },
+        moonpool_core::TokioProviders,
+    };
+
+    fn context() -> OpContext<TokioProviders> {
+        OpContext {
+            providers: TokioProviders::new(),
+            clock: Arc::new(SystemClock),
+            secrets: Arc::new(StaticSecrets::new()),
+            kv: MemKv::shared(),
+            shared: Arc::default(),
+            tenant: TenantId::new("acme").unwrap(),
+            graph: GraphId::new("g").unwrap(),
+            node: NodeId::new("events").unwrap(),
+        }
+    }
+
+    fn source(context: &OpContext<TokioProviders>, config: &Value) -> Result<Arc<dyn SourceConnector>, OpError> {
+        let mut registry = Registry::<TokioProviders>::empty();
+        registry.source::<Generator>();
+        let Some((_, OpFactory::Source(factory))) = registry.get(&OpRef::new(Generator::OP).unwrap()) else {
+            panic!("the generator is not a source");
+        };
+        factory(context, config)
+    }
+
+    fn sink(config: &Value) -> Result<Arc<dyn SinkConnector>, OpError> {
+        let mut registry = Registry::<TokioProviders>::empty();
+        registry.sink::<Event, SlowSink>();
+        let Some((_, OpFactory::Sink(factory))) = registry.get(&OpRef::new(SlowSink::OP).unwrap()) else {
+            panic!("the slow sink is not a sink");
+        };
+        factory(&context(), config)
+    }
+
+    fn emit(index: u64) -> Emit {
+        let slice = SliceId::Source {
+            node: NodeId::new("events").unwrap(),
+            partition: 0,
+        };
+        let origin = Origin::source(Position(0, index, 0));
+        Emit {
+            id: EmitId::new(&slice, &origin),
+            origin,
+            ts: 0,
+            key: None,
+            value: datum(Event {
+                user: "user-000".into(),
+                action: "view".into(),
+                amount: 1.0,
+            }),
+        }
+    }
 
     #[test]
     fn the_demo_application_is_valid() {
@@ -351,9 +384,40 @@ mod tests {
         assert_eq!(keys, ["acme/count-per-key", "globex/clicks"]);
     }
 
+    /// Naming an operator in a graph is enough for the application to know
+    /// it, with what the catalogue shows of it.
+    #[test]
+    fn the_graphs_register_their_operators() {
+        let catalog = app().registry().catalog();
+        let described = |op: &str| {
+            catalog
+                .get(&OpRef::new(op).unwrap())
+                .unwrap_or_else(|| panic!("{op} is unknown"))
+        };
+        assert_eq!(
+            described(Generator::OP).description,
+            "Synthetic events at a configurable rate, as JSON bytes."
+        );
+        assert_eq!(described(Decode::OP).description, "Decodes a JSON event.");
+        assert_eq!(described(ByUser::OP).description, "Groups events by user.");
+        // One sink for two types of elements: the points and the events.
+        assert_eq!(described(SlowSink::OP).signatures.len(), 2);
+        let names = |op: &str| -> Vec<String> { described(op).params.iter().map(|param| param.name.clone()).collect() };
+        assert_eq!(names(Generator::OP), ["partitions", "ratePerSec", "keys"]);
+        assert_eq!(names(SlowSink::OP), ["latencyMs"]);
+    }
+
     #[test]
     fn the_described_defaults_are_the_parsed_ones() {
-        let parsed: Generator = parse(&Value::Null).unwrap();
+        let defaults = |params: Vec<streaming::core::ParamSpec>| -> Value {
+            Value::Object(
+                params
+                    .into_iter()
+                    .filter_map(|param| Some((param.name, param.default?)))
+                    .collect(),
+            )
+        };
+        let parsed: Generator = serde_json::from_value(json!({})).unwrap();
         assert_eq!(
             parsed,
             Generator {
@@ -362,26 +426,10 @@ mod tests {
                 keys: 50,
             }
         );
-        let mut registry = Registry::<TokioProviders>::standard();
-        register(&mut registry, Arc::new(Generators::default()));
-        let catalog = registry.catalog();
-        let described = |op: &str| -> serde_json::Map<String, Value> {
-            let (_, descriptor) = catalog.ops.iter().find(|(name, _)| name.as_str() == op).unwrap();
-            descriptor
-                .params
-                .iter()
-                .filter_map(|param| Some((param.name.clone(), param.default.clone()?)))
-                .collect()
-        };
-        assert_eq!(
-            Value::Object(described(Generator::OP)),
-            serde_json::to_value(parsed).unwrap()
-        );
-        let parsed: SlowSink = parse(&json!({})).unwrap();
-        assert_eq!(
-            Value::Object(described(SlowSink::OP)),
-            serde_json::to_value(parsed).unwrap()
-        );
+        assert_eq!(defaults(Generator::params()), serde_json::to_value(parsed).unwrap());
+        let parsed: SlowSink = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(parsed, SlowSink::default());
+        assert_eq!(defaults(SlowSink::params()), serde_json::to_value(parsed).unwrap());
     }
 
     #[test]
@@ -391,33 +439,34 @@ mod tests {
             rate_per_sec,
             keys: 1,
         };
-        assert!(check_generator(&generator(1, 0)).is_ok());
-        assert!(check_generator(&generator(64, 200_000)).is_ok());
-        assert!(check_generator(&generator(0, 10)).is_err());
-        assert!(check_generator(&generator(65, 10)).is_err());
-        assert!(check_generator(&generator(4, 200_001)).is_err());
-        assert!(check_slow_sink(&SlowSink { latency_ms: 60_000 }).is_ok());
-        assert!(check_slow_sink(&SlowSink { latency_ms: 60_001 }).is_err());
+        assert!(generator(1, 0).check().is_ok());
+        assert!(generator(64, 200_000).check().is_ok());
+        for (refused, why) in [
+            (generator(0, 10), "`partitions` must be between 1 and 64"),
+            (generator(65, 10), "`partitions` must be between 1 and 64"),
+            (generator(4, 200_001), "`ratePerSec` must be at most 200000"),
+        ] {
+            let error = refused.check().unwrap_err();
+            assert_eq!(error.to_string(), format!("invalid operator configuration: {why}"));
+        }
+        assert!(SlowSink { latency_ms: 60_000 }.check().is_ok());
+        assert!(SlowSink { latency_ms: 60_001 }.check().is_err());
+        // A node is refused before it starts.
+        assert!(source(&context(), &json!({"partitions": 0})).is_err());
+        assert!(sink(&json!({"latencyMs": 60_001})).is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_slow_sink_waits_then_counts() {
-        let sink = SlowSinkConnector {
-            providers: TokioProviders::new(),
-            latency: Duration::from_millis(80),
-            written: AtomicU64::new(0),
-        };
+    async fn a_slow_sink_waits_then_confirms() {
+        let slow = sink(&json!({"latencyMs": 80})).unwrap();
+        for index in 1..=2 {
+            let started = std::time::Instant::now();
+            slow.write(&[emit(index)]).await.unwrap();
+            assert!(started.elapsed() >= Duration::from_millis(80));
+        }
+        let fast = sink(&Value::Null).unwrap();
         let started = std::time::Instant::now();
-        sink.write(&[]).await.unwrap();
-        assert!(started.elapsed() >= Duration::from_millis(80));
-        assert_eq!(sink.written.load(Ordering::Relaxed), 0);
-        let fast = SlowSinkConnector {
-            providers: TokioProviders::new(),
-            latency: Duration::ZERO,
-            written: AtomicU64::new(0),
-        };
-        let started = std::time::Instant::now();
-        fast.write(&[]).await.unwrap();
+        fast.write(&[emit(1), emit(2)]).await.unwrap();
         assert!(started.elapsed() < Duration::from_millis(50));
     }
 
@@ -484,30 +533,65 @@ mod tests {
     /// Two sources on the same topic share one generator, started once.
     #[tokio::test(flavor = "current_thread")]
     async fn a_generator_is_shared_and_started_once() {
-        let generators = Arc::new(Generators::default());
-        let mut registry = Registry::<TokioProviders>::standard();
-        register(&mut registry, generators.clone());
-        let Some((_, OpFactory::Source(factory))) = registry.get(&streaming_core::OpRef::new(Generator::OP).unwrap())
-        else {
-            panic!("the generator is not a source");
-        };
-        let context = streaming_core::OpContext {
-            providers: TokioProviders::new(),
-            clock: Arc::new(SystemClock),
-            secrets: Arc::new(streaming_core::StaticSecrets::new()),
-            tenant: TenantId::new("acme").unwrap(),
-            graph: streaming_core::GraphId::new("g").unwrap(),
-            node: streaming_core::NodeId::new("events").unwrap(),
-        };
+        let context = context();
         let config = json!({"partitions": 1, "ratePerSec": 200, "keys": 3});
-        factory(&context, &config).unwrap();
-        factory(&context, &config).unwrap();
-        assert!(factory(&context, &json!({"partitions": 0})).is_err());
+        for _ in 0..2 {
+            assert_eq!(source(&context, &config).unwrap().partitions().await.unwrap(), 1);
+        }
+        let generators = context.shared::<Generators>();
         assert_eq!(generators.topics.lock().len(), 1);
         tokio::time::sleep(Duration::from_millis(500)).await;
         let topic = generators.topics.lock().values().next().unwrap().clone();
         // Started once: about a hundred events, not twice as many.
         let produced = topic.log.retained(0);
         assert!((50..=100).contains(&produced), "{produced} events");
+    }
+
+    /// The source pushes what its topic holds after the position it is given,
+    /// in order, lets go of what the engine committed, and says where the
+    /// partition ends.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_source_reads_its_topic_and_releases_what_is_committed() {
+        let context = context();
+        let config = json!({"partitions": 1, "ratePerSec": 0});
+        let connector = source(&context, &config).unwrap();
+        assert_eq!(connector.partitions().await.unwrap(), 1);
+        let topic = context
+            .shared::<Generators>()
+            .topics
+            .lock()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        for index in 0..10_u8 {
+            topic.log.append(0, i64::from(index), datum(vec![index]));
+        }
+        let mut reader = connector.open(0, Some(Position(0, 3, 0))).await.unwrap();
+        let mut read = Vec::new();
+        while read.len() < 7 {
+            // Never more than asked for: this is how backpressure reaches the source.
+            let records = reader.poll(4, Duration::from_secs(5)).await.unwrap();
+            assert!(!records.is_empty() && records.len() <= 4, "{} records", records.len());
+            read.extend(records);
+        }
+        let positions: Vec<u64> = read.iter().map(|record| record.position.1).collect();
+        assert_eq!(positions, [4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(read[0].value.downcast_ref::<Vec<u8>>().unwrap(), &vec![3_u8]);
+        assert_eq!(read[0].event_time, 3);
+        assert_eq!(reader.end_position().await.unwrap(), Some(Position(0, 10, 0)));
+        // Nothing more: the read waits, then comes back empty.
+        assert!(reader.poll(4, Duration::from_millis(50)).await.unwrap().is_empty());
+
+        assert_eq!(topic.log.retained(0), 10);
+        reader.ack(Position(0, 6, 0)).await.unwrap();
+        assert!(reader.poll(4, Duration::from_millis(250)).await.unwrap().is_empty());
+        assert_eq!(topic.log.retained(0), 4, "what is committed is released");
+
+        // What comes later is read by the same reader, and moves the end.
+        topic.log.append(0, 99, datum(vec![42_u8]));
+        let records = reader.poll(4, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(reader.end_position().await.unwrap(), Some(Position(0, 11, 0)));
     }
 }

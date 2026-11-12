@@ -218,6 +218,8 @@ pub(crate) async fn plan_graph<P: Providers>(env: &RuntimeEnv<P>, spec: &GraphSp
             providers: env.providers.clone(),
             clock: env.clock.clone(),
             secrets: env.secrets.clone(),
+            kv: env.kv.clone(),
+            shared: env.shared.clone(),
             tenant: spec.tenant.clone(),
             graph: spec.graph.clone(),
             node: source.clone(),
@@ -821,6 +823,7 @@ mod tests {
                 Err(streaming_core::OpError::Config("not run here".into()))
             });
             RuntimeEnv {
+                shared: Arc::default(),
                 providers: TokioProviders::new(),
                 kv: kv.clone(),
                 clock: Arc::new(SystemClock),

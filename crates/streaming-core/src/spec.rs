@@ -454,19 +454,37 @@ impl Topology {
         let mut types: BTreeMap<NodeId, TypeTag> = BTreeMap::new();
         for id in &order {
             let descriptor = &descriptors[id];
+            // An operator written for several types gives what it gives for
+            // the type it is fed.
+            let mut declared = None;
             for input in &inputs[id] {
                 let produced = &types[input];
-                if !produced.flows_into(&descriptor.input) {
-                    return Err(SpecError::Type {
-                        from: input.clone(),
-                        to: id.clone(),
-                        produced: produced.clone(),
-                        expected: descriptor.input.clone(),
-                    });
+                match descriptor.output_for(produced) {
+                    Some(output) => {
+                        declared.get_or_insert(output);
+                    }
+                    None => {
+                        let accepted: Vec<String> = descriptor
+                            .signatures
+                            .iter()
+                            .map(|signature| signature.input.to_string())
+                            .collect();
+                        return Err(SpecError::Type {
+                            from: input.clone(),
+                            to: id.clone(),
+                            produced: produced.clone(),
+                            expected: if accepted.is_empty() {
+                                descriptor.input.clone()
+                            } else {
+                                TypeTag::Named(accepted.join(" or "))
+                            },
+                        });
+                    }
                 }
             }
+            let declared = declared.unwrap_or_else(|| descriptor.output.clone());
             let pass_through = matches!(descriptor.kind, OpKind::KeyBy | OpKind::Window)
-                || (descriptor.kind == OpKind::Map && descriptor.output == TypeTag::Any);
+                || (descriptor.kind == OpKind::Map && declared == TypeTag::Any);
             let produced = if pass_through {
                 let mut upstream = inputs[id].iter().map(|input| types[input].clone());
                 let first = upstream.next().unwrap_or(TypeTag::Any);
@@ -476,7 +494,7 @@ impl Topology {
                     TypeTag::Any
                 }
             } else {
-                descriptor.output.clone()
+                declared
             };
             types.insert(id.clone(), produced);
         }

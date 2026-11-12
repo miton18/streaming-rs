@@ -36,9 +36,9 @@ use std::{
 };
 use streaming_api::control::{self, Publisher};
 use streaming_core::{
-    Clock, Datum, DynKv, Emit, GraphSpec, Kv, KvError, MemKv, NoSecrets, NodeId, PartitionReader, Position, Registry,
-    SinkConnector, SinkError, SliceKey, SourceConnector, SourceError, SourceRecord, TenantId, Timestamp, TypeTag,
-    Window, Windowed, WorkerId,
+    Clock, Context, DynKv, GraphSpec, Keyed, Kv, KvError, MemKv, NoSecrets, NodeId, OpError, PartitionReader, Pipe,
+    Position, Registry, Shared, Sink, SinkPipe, SliceKey, Source, SourceConnector, SourceError, SourcePipe,
+    SourceRecord, TenantId, Timestamp, Transformer, Window, Windowed, WorkerId,
     control::{DesiredState, GraphIndexEntry, GraphPlan, RunState, WorkerSnapshot},
     datum, keys,
 };
@@ -156,6 +156,8 @@ pub struct SimEnv {
     pub deleting: Mutex<bool>,
     /// Multiplier applied to the probability of every injected fault.
     pub fault_scale: f64,
+    /// Whether the source pushes into its pipe ([`Scenario::piped`]).
+    pub piped: bool,
     /// Upper bound of the latency of an ordinary KV command, in milliseconds.
     pub kv_latency_ms: u64,
     /// Upper bound of the delay of one write to the per-key counts sink.
@@ -199,6 +201,7 @@ impl SimEnv {
     #[must_use]
     pub fn new(scenario: &Scenario) -> Arc<Self> {
         Arc::new(Self {
+            piped: scenario.piped,
             fault_scale: scenario.fault_scale,
             kv_latency_ms: scenario.kv_latency_ms.max(1),
             sink_latency_ms: scenario.sink_latency_ms.max(1),
@@ -482,6 +485,7 @@ impl<P: Providers> SourceConnector for ChaosSource<P> {
             providers: self.providers.clone(),
             partition,
             next,
+            delivered: next,
         }))
     }
 }
@@ -491,7 +495,18 @@ struct ChaosReader<P: Providers> {
     providers: P,
     partition: u32,
     next: u64,
+    /// The furthest this reader went: see [`may_rewind`].
+    delivered: u64,
 }
+
+/// Whether a broker that delivered up to `delivered` and now stands at
+/// `next` may rewind: only once it has delivered again all it rewound over.
+///
+/// A broker rewinding at every read redelivers more than it delivers as soon
+/// as it is asked for a few records at a time: an engine one record short of
+/// a full batch then read redeliveries for ever, without simulated time ever
+/// passing, and the seed did not end.
+fn may_rewind(next: u64, delivered: u64) -> bool { next >= delivered }
 
 #[async_trait]
 impl<P: Providers> PartitionReader for ChaosReader<P> {
@@ -500,7 +515,7 @@ impl<P: Providers> PartitionReader for ChaosReader<P> {
         if buggify_with_prob!(0.02 * scale) {
             return Err(SourceError("injected: connection to the broker lost".into()));
         }
-        if buggify_with_prob!(0.05 * scale) {
+        if may_rewind(self.next, self.delivered) && buggify_with_prob!(0.05 * scale) {
             // Redelivery: the broker rewinds to somewhere before what it delivered.
             let back = self.providers.random().random_range(1..64_u64);
             self.next = self.next.saturating_sub(back);
@@ -520,29 +535,13 @@ impl<P: Providers> PartitionReader for ChaosReader<P> {
         }
         if let Some(last) = records.last() {
             self.next = last.position.1;
+            self.delivered = self.delivered.max(self.next);
         }
         Ok(records)
     }
 
     async fn ack(&mut self, upto: Position) -> Result<(), SourceError> {
-        // An acknowledged record is gone from the topic for good: whatever is
-        // acknowledged must already be committed.
-        if let Ok(slice) = format!("acme/sim/src.events.{}", self.partition).parse::<streaming_core::SliceKey>() {
-            let committed = slice_head(self.env.kv.as_ref(), &slice)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|head| head.position);
-            if committed.is_none_or(|at| at < upto)
-                && !*self.env.deleting.lock()
-                && !purged(self.env.kv.as_ref(), &slice).await
-            {
-                self.env.audit.lock().push(format!(
-                    "partition {} was acknowledged up to {upto:?} while {committed:?} is committed",
-                    self.partition
-                ));
-            }
-        }
+        acknowledge(&self.env, self.partition, upto).await;
         if buggify_with_prob!(0.1) {
             return Err(SourceError("injected: ack lost".into()));
         }
@@ -558,105 +557,320 @@ impl<P: Providers> PartitionReader for ChaosReader<P> {
     }
 }
 
-/// Turns an element into the text a sink probe remembers.
-type Render = fn(&Datum) -> String;
-
-struct ChaosSink<P: Providers> {
-    env: Arc<SimEnv>,
-    probe: Arc<SinkProbe>,
-    providers: P,
-    render: Render,
-    /// Upper bound of the delay of one write, in milliseconds.
-    latency_ms: u64,
+/// The world of the run an operator belongs to: every worker of a
+/// simulation is given it through [`streaming_core::Shared`].
+fn world<P: Providers>(ctx: &Context<P>) -> Result<Arc<SimEnv>, OpError> {
+    ctx.shared
+        .find::<SimEnv>()
+        .ok_or_else(|| OpError::Failed("no simulated world was given to this worker".into()))
 }
 
-#[async_trait]
-impl<P: Providers> SinkConnector for ChaosSink<P> {
-    async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
-        let delay = self.providers.random().random_range(0..self.latency_ms);
-        let _ = self.providers.time().sleep(Duration::from_millis(delay)).await;
-        let scale = self.env.fault_scale;
+/// The simulated topic: redelivers what it already delivered, cuts batches
+/// anywhere, fails.
+///
+/// It is read in one of two ways, drawn by the scenario
+/// ([`Scenario::piped`]): through the connector the engine drives itself,
+/// which the source hands its partition to, or by a source that pushes
+/// every record into its pipe.
+#[derive(Debug, Clone, Copy, Default, streaming_core::Operator)]
+#[operator("sim/log@1")]
+pub struct SimLog;
+
+impl Source for SimLog {
+    type Out = SimEvent;
+
+    async fn partitions<P: Providers>(&self, ctx: &Context<P>) -> Result<u32, OpError> {
+        let env = world(ctx)?;
+        if buggify!() {
+            return Err(OpError::Failed("injected: metadata lookup failed".into()));
+        }
+        Ok(env.log.partitions())
+    }
+
+    async fn start<P: Providers>(
+        &self,
+        ctx: &Context<P>,
+        partition: u32,
+        after: Option<Position>,
+        out: SourcePipe<SimEvent>,
+    ) -> Result<(), OpError> {
+        let env = world(ctx)?;
+        if env.piped {
+            return push(ctx, &env, partition, after, &out).await;
+        }
+        let connector = ChaosSource {
+            env,
+            providers: ctx.providers.clone(),
+        };
+        out.read(&connector, partition, after).await
+    }
+}
+
+/// How long the pushing source waits for records before it looks again at
+/// what the engine committed.
+const PUSH_WAIT: Duration = Duration::from_millis(100);
+
+/// An acknowledged record is gone from the topic for good: whatever is
+/// acknowledged must already be committed.
+async fn acknowledge(env: &SimEnv, partition: u32, upto: Position) {
+    if let Ok(slice) = format!("acme/sim/src.events.{partition}").parse::<streaming_core::SliceKey>() {
+        let committed = slice_head(env.kv.as_ref(), &slice)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|head| head.position);
+        if committed.is_none_or(|at| at < upto) && !*env.deleting.lock() && !purged(env.kv.as_ref(), &slice).await {
+            env.audit.lock().push(format!(
+                "partition {partition} was acknowledged up to {upto:?} while {committed:?} is committed"
+            ));
+        }
+    }
+}
+
+/// The topic read by a source that pushes into its pipe, as hostile as
+/// [`ChaosReader`]: it stops on a lost connection, redelivers, cuts what it
+/// reads, loses acknowledgements and fails to learn where its partition ends.
+async fn push<P: Providers>(
+    ctx: &Context<P>,
+    env: &Arc<SimEnv>,
+    partition: u32,
+    after: Option<Position>,
+    out: &SourcePipe<SimEvent>,
+) -> Result<(), OpError> {
+    let random = ctx.providers.random();
+    if buggify!() {
+        return Err(OpError::Failed("injected: cannot open reader".into()));
+    }
+    // A real broker resumes from its own cursor, which may be behind what
+    // the framework has committed.
+    let mut next = if buggify!() {
+        0
+    } else {
+        after.map_or(0, |position| position.1)
+    };
+    let mut delivered = next;
+    let scale = env.fault_scale;
+    let acked = |upto: Position| async move {
+        acknowledge(env, partition, upto).await;
+        if !buggify_with_prob!(0.1) {
+            env.log.ack(partition, upto);
+        }
+    };
+    loop {
+        if let Some(upto) = out.take_committed() {
+            acked(upto).await;
+        }
+        if buggify_with_prob!(0.02 * scale) {
+            return Err(OpError::Failed("injected: connection to the broker lost".into()));
+        }
+        if may_rewind(next, delivered) && buggify_with_prob!(0.05 * scale) {
+            // Redelivery: the broker rewinds to somewhere before what it delivered.
+            let back = random.random_range(1..64_u64);
+            next = next.saturating_sub(back);
+            *env.redeliveries.lock() += 1;
+        }
+        let room = out.room();
+        let max = if buggify!() {
+            random.random_range(1..room.max(2))
+        } else {
+            room
+        };
+        // Asked for before reading, so that no append is missed.
+        let appended = env.log.appended();
+        let records = env.log.read(partition, next, max);
+        // The end is said after reading: a record the source has not pushed
+        // never lies before it. A lookup that fails leaves the last answer.
+        if !buggify_with_prob!(0.1) {
+            out.end(env.log.end(partition));
+        }
+        if records.is_empty() {
+            let waited = ctx.providers.time().timeout(PUSH_WAIT, appended);
+            moonpool_sim::select! {
+                upto = out.committed() => acked(upto?).await,
+                _ = waited => {}
+            }
+            continue;
+        }
+        for record in records {
+            next = record.position.1;
+            delivered = delivered.max(next);
+            let Some(event) = record.value.downcast_ref::<SimEvent>() else {
+                continue;
+            };
+            // What the engine commits is acknowledged at once, even while
+            // downstream is full.
+            let mut sending = std::pin::pin!(out.send(record.position, record.event_time, event.clone()));
+            loop {
+                moonpool_sim::select! {
+                    sent = &mut sending => {
+                        sent?;
+                        break;
+                    }
+                    upto = out.committed() => acked(upto?).await,
+                }
+            }
+        }
+    }
+}
+
+/// Writes what a recording sink receives into `probe`, the way a hostile
+/// destination would: late, not at all, halfway through a batch, or entirely
+/// without saying so. A batch that is not confirmed is refused in one of the
+/// three ways a sink has: it says it failed, it asks for the next one, or it
+/// stops.
+async fn record<P: Providers, T: std::any::Any + Send + Sync>(
+    ctx: &Context<P>,
+    env: &SimEnv,
+    probe: &SinkProbe,
+    render: fn(&T) -> String,
+    latency_ms: u64,
+    mut input: SinkPipe<T>,
+) -> Result<(), OpError> {
+    let random = ctx.providers.random();
+    while let Some(batch) = input.next().await {
+        let delay = random.random_range(0..latency_ms);
+        ctx.sleep(Duration::from_millis(delay)).await;
+        let scale = env.fault_scale;
         if buggify_with_prob!(0.03 * scale) {
-            return Err(SinkError("injected: sink unreachable".into()));
+            batch.failed("injected: sink unreachable");
+            continue;
         }
         let applied = if buggify_with_prob!(0.03 * scale) {
             // Fails halfway: a prefix of the batch is durably written.
-            self.providers.random().random_range(0..batch.len().max(1) + 1)
+            random.random_range(0..batch.len().max(1) + 1)
         } else {
             batch.len()
         };
-        for emit in &batch[..applied] {
-            self.probe.record(emit.id.as_str(), (self.render)(&emit.value));
+        for element in batch.iter().take(applied) {
+            probe.record(element.id.as_str(), render(element.value));
         }
         if applied < batch.len() || buggify_with_prob!(0.03 * scale) {
-            *self.env.sink_ambiguous.lock() += 1;
-            return Err(SinkError("injected: write outcome unknown".into()));
+            *env.sink_ambiguous.lock() += 1;
+            match random.random_range(0..3_u32) {
+                0 => batch.failed("injected: write outcome unknown"),
+                // Asking for the next batch leaves this one unconfirmed.
+                1 => drop(batch),
+                _ => return Err(OpError::Failed("injected: the sink stopped half-way".into())),
+            }
+            continue;
         }
-        Ok(())
+        batch.done();
     }
+    Ok(())
 }
 
-fn render_count(value: &Datum) -> String {
-    match value.downcast_ref::<Windowed<u64>>() {
-        Some(windowed) => format!(
-            "{}|{}|{}",
-            windowed.window,
-            windowed.key.display_lossy(),
-            windowed.value
-        ),
-        None => "unexpected type".to_owned(),
-    }
+fn render_count(windowed: &Windowed<u64>) -> String {
+    format!(
+        "{}|{}|{}",
+        windowed.window,
+        windowed.key.display_lossy(),
+        windowed.value
+    )
 }
 
-fn render_event(value: &Datum) -> String {
-    match value.downcast_ref::<SimEvent>() {
-        Some(event) => event.id.to_string(),
-        None => "unexpected type".to_owned(),
-    }
+fn render_event(event: &SimEvent) -> String { event.id.to_string() }
+
+macro_rules! recording_sinks {
+    ($($(#[$about:meta])* $name:ident($op:literal): $ty:ty => $probe:ident, $render:ident, $latency:expr;)*) => {$(
+        $(#[$about])*
+        #[derive(Debug, Clone, Copy, Default, streaming_core::Operator)]
+        #[operator($op)]
+        pub struct $name;
+
+        impl Sink<$ty> for $name {
+            async fn start<P: Providers>(&self, ctx: &Context<P>, input: SinkPipe<$ty>) -> Result<(), OpError> {
+                let env = world(ctx)?;
+                let latency: fn(&SimEnv) -> u64 = $latency;
+                record(ctx, &env, &env.$probe, $render, latency(&env), input).await
+            }
+        }
+    )*};
 }
 
-/// The operators of the simulated graphs.
-pub fn registry<P: Providers>(env: &Arc<SimEnv>) -> Registry<P> {
+recording_sinks! {
+    /// Records the counts of the first-level windows.
+    Counts("sim/counts@1"): Windowed<u64> => counts, render_count, |env| env.sink_latency_ms;
+    /// Records every event, read straight from the source.
+    Raw("sim/raw@1"): SimEvent => raw, render_event, |_| 8;
+    /// Records every event twice, once per branch of the diamond.
+    Both("sim/both@1"): SimEvent => both, render_event, |_| 8;
+    /// Records the counts of the second-level windows.
+    Totals("sim/totals@1"): Windowed<u64> => totals, render_count, |_| 8;
+}
+
+/// Key of an event.
+#[derive(Debug, Clone, Copy, Default, streaming_core::Operator)]
+#[operator("sim/key@1")]
+pub struct ByKey;
+
+impl Transformer<SimEvent> for ByKey {
+    type Out = Keyed<SimEvent>;
+
+    fn transform(&self, input: Pipe<SimEvent>) -> Pipe<Keyed<SimEvent>> { input.key_by(|event| event.key.clone()) }
+}
+
+/// First parallel branch.
+#[derive(Debug, Clone, Copy, Default, streaming_core::Operator)]
+#[operator("sim/branch-a@1")]
+pub struct BranchA;
+
+/// Second parallel branch.
+#[derive(Debug, Clone, Copy, Default, streaming_core::Operator)]
+#[operator("sim/branch-b@1")]
+pub struct BranchB;
+
+impl Transformer<SimEvent> for BranchA {
+    type Out = SimEvent;
+
+    fn transform(&self, input: Pipe<SimEvent>) -> Pipe<SimEvent> { input.map(SimEvent::clone) }
+}
+
+impl Transformer<SimEvent> for BranchB {
+    type Out = SimEvent;
+
+    // Written with a filter and a map in a row: one node all the same.
+    fn transform(&self, input: Pipe<SimEvent>) -> Pipe<SimEvent> { input.filter(|_| true).map(SimEvent::clone) }
+}
+
+/// One key for everything.
+#[derive(Debug, Clone, Copy, Default, streaming_core::Operator)]
+#[operator("sim/all@1")]
+pub struct All;
+
+impl Transformer<Windowed<u64>> for All {
+    type Out = Keyed<Windowed<u64>>;
+
+    fn transform(&self, input: Pipe<Windowed<u64>>) -> Pipe<Self::Out> { input.key_by(|_| "all".to_owned()) }
+}
+
+/// The operators of the simulated graphs. Their world is found in what the
+/// workers of the run share ([`shared`]).
+///
+/// # Panics
+///
+/// Never: every operator of the simulation is one kind of operator.
+#[must_use]
+pub fn registry<P: Providers>() -> Registry<P> {
+    let known = "an operator of the simulation is one kind of operator";
     let mut registry = Registry::<P>::standard();
-    {
-        let env = env.clone();
-        registry.register_source::<SimEvent>("sim/log@1", "Simulated topic.", move |context, _| {
-            Ok(Arc::new(ChaosSource {
-                env: env.clone(),
-                providers: context.providers.clone(),
-            }) as Arc<dyn SourceConnector>)
-        });
-    }
-    registry.register_key("sim/key@1", "Key of an event.", |event: &SimEvent| event.key.clone());
-    registry.register_map("sim/branch-a@1", "First parallel branch.", |event: &SimEvent| {
-        Some(event.clone())
-    });
-    registry.register_map("sim/branch-b@1", "Second parallel branch.", |event: &SimEvent| {
-        Some(event.clone())
-    });
-    registry.register_key("sim/all@1", "One key for everything.", |_: &Windowed<u64>| {
-        "all".to_owned()
-    });
-    let sinks: [(&str, Arc<SinkProbe>, Render); 4] = [
-        ("sim/counts@1", env.counts.clone(), render_count),
-        ("sim/raw@1", env.raw.clone(), render_event),
-        ("sim/both@1", env.both.clone(), render_event),
-        ("sim/totals@1", env.totals.clone(), render_count),
-    ];
-    for (op, probe, render) in sinks {
-        let env = env.clone();
-        let latency_ms = if op == "sim/counts@1" { env.sink_latency_ms } else { 8 };
-        registry.register_sink(op, "Recording sink.", TypeTag::Any, move |context, _| {
-            Ok(Arc::new(ChaosSink {
-                env: env.clone(),
-                probe: probe.clone(),
-                providers: context.providers.clone(),
-                render,
-                latency_ms,
-            }) as Arc<dyn SinkConnector>)
-        });
-    }
+    registry.source::<SimLog>();
+    registry.transformer(&ByKey).expect(known);
+    registry.transformer(&BranchA).expect(known);
+    registry.transformer(&BranchB).expect(known);
+    registry.transformer(&All).expect(known);
+    registry.sink::<Windowed<u64>, Counts>();
+    registry.sink::<SimEvent, Raw>();
+    registry.sink::<SimEvent, Both>();
+    registry.sink::<Windowed<u64>, Totals>();
     registry
+}
+
+/// What the operators of a worker of the run `env` share: its world.
+#[must_use]
+pub fn shared(env: &Arc<SimEnv>) -> Arc<Shared> {
+    let shared = Shared::default();
+    shared.insert(env.clone());
+    Arc::new(shared)
 }
 
 /// How the simulated cluster is set up.
@@ -720,6 +934,11 @@ pub struct Scenario {
     /// worker after the other while events flow, and the graph leaves the
     /// code before it is deleted.
     pub deploy: bool,
+    /// How the topic is read. `false`: the source hands its partition to a
+    /// connector the engine drives itself, as a source built on an existing
+    /// connector does. `true`: the source pushes every record into its
+    /// pipe, and learns through it what the engine commits.
+    pub piped: bool,
 }
 
 impl Default for Scenario {
@@ -751,6 +970,7 @@ impl Default for Scenario {
             gossip: false,
             settle_timeout: Duration::from_secs(900),
             deploy: false,
+            piped: false,
         }
     }
 }
@@ -799,6 +1019,9 @@ impl Scenario {
             gossip: pick(&[0, 0, 0, 1]) == 1,
             settle_timeout: Duration::from_secs(900),
             deploy: pick(&[0, 0, 0, 1]) == 1,
+            // Drawn last: the configurations of the seeds already met keep
+            // everything else.
+            piped: pick(&[0, 1]) == 1,
         };
         // The run must have time to finish. Emitting a window takes one epoch,
         // hence one commit, per `max_batch` of its keys: too many of them
@@ -993,8 +1216,9 @@ impl WorkerProcess {
         config.ignore_placement = self.scenario.duel;
         config.declared = declared;
         let runtime = RuntimeEnv {
+            shared: shared(env),
             clock: Arc::new(SimClock::drifting(providers.time().clone())),
-            registry: Arc::new(registry::<SimProviders>(env)),
+            registry: Arc::new(registry::<SimProviders>()),
             secrets: Arc::new(NoSecrets),
             kv,
             providers,
@@ -1052,7 +1276,7 @@ impl WorkerProcess {
         worker: Worker<SimProviders>,
     ) {
         let clock = SimClock::drifting(ctx.time().clone());
-        let catalog = registry::<SimProviders>(env).catalog();
+        let catalog = registry::<SimProviders>().catalog();
         let tenants: Vec<(TenantId, Option<String>)> = self
             .scenario
             .code(0)
@@ -1252,7 +1476,7 @@ impl Driver {
             .await
             .map_err(failed)?;
         let clock = SimClock::exact(ctx.time().clone());
-        let catalog = registry::<SimProviders>(env).catalog();
+        let catalog = registry::<SimProviders>().catalog();
         let tenants: Vec<(TenantId, Option<String>)> =
             scenario.code(0).into_iter().map(|graph| (graph.tenant, None)).collect();
         let publication = control::publish(

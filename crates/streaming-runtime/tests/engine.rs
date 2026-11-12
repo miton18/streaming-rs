@@ -104,7 +104,7 @@ async fn counts_every_record_exactly_once() {
     let raw = Arc::new(Collect::default());
 
     let mut registry = Registry::<TokioProviders>::standard();
-    builtin::register(&mut registry, kv.clone());
+    builtin::register(&mut registry);
     {
         let log = log.clone();
         registry.register_source::<Event>("test/log@1", "", move |context, _| {
@@ -123,6 +123,7 @@ async fn counts_every_record_exactly_once() {
     config.controller_grace = Duration::ZERO;
     let worker = Worker::new(
         RuntimeEnv {
+            shared: Arc::default(),
             providers,
             kv: kv.clone(),
             clock: Arc::new(SystemClock),
@@ -251,9 +252,9 @@ impl Kv for Behind {
     async fn hdel(&self, key: &str, fields: Vec<String>) -> Result<(), KvError> { self.store.hdel(key, fields).await }
 }
 
-fn registry(kv: &DynKv, log: &Arc<MemLog>, counts: &Arc<Collect>, raw: &Arc<Collect>) -> Registry<TokioProviders> {
+fn registry(log: &Arc<MemLog>, counts: &Arc<Collect>, raw: &Arc<Collect>) -> Registry<TokioProviders> {
     let mut registry = Registry::<TokioProviders>::standard();
-    builtin::register(&mut registry, kv.clone());
+    builtin::register(&mut registry);
     {
         let log = log.clone();
         registry.register_source::<Event>("test/log@1", "", move |context, _| {
@@ -276,6 +277,7 @@ fn start(kv: DynKv, registry: Registry<TokioProviders>) -> (CancellationToken, t
     config.restart_backoff = Duration::from_millis(100);
     let worker = Worker::new(
         RuntimeEnv {
+            shared: Arc::default(),
             providers: TokioProviders::new(),
             kv,
             clock: Arc::new(SystemClock),
@@ -328,7 +330,7 @@ async fn a_slice_behind_what_another_instance_acknowledged_starts_again() {
 
     // Long enough an idle timeout for the first instance to be stopped
     // before it closes the window itself.
-    let (shutdown, running) = start(kv.clone(), registry(&kv, &log, &counts, &raw));
+    let (shutdown, running) = start(kv.clone(), registry(&log, &counts, &raw));
     submit(&kv, &spec_idle_after("3s")).await;
     let ts = SystemClock.now_ms();
     let mut last = None;
@@ -361,7 +363,7 @@ async fn a_slice_behind_what_another_instance_acknowledged_starts_again() {
         store: store.clone(),
         earlier: Mutex::new(earlier),
     });
-    let (shutdown, running) = start(behind.clone(), registry(&kv, &log, &counts, &raw));
+    let (shutdown, running) = start(behind.clone(), registry(&log, &counts, &raw));
     let worker = WorkerId::new("worker-a").unwrap();
     let mut started = false;
     for _ in 0..300 {

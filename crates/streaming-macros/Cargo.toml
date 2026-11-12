@@ -1,0 +1,16 @@
+[package]
+name = "streaming-macros"
+description = "The derives of streaming-rs: `Operator` (a structure whose fields are the parameters of an operator) and `Param` (an enumeration offered as a choice)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro-crate = "3"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

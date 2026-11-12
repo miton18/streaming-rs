@@ -51,4 +51,7 @@ pub struct RuntimeEnv<P: Providers> {
     pub secrets: Arc<dyn SecretProvider>,
     /// The operators compiled into this worker.
     pub registry: Arc<Registry<P>>,
+    /// What the operators of the process share
+    /// ([`streaming_core::OpContext::shared`]).
+    pub shared: Arc<streaming_core::Shared>,
 }

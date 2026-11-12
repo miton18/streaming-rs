@@ -32,28 +32,17 @@ fn count_per_key() -> GraphBuilder {
         flush_interval: Duration::from_millis(500),
         ..GraphSettings::default()
     });
-    let events = graph.node(
+    let events = graph.source(
         "events",
-        PulsarSource {
-            service_url: service_url.clone(),
-            topic: env("E2E_TOPIC", None),
-            subscription: "count-per-key".to_owned(),
-        },
+        PulsarSource::new(service_url.clone(), env("E2E_TOPIC", None), "count-per-key"),
     );
     let by_key = graph.then(events, "by-key", PulsarKey);
-    let window = graph.then(by_key, "window", Tumbling::of(Duration::from_secs(5)));
-    let count = graph.then(window, "count", Count);
-    let to_json = graph.then(count, "to-json", CountToJson);
-    graph.then(to_json, "results", KvSink { retain: 1000 });
-    let to_pulsar = graph.then(count, "to-pulsar", CountToPulsar);
-    graph.then(
-        to_pulsar,
-        "out",
-        PulsarSink {
-            service_url,
-            topic: env("E2E_OUT", None),
-        },
-    );
+    let windows = graph.then(by_key, "window", Tumbling::of(Duration::from_secs(5)));
+    let counts = graph.then(windows, "count", Count);
+    let rows = graph.then(counts, "to-json", CountToJson);
+    graph.sink(rows, "results", KvSink { retain: 1000 });
+    let messages = graph.then(counts, "to-pulsar", CountToPulsar);
+    graph.sink(messages, "out", PulsarSink::new(service_url, env("E2E_OUT", None)));
     graph
 }
 

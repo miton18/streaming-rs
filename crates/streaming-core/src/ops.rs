@@ -34,6 +34,9 @@ pub enum OpError {
     /// The operator failed on a value.
     #[error("operator failed: {0}")]
     Failed(String),
+    /// The pipe of the operator is closed: its node is stopping.
+    #[error("the pipe is closed")]
+    Closed,
 }
 
 /// A source failure. The runtime retries with backoff.

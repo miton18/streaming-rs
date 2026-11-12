@@ -405,3 +405,81 @@ fn exactly_once_across_deployments_without_placement() {
     let report = run(scenario, 3, true, 15);
     assert_clean(&report);
 }
+
+// The scenarios below read the topic through a source that pushes every
+// record into its pipe, and learns through it what the engine commits, where
+// the others hand their partitions to a connector the engine drives itself.
+
+#[test]
+fn exactly_once_with_a_source_that_pushes() {
+    let scenario = Scenario {
+        piped: true,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 25);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_a_source_that_pushes_in_a_hostile_mix() {
+    // Workers fighting over every slice, an operator interfering, three
+    // times the faults: the source stops, redelivers and loses its
+    // acknowledgements at every turn.
+    let scenario = Scenario {
+        piped: true,
+        duel: true,
+        operator: true,
+        keys: 60,
+        events: 1_200,
+        produce_for: Duration::from_secs(30),
+        fault_scale: 3.0,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_a_source_that_pushes_behind_a_slow_sink() {
+    // The pipe is full most of the time: the source spends its time held
+    // back, and still has to acknowledge what is committed meanwhile.
+    let scenario = Scenario {
+        piped: true,
+        sink_latency_ms: 3_000,
+        max_pending_windows: 1,
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_a_source_that_pushes_now_and_then() {
+    // Sparse traffic, a short idle timeout and a partition that never says
+    // anything: the engine keeps asking where the partitions end, and what
+    // the source answers decides whether windows close too early.
+    let scenario = Scenario {
+        piped: true,
+        partitions: 4,
+        silent_partitions: 1,
+        events: 600,
+        produce_for: Duration::from_secs(60),
+        idle_timeout: Duration::from_millis(300),
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}
+
+#[test]
+fn exactly_once_with_a_source_that_pushes_while_partitions_come_and_go() {
+    let scenario = Scenario {
+        piped: true,
+        repartition: true,
+        duel: true,
+        slide: Duration::from_millis(500),
+        ..Scenario::default()
+    };
+    let report = run(scenario, 3, true, 10);
+    assert_clean(&report);
+}

@@ -11,32 +11,36 @@ use streaming_core::{
     Emit, EmitId, GraphId, NodeId, OpContext, Origin, Position, SinkConnector, SliceId, SourceConnector, StaticSecrets,
     SystemClock, TenantId, datum,
 };
-use streaming_pulsar::{PulsarMessage, PulsarOutput, PulsarSink, PulsarSource, SinkConfig, SourceConfig};
+use streaming_pulsar::{
+    PulsarMessage, PulsarOutput, PulsarSinkConnector, PulsarSourceConnector, SinkConfig, SourceConfig,
+};
 
 fn context() -> OpContext<TokioProviders> {
     OpContext {
         providers: TokioProviders::new(),
         clock: Arc::new(SystemClock),
         secrets: Arc::new(StaticSecrets::new()),
+        kv: Arc::new(streaming_core::MemKv::new()),
+        shared: Arc::default(),
         tenant: TenantId::new("acme").unwrap(),
         graph: GraphId::new("g").unwrap(),
         node: NodeId::new("n").unwrap(),
     }
 }
 
-fn source(broker: &Broker, config: serde_json::Value) -> PulsarSource<TokioProviders> {
+fn source(broker: &Broker, config: serde_json::Value) -> PulsarSourceConnector<TokioProviders> {
     let mut config = config;
     config["serviceUrl"] = json!(broker.url);
-    PulsarSource::new(
+    PulsarSourceConnector::new(
         TokioProviders::new(),
         SourceConfig::from_json(&context(), &config).unwrap(),
     )
 }
 
-fn sink(broker: &Broker, config: serde_json::Value) -> PulsarSink<TokioProviders> {
+fn sink(broker: &Broker, config: serde_json::Value) -> PulsarSinkConnector<TokioProviders> {
     let mut config = config;
     config["serviceUrl"] = json!(broker.url);
-    PulsarSink::new(
+    PulsarSinkConnector::new(
         TokioProviders::new(),
         SinkConfig::from_json(&context(), &config).unwrap(),
     )

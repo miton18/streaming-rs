@@ -53,12 +53,12 @@ fn err(context: &str, error: impl std::fmt::Display) -> SourceError {
 }
 
 /// The connector: one shared client, one consumer per opened partition.
-pub struct PulsarSource<P: Providers> {
+pub struct PulsarSourceConnector<P: Providers> {
     config: SourceConfig,
     client: ClientCell<P>,
 }
 
-impl<P: Providers> PulsarSource<P> {
+impl<P: Providers> PulsarSourceConnector<P> {
     /// A source reading `config`, connecting lazily through `providers`.
     #[must_use]
     pub fn new(providers: P, config: SourceConfig) -> Self {
@@ -77,7 +77,7 @@ impl<P: Providers> PulsarSource<P> {
 }
 
 #[async_trait]
-impl<P: Providers> SourceConnector for PulsarSource<P> {
+impl<P: Providers> SourceConnector for PulsarSourceConnector<P> {
     async fn partitions(&self) -> Result<u32, SourceError> {
         let conn = self.client.get().await.map_err(|e| err("connect", e))?;
         let result = self.partition_count(&conn).await;

@@ -37,7 +37,7 @@ use streaming_core::{
     SinkConnector, SliceId, SourceConnector, SourceRecord, StaticSecrets, SystemClock, TenantId, datum,
 };
 use streaming_pulsar::{
-    EMIT_ID_PROPERTY, PulsarMessage, PulsarOutput, PulsarSink, SinkConfig, WriteStats, partition_topic,
+    EMIT_ID_PROPERTY, PulsarMessage, PulsarOutput, PulsarSinkConnector, SinkConfig, WriteStats, partition_topic,
 };
 
 mod common;
@@ -95,6 +95,8 @@ fn context() -> OpContext<TokioProviders> {
         providers: TokioProviders::new(),
         clock: Arc::new(SystemClock),
         secrets: Arc::new(StaticSecrets::new()),
+        kv: Arc::new(streaming_core::MemKv::new()),
+        shared: Arc::default(),
         tenant,
         graph: GraphId::new("g").unwrap(),
         node: NodeId::new("n").unwrap(),
@@ -181,6 +183,15 @@ async fn drain(reader: &mut Box<dyn PartitionReader>, count: usize, within: Dura
 
 fn msg(record: &SourceRecord) -> &PulsarMessage { record.value.downcast_ref::<PulsarMessage>().unwrap() }
 
+/// Whether the source refuses to read `partition`. The operator opens the
+/// partition when its node starts: the refusal comes with the first read.
+async fn refuses(source: &dyn SourceConnector, partition: u32) -> bool {
+    match source.open(partition, None).await {
+        Ok(mut reader) => reader.poll(1, Duration::from_secs(5)).await.is_err(),
+        Err(_) => true,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_reads_partitions_acks_and_redelivers() {
     let Some(url) = broker() else { return };
@@ -200,7 +211,7 @@ async fn source_reads_partitions_acks_and_redelivers() {
     });
     let source = make_source(config.clone());
     assert_eq!(source.partitions().await.unwrap(), 3);
-    assert!(source.open(3, None).await.is_err(), "partition 3 does not exist");
+    assert!(refuses(source.as_ref(), 3).await, "partition 3 does not exist");
 
     let mut reader = source.open(1, None).await.expect("open partition 1");
     let records = drain(&mut reader, 13, Duration::from_secs(20)).await;
@@ -337,7 +348,7 @@ async fn non_partitioned_topic_is_one_partition() {
     produce(&client, &topic, false, (0..2).map(message).collect()).await;
     let source = make_source(json!({"serviceUrl": url, "topic": topic, "subscription": "s"}));
     assert_eq!(source.partitions().await.unwrap(), 1);
-    assert!(source.open(1, None).await.is_err());
+    assert!(refuses(source.as_ref(), 1).await);
     let mut reader = source.open(0, None).await.unwrap();
     let records = drain(&mut reader, 2, Duration::from_secs(20)).await;
     assert_eq!(records.len(), 2);
@@ -425,8 +436,8 @@ async fn sink_round_trip_with_emit_ids() {
     assert!(sink.write(&[emit(1, Position(3, 0, 0), None, "x")]).await.is_err());
 }
 
-fn concrete_sink(config: Value) -> PulsarSink<TokioProviders> {
-    PulsarSink::new(
+fn concrete_sink(config: Value) -> PulsarSinkConnector<TokioProviders> {
+    PulsarSinkConnector::new(
         TokioProviders::new(),
         SinkConfig::from_json(&context(), &config).expect("valid sink config"),
     )

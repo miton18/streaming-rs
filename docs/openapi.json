@@ -1297,9 +1297,16 @@
           },
           "params": {
             "default": [],
-            "description": "The parameters of its configuration, for tools that build graphs.\nEmpty when the operator takes none, or does not say.",
+            "description": "The parameters of its configuration the API and the UI may change.\nEmpty when the operator exposes none.",
             "items": {
               "$ref": "#/components/schemas/ParamSpec"
+            },
+            "type": "array"
+          },
+          "signatures": {
+            "description": "What the operator takes and gives, case by case, when it is written\nfor several types and its output depends on its input. Empty\notherwise: `input` and `output` say it all.",
+            "items": {
+              "$ref": "#/components/schemas/Signature"
             },
             "type": "array"
           }
@@ -1537,6 +1544,24 @@
             "type": "string"
           }
         ]
+      },
+      "Signature": {
+        "description": "One of the types an operator accepts, and what it produces from it.",
+        "properties": {
+          "input": {
+            "$ref": "#/components/schemas/TypeTag",
+            "description": "Type of the accepted values."
+          },
+          "output": {
+            "$ref": "#/components/schemas/TypeTag",
+            "description": "Type of the values produced from them."
+          }
+        },
+        "required": [
+          "input",
+          "output"
+        ],
+        "type": "object"
       },
       "SliceId": {
         "description": "A slice: `src.<node>.<partition>` (one source partition) or `agg.<node>` (the emitter of an aggregate).",

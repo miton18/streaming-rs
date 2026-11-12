@@ -1,41 +1,18 @@
 //! Configuration of the sink.
 
 use crate::{gts::TimeUnit, http::Endpoint};
-use serde::Deserialize;
-use serde_json::Value;
 use std::{fmt, time::Duration};
-use streaming_core::{OpError, parse_duration};
+use streaming_core::OpError;
 
 /// Default request timeout.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default maximum size of the body of one request.
 pub const DEFAULT_MAX_BATCH_BYTES: usize = 1024 * 1024;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "camelCase")]
-struct RawConfig {
-    endpoint: String,
-    token: Value,
-    #[serde(default)]
-    time_unit: Option<String>,
-    #[serde(default)]
-    timeout: Option<String>,
-    #[serde(default)]
-    max_batch_bytes: Option<usize>,
-}
-
-/// Validated configuration of a [`crate::Warp10Sink`].
+/// Validated configuration of a [`crate::Warp10Writer`].
 ///
-/// JSON form (`std/warp10-sink@1`):
-///
-/// ```json
-/// {"endpoint": "https://host/api/v0/update",
-///  "token": "..." | {"secret": "name"},
-///  "timeUnit": "us", "timeout": "10s", "maxBatchBytes": 1048576}
-/// ```
-///
-/// Only `endpoint` and `token` are required.
+/// Built from the node configuration by [`crate::Warp10Sink::config`], once
+/// the token is known.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Warp10Config {
     /// Where to POST (`http://` or, with the `tls` feature, `https://`).
@@ -88,29 +65,6 @@ impl Warp10Config {
         Ok(config)
     }
 
-    /// Parse the JSON node configuration. `resolve_token` turns the `token`
-    /// value (a literal string or `{"secret": "name"}`) into the token, e.g.
-    /// `|v| ctx.secret_or_literal(v)`.
-    pub fn from_json(
-        config: &Value,
-        resolve_token: impl FnOnce(&Value) -> Result<String, OpError>,
-    ) -> Result<Self, OpError> {
-        let raw: RawConfig =
-            serde_json::from_value(config.clone()).map_err(|e| OpError::Config(format!("std/warp10-sink@1: {e}")))?;
-        let mut out = Self::new(&raw.endpoint, resolve_token(&raw.token)?)?;
-        if let Some(unit) = raw.time_unit {
-            out.time_unit = TimeUnit::parse(&unit).map_err(OpError::Config)?;
-        }
-        if let Some(timeout) = raw.timeout {
-            out.timeout = parse_duration(&timeout).map_err(|e| OpError::Config(format!("timeout: {e}")))?;
-        }
-        if let Some(max) = raw.max_batch_bytes {
-            out.max_batch_bytes = max;
-        }
-        out.validate()?;
-        Ok(out)
-    }
-
     /// Check the invariants; called by the constructors.
     pub fn validate(&self) -> Result<(), OpError> {
         if self.endpoint.tls && !cfg!(feature = "tls") {
@@ -139,81 +93,34 @@ impl Warp10Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    fn literal(v: &Value) -> Result<String, OpError> {
-        v.as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| OpError::Config("not a literal".into()))
-    }
 
     #[test]
-    fn defaults() {
-        let c = Warp10Config::from_json(
-            &json!({"endpoint": "http://h:8080/api/v0/update", "token": "t"}),
-            literal,
-        )
-        .unwrap();
-        assert_eq!(c.time_unit, TimeUnit::Us);
-        assert_eq!(c.timeout, Duration::from_secs(10));
-        assert_eq!(c.max_batch_bytes, 1_048_576);
-        assert_eq!(c.endpoint.address(), "h:8080");
-        assert_eq!(c.token, "t");
-    }
-
-    #[test]
-    fn everything_set() {
-        let c = Warp10Config::from_json(
-            &json!({"endpoint": "http://h/api/v0/update", "token": "t", "timeUnit": "ns",
-                    "timeout": "250ms", "maxBatchBytes": 100}),
-            literal,
-        )
-        .unwrap();
-        assert_eq!(c.time_unit, TimeUnit::Ns);
-        assert_eq!(c.timeout, Duration::from_millis(250));
-        assert_eq!(c.max_batch_bytes, 100);
-    }
-
-    #[test]
-    fn the_token_resolver_receives_the_raw_value() {
-        let c = Warp10Config::from_json(&json!({"endpoint": "http://h/", "token": {"secret": "w"}}), |v| {
-            assert_eq!(v, &json!({"secret": "w"}));
-            Ok("resolved".into())
-        })
-        .unwrap();
-        assert_eq!(c.token, "resolved");
-        // an unresolvable secret is a configuration error
-        assert!(Warp10Config::from_json(&json!({"endpoint": "http://h/", "token": 1}), literal).is_err());
+    fn a_configuration_starts_from_the_defaults() {
+        let config = Warp10Config::new("http://h:8080/api/v0/update", "t").unwrap();
+        assert_eq!(config.time_unit, TimeUnit::Us);
+        assert_eq!(config.timeout, DEFAULT_TIMEOUT);
+        assert_eq!(config.max_batch_bytes, DEFAULT_MAX_BATCH_BYTES);
+        assert_eq!(config.endpoint.address(), "h:8080");
+        assert!(config.connect_address.is_none());
     }
 
     #[test]
     fn invalid_configurations() {
-        let base = |extra: Value| {
-            let mut v = json!({"endpoint": "http://h/", "token": "t"});
-            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            Warp10Config::from_json(&v, literal)
-        };
-        assert!(base(json!({"timeUnit": "s"})).is_err());
-        assert!(base(json!({"timeout": "soon"})).is_err());
-        assert!(base(json!({"timeout": "0s"})).is_err());
-        assert!(base(json!({"maxBatchBytes": 0})).is_err());
-        assert!(base(json!({"unknown": 1})).is_err());
-        assert!(base(json!({"endpoint": "ftp://h/"})).is_err());
-        assert!(base(json!({"token": ""})).is_err());
-        assert!(base(json!({"token": "a\nb"})).is_err());
-        assert!(Warp10Config::from_json(&json!({"token": "t"}), literal).is_err());
-        assert!(Warp10Config::from_json(&json!(null), literal).is_err());
+        assert!(Warp10Config::new("ftp://h/", "t").is_err());
+        assert!(Warp10Config::new("http://h/", "").is_err());
+        assert!(Warp10Config::new("http://h/", "a\nb").is_err());
+        let mut config = Warp10Config::new("http://h/", "t").unwrap();
+        config.timeout = Duration::ZERO;
+        assert!(config.validate().is_err());
+        let mut config = Warp10Config::new("http://h/", "t").unwrap();
+        config.max_batch_bytes = 0;
+        assert!(config.validate().is_err());
     }
 
     #[cfg(not(feature = "tls"))]
     #[test]
     fn https_without_the_tls_feature_is_a_clear_error() {
-        let err = Warp10Config::from_json(
-            &json!({"endpoint": "https://warp.example/api/v0/update", "token": "t"}),
-            literal,
-        )
-        .unwrap_err();
-        let OpError::Config(message) = err else {
+        let OpError::Config(message) = Warp10Config::new("https://warp.example/api/v0/update", "t").unwrap_err() else {
             panic!("expected a configuration error")
         };
         assert!(message.contains("https") && message.contains("`tls` cargo feature"));

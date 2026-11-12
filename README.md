@@ -47,13 +47,12 @@ workers and the HTTP API read them. A graph the code no longer has is
 stopped and keeps its state (it is an *orphan*): it runs again on that state
 if the code declares it again, and is deleted, state included, only when
 someone asks for it through the API or the UI. A graph is validated before it is published: acyclic, every operator
-known, types matching along each edge, the configuration of every map, key,
-window and aggregate accepted by its operator.
+known, types matching along each edge, the configuration of every node
+accepted by its operator.
 
 ```rust
 App::new()
     .tenant("acme", "Acme Corporation")
-    .operators(|registry| { /* registry.register_map(...) */ })
     .graph(count_per_key())                 // a GraphBuilder, see below
     .main()                                 // `standalone` or `worker`
 ```
@@ -169,7 +168,8 @@ light gossip for membership: each worker gossips a couple of hundred bytes
 
 | crate | role |
 |---|---|
-| `streaming-core` | contracts: ids, graph description and validation, operator traits and registry, KV trait, control-plane documents |
+| `streaming-core` | contracts: ids, graph description and validation, the `Operator`, `Source`, `Sink` and `Transformer` traits and their pipes, the registry, KV trait, control-plane documents |
+| `streaming-macros` | `#[derive(Operator)]` and `#[derive(Param)]` |
 | `streaming-runtime` | the engine: actors, edges, epochs, commit log, window state, worker loop, controller and placement |
 | `streaming-gossip` | Scuttlebutt gossip membership written against Moonpool providers |
 | `streaming-kv-redis` | RESP client for Redis and Materia KV (`HSCAN` paging, size limits, optional TLS) |
@@ -214,66 +214,141 @@ The API has no authentication: do not expose it publicly.
 
 ## Writing operators
 
-Every application has the `std/*` operators and the connectors. Its own
-operators are registered by `App::operators`, called once per worker:
+An operator is a structure, and one trait saying what it does.
+
+The structure is its configuration: `#[derive(Operator)]` names it
+(`#[operator("acme/thing@1")]`), takes the line the catalogue shows from its
+documentation comment, and turns the fields marked `#[param]` into the
+parameters the API and the UI may change, with their default value and their
+bounds. A field without `#[param]` is fixed by the code. The stored
+configuration is the structure as JSON (camelCase names, unknown fields
+refused), so what the code declares is what a worker runs.
 
 ```rust
-App::new().operators(|registry| {
-    registry.register_map("acme/decode@1", "Decodes an event.", |bytes: &Vec<u8>| {
-        serde_json::from_slice::<Event>(bytes).ok()      // None filters the record out
-    });
-    registry.register_key("acme/by-user@1", "Groups by user.", |event: &Event| event.user.clone());
-    registry.register_aggregator("acme/revenue@1", "Sums amounts.", |_: IgnoredAny| Ok(Revenue));
-    // The fields the API may change at run time.
-    registry.with_params("acme/revenue@1", [ParamSpec::new("currency", "string", "Currency.")]);
-})
+/// Synthetic events, as JSON bytes.
+#[derive(Debug, Clone, Operator)]
+#[operator("acme/generator@1")]
+pub struct Generator {
+    /// Number of partitions.
+    #[param(default = 4, min = 1, max = 64)]
+    pub partitions: u32,
+    /// Events per second.
+    #[param(default = 2000, max = 200000)]
+    pub rate_per_sec: u64,
+}
 ```
 
-An aggregator implements `init`, `add`, `merge` and `finish`; `merge` is
+A parameter is of any type implementing `Param`: integers, floats, `bool`,
+`String`, `Duration` (`"5m"`), `Secret` (the text, or `{"secret": "name"}`,
+revealed by `ctx.reveal`), `serde_json::Value`, `Option` of these, and the
+enumerations deriving `Param` (shown as a list of choices). `check = path`
+in `#[operator(...)]` names a function refusing what the bounds cannot say.
+
+**A source** is started once per partition, with a pipe to push into:
+
+```rust
+impl Source for Generator {
+    type Out = Vec<u8>;
+
+    async fn partitions<P: Providers>(&self, _: &Context<P>) -> Result<u32, OpError> { Ok(self.partitions) }
+
+    async fn start<P: Providers>(
+        &self, ctx: &Context<P>, partition: u32, after: Option<Position>, out: SourcePipe<Vec<u8>>,
+    ) -> Result<(), OpError> {
+        let mut next = after.map_or(0, |position| position.2 + 1);
+        loop {
+            // Waits while downstream is full: this is the backpressure.
+            out.send(Position(0, 0, next), ctx.clock.now_ms(), event(next)).await?;
+            next += 1;
+        }
+    }
+}
+```
+
+`after` is the last position the engine committed: the source resumes behind
+it. `out.committed()` gives the positions the engine commits, for a source
+that acknowledges to a broker, and `out.end(..)` says where the partition
+ends, which is how the engine tells an idle partition from a reader that
+lags. A source built on a connector that already exists hands it the
+partition with `out.read(&connector, partition, after)`.
+
+**A sink** receives a pipe of batches, and confirms each one:
+
+```rust
+impl Sink<Event> for Archive {
+    async fn start<P: Providers>(&self, ctx: &Context<P>, mut input: SinkPipe<Event>) -> Result<(), OpError> {
+        while let Some(batch) = input.next().await {
+            for element in batch.iter() { /* element.id, element.value */ }
+            batch.done();               // or batch.failed("why")
+        }
+        Ok(())
+    }
+}
+```
+
+A batch that is not confirmed (the sink said it failed, asked for the next
+one, returned, or the worker died) comes back with the same emit ids: the
+destination must be idempotent on them. `impl<T> Sink<T> for Archive` makes a
+sink of any type.
+
+**Everything else is a transformer**: it takes a pipe and returns a pipe.
+
+```rust
+impl Transformer<Vec<u8>> for Decode {
+    type Out = Event;
+    fn transform(&self, input: Pipe<Vec<u8>>) -> Pipe<Event> {
+        input.filter_map(|bytes| serde_json::from_slice::<Event>(bytes).ok())
+    }
+}
+
+impl Transformer<Event> for ByUser {
+    type Out = Keyed<Event>;
+    fn transform(&self, input: Pipe<Event>) -> Pipe<Keyed<Event>> { input.key_by(|event| event.user.clone()) }
+}
+```
+
+`map`, `filter`, `filter_map` and `flat_map` may follow one another; `key_by`
+gives a `Pipe<Keyed<T>>`, on which `window` gives a `Pipe<Windows<T>>`, on
+which `aggregate(init, add, merge)` gives a `Pipe<Windowed<A>>`. `merge` is
 required because the state of one key may be spread over several partitions.
-Sources and sinks implement `SourceConnector` and `SinkConnector`. An
-application whose graph references an operator it does not register refuses
-to start.
+A transformer is one node of the graph, hence one of these steps (several
+maps count as one): the engine cuts a graph into slices at its aggregates,
+and a key, a window and an aggregate are three nodes. The types are checked
+by the compiler: a window on a pipe without key does not build.
 
 ## Building graphs in Rust
 
-A graph is built with `GraphBuilder`, each node holding a typed operator: a type implementing
-`Operator`, whose `OP` names the registered operator and whose fields are its
-configuration. The factory deserializes the node configuration into the same
-type, so what the builder stores is what the worker runs.
+`GraphBuilder` connects typed nodes, and registers the operators it names:
 
 ```rust
-#[derive(Serialize, Deserialize)]
-struct Decode;                                          // no configuration
-impl Operator for Decode { const OP: &'static str = "acme/decode@1"; }
-
-registry.register_map(Decode::OP, "Decodes an event.", |bytes: &Vec<u8>| {
-    serde_json::from_slice::<Event>(bytes).ok()
-});
-
 let mut graph = GraphBuilder::new("acme", "count-per-key").settings(GraphSettings {
     max_pending_windows: 3,
     ..GraphSettings::default()
 });
-let events = graph.node("events", Events { partitions: 4 }); // your source
-let decode = graph.then(events, "decode", Decode);
-let by_user = graph.then(decode, "by-user", ByUser);
-let window = graph.then(by_user, "window", Tumbling::of(Duration::from_secs(300)));
-let count = graph.then(window, "count", Count);
-let to_row = graph.then(count, "to-row", CountToJson);
-graph.then(to_row, "results", KvSink { retain: 400 });
-let archive = graph.node("archive", Archive);
-graph.edge(decode, archive);                            // any DAG
-let spec: GraphSpec = graph.build()?;                   // ids checked here
+let events = graph.source("events", Generator { partitions: 4, rate_per_sec: 2_000 });
+let decoded = graph.then(events, "decode", Decode);
+let by_user = graph.then(decoded, "by-user", ByUser);
+let windows = graph.then(by_user, "window", Tumbling::of(Duration::from_secs(300)));
+let counts = graph.then(windows, "count", Count);
+let rows = graph.then(counts, "to-row", CountToJson);
+graph.sink(rows, "results", KvSink { retain: 400 });
+graph.sink(decoded, "archive", Archive);                // any DAG
 ```
 
-`build` checks identifiers and duplicate nodes; the application checks the
-graph against its operators when it starts (kinds, wiring, types,
-configurations). The `std/*` operators have their types (`Tumbling`,
-`Sliding`, `Count`, `Identity`, `KvSink`, and in `streaming::stock`
-`CountToJson`, `CountToGts` and the Pulsar nodes);
+`source`, `then` and `sink` only accept an operator written for what flows
+out of the node it is connected to. The application checks the graph when it
+starts (wiring, types, the configuration of every node against its operator)
+and refuses to run otherwise. The `std/*` operators have their types
+(`Tumbling`, `Sliding`, `Count`, `Identity`, `KvSink`, `Warp10Sink`, and in
+`streaming::stock` `CountToJson`, `CountToGts` and the Pulsar nodes);
 `crates/streaming/examples/demo/graphs.rs` builds the demonstration graphs
 this way.
+
+Below these traits, the engine drives `SourceConnector`, `SinkConnector` and
+type-erased functions held by a `Registry`. `App::operators(|registry| ...)`
+still registers operators at that level (`register_map`, `register_source`,
+...), and `graph.node(id, operator)` names one of them without saying what
+flows.
 
 ## Simulation
 

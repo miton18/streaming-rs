@@ -109,6 +109,11 @@ object). A parameter restricted to a fixed set of texts also carries
 `"choices": ["...", ...]`. An empty list means the operator takes no
 parameter, or does not say.
 
+An operator written for several types of elements (a sink of anything, a
+count of anything) also carries `signatures`, one `{"input": "...",
+"output": "..."}` per type it is registered for; `input` and `output` then
+say what they have in common, `*` where they differ.
+
 ### `GET /api/v1/tenants`
 ```json
 {"tenants": [{"tenant": "acme", "displayName": "Acme", "createdMs": 1790000000000,

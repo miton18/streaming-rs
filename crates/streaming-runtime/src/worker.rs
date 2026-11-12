@@ -725,9 +725,10 @@ mod tests {
     fn worker(kv: DynKv, config: WorkerConfig) -> Worker<TokioProviders> {
         let log = MemLog::new(1);
         let mut registry = registry(&log);
-        crate::builtin::register(&mut registry, kv.clone());
+        crate::builtin::register(&mut registry);
         Worker::new(
             RuntimeEnv {
+                shared: Arc::default(),
                 providers: TokioProviders::new(),
                 kv,
                 clock: Arc::new(SystemClock),

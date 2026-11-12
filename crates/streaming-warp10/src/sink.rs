@@ -1,4 +1,4 @@
-//! [`Warp10Sink`]: the `SinkConnector`.
+//! [`Warp10Writer`]: the `SinkConnector`.
 
 use crate::{
     config::Warp10Config,
@@ -18,22 +18,22 @@ const EXCERPT_CHARS: usize = 200;
 /// Writes [`Gts`] points to Warp 10 through its `/api/v0/update` endpoint.
 ///
 /// See the crate documentation for the idempotence argument.
-pub struct Warp10Sink<P: Providers> {
+pub struct Warp10Writer<P: Providers> {
     providers: P,
     config: Warp10Config,
     #[cfg(feature = "tls")]
     tls: Option<std::sync::Arc<futures_rustls::rustls::ClientConfig>>,
 }
 
-impl<P: Providers> std::fmt::Debug for Warp10Sink<P> {
+impl<P: Providers> std::fmt::Debug for Warp10Writer<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Warp10Sink")
+        f.debug_struct("Warp10Writer")
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
 }
 
-impl<P: Providers> Warp10Sink<P> {
+impl<P: Providers> Warp10Writer<P> {
     /// Build a sink. Fails when the configuration is invalid, in particular
     /// for an `https://` endpoint in a build without the `tls` feature.
     pub fn new(providers: P, config: Warp10Config) -> Result<Self, OpError> {
@@ -196,7 +196,7 @@ fn excerpt(body: &[u8], token: &str) -> String {
 }
 
 #[async_trait]
-impl<P: Providers> SinkConnector for Warp10Sink<P> {
+impl<P: Providers> SinkConnector for Warp10Writer<P> {
     async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
         // Encode everything first: an element that cannot be sent fails the
         // batch before any request leaves.
@@ -229,11 +229,11 @@ mod tests {
         }
     }
 
-    fn sink(max: usize, unit: TimeUnit) -> Warp10Sink<TokioProviders> {
+    fn sink(max: usize, unit: TimeUnit) -> Warp10Writer<TokioProviders> {
         let mut config = Warp10Config::new("http://127.0.0.1:1/api/v0/update", "tok").unwrap();
         config.max_batch_bytes = max;
         config.time_unit = unit;
-        Warp10Sink::new(TokioProviders::new(), config).unwrap()
+        Warp10Writer::new(TokioProviders::new(), config).unwrap()
     }
 
     #[test]
@@ -273,7 +273,7 @@ mod tests {
     fn debug_forms_hide_the_token() {
         let s = sink(10, TimeUnit::Ms);
         let debug = format!("{s:?}");
-        assert!(debug.starts_with("Warp10Sink {"), "{debug}");
+        assert!(debug.starts_with("Warp10Writer {"), "{debug}");
         assert!(debug.contains("<redacted>") && !debug.contains("tok\""), "{debug}");
     }
 
