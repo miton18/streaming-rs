@@ -237,7 +237,9 @@ workers, two demo graphs (`acme/count-per-key`, `globex/clicks`) and the UI
 on `http://127.0.0.1:8080`. Views: overview, cluster, catalogue, graph
 (topology, metrics, bottleneck, results), and **Concevoir** (`#/design`), the
 pipeline designer built from the catalogue's `ParamSpec`s (a `choices` list
-becomes a drop-down, the `json` kind a JSON field). Every connector describes
+becomes a drop-down, the `json` kind a JSON field), and **API** (`#/api`), a
+viewer of `/api/v1/openapi.json` (operations by tag, schema trees, a form to
+try GET operations). Every connector describes
 its parameters; a test per connector checks the descriptions against the
 parser (names accepted, required flags, defaults, choices).
 
