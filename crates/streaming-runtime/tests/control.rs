@@ -167,6 +167,16 @@ impl Cluster {
         last
     }
 
+    /// Once a first event went through, so that the slice is running and
+    /// reading: what is produced next arrives while it reads.
+    async fn warm_up(&self) {
+        self.produce(1, 1);
+        eventually("the slice runs", async || self.raw.written.load(Ordering::Relaxed) == 1).await;
+        // Past the linger of that first epoch.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.raw.batches.lock().clear();
+    }
+
     async fn committed(&self) -> Option<Position> {
         let slice: SliceKey = "acme/g/src.events.0".parse().unwrap();
         slice_head(self.kv.as_ref(), &slice)
@@ -311,11 +321,12 @@ async fn a_drained_graph_stops_reading() {
 #[tokio::test(flavor = "current_thread")]
 async fn an_epoch_lingers_to_fill_its_batch() {
     let cluster = Cluster::start(serde_json::json!({"linger": "400ms"})).await;
+    cluster.warm_up().await;
     cluster.produce(3, 1);
     tokio::time::sleep(Duration::from_millis(100)).await;
     cluster.produce(3, 1);
     eventually("every event is written", async || {
-        cluster.raw.written.load(Ordering::Relaxed) == 6
+        cluster.raw.written.load(Ordering::Relaxed) == 7
     })
     .await;
     assert_eq!(*cluster.raw.batches.lock(), [6]);
@@ -325,10 +336,13 @@ async fn an_epoch_lingers_to_fill_its_batch() {
 /// No epoch holds more than `max_batch` events.
 #[tokio::test(flavor = "current_thread")]
 async fn an_epoch_holds_at_most_max_batch_events() {
-    let cluster = Cluster::start(serde_json::json!({"linger": "50ms", "maxBatch": 4})).await;
-    cluster.produce(10, 1);
+    let cluster = Cluster::start(serde_json::json!({"linger": "200ms", "maxBatch": 4})).await;
+    cluster.warm_up().await;
+    cluster.produce(1, 1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    cluster.produce(9, 1);
     eventually("every event is written", async || {
-        cluster.raw.written.load(Ordering::Relaxed) == 10
+        cluster.raw.written.load(Ordering::Relaxed) == 11
     })
     .await;
     let batches = cluster.raw.batches.lock().clone();
