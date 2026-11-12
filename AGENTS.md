@@ -192,13 +192,11 @@ exactly-once.
     share it. Every new version is a new plan generation, which is what
     fences an instance still running the previous description.
 
-`streaming_runtime::mutation` holds fifteen **planted bugs** in its bench, one per precaution
-above (`SIM_MUTANT=<name>` plants a single one), and a sixteenth,
-`CloseWithoutClaim`, left out of `Mutant::ALL` because the simulation only
-notices it in about one seed in a thousand (one in eighty with
-`stall_ms: 6_000` on a repartition scenario); the precaution is held by
-`claiming_the_end_of_a_retired_log_fences_what_comes_after` in
-`streaming-runtime/src/state.rs`. When you add a precaution, add its mutant and make the simulation
+`streaming_runtime::mutation` holds sixteen **planted bugs** in its bench, one per precaution
+above (`SIM_MUTANT=<name>` plants a single one). `CloseWithoutClaim` is
+noticed by the `Auditor`: closing a log without the claim voids its head, and
+a log that still holds fields but no head is history going backwards (every
+run of the two repartition scenarios of the bench). When you add a precaution, add its mutant and make the simulation
 notice it.
 
 ## Verifying
@@ -251,7 +249,7 @@ The harness (`streaming-sim/src/lib.rs`):
   failing half-way; drifting worker clocks.
 - **Checks**: every event counted exactly once on four paths (windowed count,
   stateless, diamond, second-level aggregation); committed history never goes
-  backwards (`Auditor`, every 100 ms); nothing acknowledged before being
+  backwards nor loses its head (`Auditor`, every 100 ms); nothing acknowledged before being
   committed; no commit into an emitted window (checked the instant a commit
   lands); no window state or orphan log left after settling; logs stay small;
   a commit under the plan in force comes from a binary that declares the

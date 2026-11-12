@@ -2127,8 +2127,20 @@ impl Workload for Auditor {
                     seen.remove(&key);
                     continue;
                 }
-                let Ok(Some(head)) = slice_head(kv.as_ref(), &slice).await else {
-                    continue;
+                let head = match slice_head(kv.as_ref(), &slice).await {
+                    Ok(Some(head)) => head,
+                    Ok(None) => {
+                        // A log that still holds fields but no head lost what
+                        // it had committed: closing it voided its last commit.
+                        let held = kv.hgetall(&key).await.is_ok_and(|fields| !fields.is_empty());
+                        if held && let Some(before) = seen.get(&key) {
+                            env.audit
+                                .lock()
+                                .push(format!("slice {slice} lost its head: {before:?} then none"));
+                        }
+                        continue;
+                    }
+                    Err(_) => continue,
                 };
                 if let Some(before) = seen.get(&key) {
                     let backwards = head.epoch < before.epoch
