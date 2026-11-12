@@ -25,6 +25,37 @@ use tower::ServiceExt;
 
 const NOW: i64 = 1_790_000_000_000;
 
+/// An error answer follows the contract: a known `code` with its status, and
+/// a `message` that `code` and `context` alone rebuild, so that a client can
+/// translate it.
+fn check_error_contract(method: &str, uri: &str, status: StatusCode, body: &[u8]) {
+    let body: Value = serde_json::from_slice(body).unwrap();
+    let at = format!("{method} {uri} answered {status} {body}");
+    let code = body["code"].as_str().unwrap_or_else(|| panic!("{at}: no code"));
+    let known = streaming_api::error::ERROR_CODES
+        .iter()
+        .find(|known| known.code == code)
+        .unwrap_or_else(|| panic!("{at}: unknown code"));
+    assert_eq!(known.status, status, "{at}: the status of {code} is {}", known.status);
+    let context = body["context"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{at}: no context"));
+    assert_eq!(
+        body["message"].as_str(),
+        Some(streaming_api::error::render(known.template, context).as_str()),
+        "{at}: the message is not the template of its code filled with its context"
+    );
+    let mut wanted = streaming_api::error::placeholders(known.template);
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut given: Vec<&str> = context.keys().map(String::as_str).collect();
+    given.sort_unstable();
+    assert_eq!(
+        given, wanted,
+        "{at}: the context does not match the placeholders of {code}"
+    );
+}
+
 /// The OpenAPI template of a concrete path (`/a/{b}` for `/a/x`).
 fn template_of<'a>(document: &'a Value, path: &str) -> Option<&'a str> {
     let segments: Vec<&str> = path.split('/').collect();
@@ -80,6 +111,9 @@ fn check_against_openapi(method: &str, uri: &str, status: StatusCode, body: &[u8
     let Some(schema) = response["content"]["application/json"].get("schema") else {
         return;
     };
+    if status.is_client_error() || status.is_server_error() {
+        check_error_contract(method, uri, status, body);
+    }
     let root = json!({"allOf": [schema], "components": document["components"]});
     let validator = jsonschema::draft202012::new(&root).expect("the OpenAPI schemas compile");
     let body: Value = serde_json::from_slice(body)
@@ -431,8 +465,12 @@ async fn put_rejects_invalid_input_with_a_message() {
     body["nodes"][0]["op"] = json!("t/nope@1");
     let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let message = answer["message"].as_str().unwrap();
-    assert!(message.contains("unknown operator `t/nope@1`"), "{message}");
+    assert_eq!(answer["code"], "OPERATOR_UNKNOWN");
+    assert_eq!(answer["context"], json!({"node": "events", "op": "t/nope@1"}));
+    assert_eq!(
+        answer["message"],
+        "node `events` references unknown operator `t/nope@1`"
+    );
 
     // Wiring error.
     let mut body = graph_body("g");
@@ -440,13 +478,18 @@ async fn put_rejects_invalid_input_with_a_message() {
     let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(answer["message"].as_str().unwrap().contains("key"), "{answer}");
+    assert!(answer["code"].as_str().unwrap().starts_with("WIRING_"), "{answer}");
 
     // Body for another graph, another tenant.
     let (status, answer) = env
         .call(Method::PUT, "/api/v1/tenants/acme/graphs/other", Some(graph_body("g")))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(answer["message"].as_str().unwrap().contains("acme/g"), "{answer}");
+    assert_eq!(answer["code"], "GRAPH_KEY_MISMATCH");
+    assert_eq!(
+        answer["context"],
+        json!({"tenant": "acme", "graph": "other", "bodyTenant": "acme", "bodyGraph": "g"})
+    );
     let (status, _) = env
         .call(Method::PUT, "/api/v1/tenants/globex/graphs/g", Some(graph_body("g")))
         .await;
@@ -457,18 +500,25 @@ async fn put_rejects_invalid_input_with_a_message() {
         .call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(json!({"x": 1})))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(answer["message"].is_string());
+    assert_eq!(answer["code"], "BODY_UNKNOWN_FIELD");
+    assert_eq!(answer["context"]["field"], "x");
     let mut body = graph_body("g");
     body["nodes"][0]["id"] = json!("bad id");
-    let (status, _) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
+    let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", Some(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(answer["code"], "BODY_INVALID");
+    let (status, answer) = env.call(Method::PUT, "/api/v1/tenants/acme/graphs/g", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(answer["code"], "BODY_NOT_JSON");
+    assert_eq!(answer["context"], json!({"line": 1, "column": 0}));
 
     // Invalid id in the path.
     let (status, answer) = env
         .call(Method::PUT, "/api/v1/tenants/acme/graphs/bad.id", Some(graph_body("g")))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(answer["message"].as_str().unwrap().contains("graph id"), "{answer}");
+    assert_eq!(answer["code"], "IDENTIFIER_INVALID_CHARACTER");
+    assert_eq!(answer["context"], json!({"parameter": "graph", "value": "bad.id"}));
 
     // Nothing was written.
     assert_eq!(env.epoch().await, 0);
@@ -934,7 +984,14 @@ async fn ui_is_served_with_a_spa_fallback() {
     // Under /api an unknown path is a JSON 404, never the UI.
     let (status, body) = env.get("/api/v1/whatever").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body, json!({"message": "not found"}));
+    assert_eq!(
+        body,
+        json!({
+            "message": "nothing is served at `/api/v1/whatever`",
+            "code": "ROUTE_NOT_FOUND",
+            "context": {"path": "/api/v1/whatever"}
+        })
+    );
 }
 
 #[tokio::test]

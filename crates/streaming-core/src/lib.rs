@@ -25,12 +25,14 @@ pub mod time;
 
 pub use clock::{Clock, EnvSecrets, NoSecrets, SecretProvider, StaticSecrets, SystemClock};
 pub use data::{Datum, Emit, EmitId, Key, Origin, Position, Record, Windowed, datum};
-pub use ids::{GraphId, GraphKey, IdError, NodeId, OpRef, SliceId, SliceKey, TenantId, WorkerId};
+pub use ids::{
+    GraphId, GraphKey, IdError, IdProblem, MAX_ID_LEN, NodeId, OpRef, SliceId, SliceKey, TenantId, WorkerId,
+};
 pub use kv::{DynKv, Kv, KvError, MemKv};
 pub use ops::{
     Aggregator, DynAggregator, DynKey, DynMap, OpError, PartitionReader, SinkConnector, SinkError, SourceConnector,
     SourceError, SourceRecord, WindowAssigner,
 };
 pub use registry::{Catalog, OpContext, OpDescriptor, OpFactory, OpKind, ParamSpec, Registry, TypeTag};
-pub use spec::{GraphSpec, NodeSpec, SpecError, Topology};
+pub use spec::{GraphSpec, NodeSpec, SpecError, Topology, WiringRule};
 pub use time::{Timestamp, Window, format_duration, parse_duration};

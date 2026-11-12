@@ -1,13 +1,18 @@
 // HTTP client for /api/v1 (same origin) and connection status tracking.
 
+import { messageOf } from './errors-fr.js';
+
 const BASE = '/api/v1';
 const TIMEOUT_MS = 4000;
 
 export class ApiError extends Error {
-  constructor(message, status, network = false) {
+  /** `code` and `context` are those of the answer, when it has them. */
+  constructor(message, status, network = false, code = null, context = {}) {
     super(message);
     this.status = status;
     this.network = network;
+    this.code = code;
+    this.context = context;
   }
 }
 
@@ -64,9 +69,14 @@ async function request(method, url, body) {
   let data = null;
   if (ct.includes('json')) { try { data = await res.json(); } catch { data = null; } } else { data = await res.text(); }
   if (!res.ok) {
-    const msg = data && typeof data === 'object' && data.message ? data.message : (typeof data === 'string' && data ? data : `HTTP ${res.status}`);
-    // a 5xx from a proxy in front of the server means the API itself is down
-    throw new ApiError(msg, res.status, res.status === 502 || res.status === 503 || res.status === 504);
+    const body = data && typeof data === 'object' ? data : null;
+    // the message is written in French from the code and context; the
+    // server's English one is the fallback for a code this UI does not know
+    const msg = messageOf(body) ?? (body?.message || (typeof data === 'string' && data ? data : `HTTP ${res.status}`));
+    // a 502 or 504 comes from a proxy in front of the server: the API is down;
+    // a 503 with a code is the API saying its store does not answer
+    const down = res.status === 502 || res.status === 504 || (res.status === 503 && !body?.code);
+    throw new ApiError(msg, res.status, down, body?.code ?? null, body?.context ?? {});
   }
   return data;
 }

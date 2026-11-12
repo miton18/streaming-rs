@@ -204,14 +204,14 @@ pub enum SpecError {
         op: OpRef,
     },
     /// A node is wired in a way its kind does not allow.
-    #[error("node `{node}` ({kind}): {reason}")]
+    #[error("node `{node}` ({kind}): {rule}")]
     Wiring {
         /// The node.
         node: NodeId,
         /// Its kind.
         kind: OpKind,
-        /// What is wrong.
-        reason: String,
+        /// The rule it breaks.
+        rule: WiringRule,
     },
     /// Two connected nodes disagree on the type flowing between them.
     #[error("edge `{from}` -> `{to}`: `{from}` produces `{produced}` but `{to}` expects `{expected}`")]
@@ -225,6 +225,60 @@ pub enum SpecError {
         /// Type expected downstream.
         expected: TypeTag,
     },
+}
+
+/// A wiring rule of the graph, broken by a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum WiringRule {
+    /// A source has an input.
+    #[error("a source cannot have inputs")]
+    SourceHasInputs,
+    /// A source feeds nothing.
+    #[error("a source needs at least one output")]
+    SourceWithoutOutputs,
+    /// Nothing feeds a sink.
+    #[error("a sink needs at least one input")]
+    SinkWithoutInputs,
+    /// A sink has an output.
+    #[error("a sink cannot have outputs")]
+    SinkHasOutputs,
+    /// A map or key_by node lacks an input or an output.
+    #[error("needs at least one input and one output")]
+    NeedsInputAndOutput,
+    /// A key_by node feeds something else than windows.
+    #[error("a key_by node must feed window nodes only")]
+    KeyByMustFeedWindows,
+    /// A window node is fed by something else than key_by nodes.
+    #[error("a window node must be fed by key_by nodes only")]
+    WindowMustBeFedByKeyBy,
+    /// A window node feeds something else than aggregates.
+    #[error("a window node must feed aggregate nodes only")]
+    WindowMustFeedAggregates,
+    /// An aggregate is not fed by exactly one window node.
+    #[error("an aggregate node needs exactly one input, a window node")]
+    AggregateNeedsOneWindow,
+    /// An aggregate feeds nothing.
+    #[error("an aggregate node needs at least one output")]
+    AggregateWithoutOutputs,
+}
+
+impl WiringRule {
+    /// A constant name for the rule, for machines (`sourceHasInputs`, ...).
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::SourceHasInputs => "sourceHasInputs",
+            Self::SourceWithoutOutputs => "sourceWithoutOutputs",
+            Self::SinkWithoutInputs => "sinkWithoutInputs",
+            Self::SinkHasOutputs => "sinkHasOutputs",
+            Self::NeedsInputAndOutput => "needsInputAndOutput",
+            Self::KeyByMustFeedWindows => "keyByMustFeedWindows",
+            Self::WindowMustBeFedByKeyBy => "windowMustBeFedByKeyBy",
+            Self::WindowMustFeedAggregates => "windowMustFeedAggregates",
+            Self::AggregateNeedsOneWindow => "aggregateNeedsOneWindow",
+            Self::AggregateWithoutOutputs => "aggregateWithoutOutputs",
+        }
+    }
 }
 
 /// A validated graph, with everything derived from its shape.
@@ -319,55 +373,55 @@ impl Topology {
         for node in &spec.nodes {
             let id = &node.id;
             let (ins, outs) = (&inputs[id], &outputs[id]);
-            let wiring = |reason: &str| SpecError::Wiring {
+            let wiring = |rule: WiringRule| SpecError::Wiring {
                 node: id.clone(),
                 kind: kind(id),
-                reason: reason.to_owned(),
+                rule,
             };
             match kind(id) {
                 OpKind::Source => {
                     if !ins.is_empty() {
-                        return Err(wiring("a source cannot have inputs"));
+                        return Err(wiring(WiringRule::SourceHasInputs));
                     }
                     if outs.is_empty() {
-                        return Err(wiring("a source needs at least one output"));
+                        return Err(wiring(WiringRule::SourceWithoutOutputs));
                     }
                 }
                 OpKind::Sink => {
                     if ins.is_empty() {
-                        return Err(wiring("a sink needs at least one input"));
+                        return Err(wiring(WiringRule::SinkWithoutInputs));
                     }
                     if !outs.is_empty() {
-                        return Err(wiring("a sink cannot have outputs"));
+                        return Err(wiring(WiringRule::SinkHasOutputs));
                     }
                 }
                 OpKind::Map => {
                     if ins.is_empty() || outs.is_empty() {
-                        return Err(wiring("needs at least one input and one output"));
+                        return Err(wiring(WiringRule::NeedsInputAndOutput));
                     }
                 }
                 OpKind::KeyBy => {
                     if ins.is_empty() || outs.is_empty() {
-                        return Err(wiring("needs at least one input and one output"));
+                        return Err(wiring(WiringRule::NeedsInputAndOutput));
                     }
                     if outs.iter().any(|out| kind(out) != OpKind::Window) {
-                        return Err(wiring("a key_by node must feed window nodes only"));
+                        return Err(wiring(WiringRule::KeyByMustFeedWindows));
                     }
                 }
                 OpKind::Window => {
                     if ins.is_empty() || ins.iter().any(|input| kind(input) != OpKind::KeyBy) {
-                        return Err(wiring("a window node must be fed by key_by nodes only"));
+                        return Err(wiring(WiringRule::WindowMustBeFedByKeyBy));
                     }
                     if outs.is_empty() || outs.iter().any(|out| kind(out) != OpKind::Aggregate) {
-                        return Err(wiring("a window node must feed aggregate nodes only"));
+                        return Err(wiring(WiringRule::WindowMustFeedAggregates));
                     }
                 }
                 OpKind::Aggregate => {
                     if ins.len() != 1 || kind(&ins[0]) != OpKind::Window {
-                        return Err(wiring("an aggregate node needs exactly one input, a window node"));
+                        return Err(wiring(WiringRule::AggregateNeedsOneWindow));
                     }
                     if outs.is_empty() {
-                        return Err(wiring("an aggregate node needs at least one output"));
+                        return Err(wiring(WiringRule::AggregateWithoutOutputs));
                     }
                 }
             }

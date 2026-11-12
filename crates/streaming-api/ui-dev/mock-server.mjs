@@ -638,13 +638,35 @@ function send(res, status, body, type = 'application/json') {
   res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
   res.end(data);
 }
-const err = (res, status, message) => send(res, status, { message });
+// Errors follow the server's contract: `message` is the template of `code`
+// with the values of `context` (see src/error.rs). Validating operator
+// configurations at PUT is mock-only, hence MOCK_CONFIG_INVALID, which the UI
+// does not know and shows with the English message.
+const TEMPLATES = {
+  BODY_NOT_JSON: 'the request body is not valid JSON (line {line}, column {column})',
+  BODY_INVALID: 'the request body is invalid: {detail} (line {line}, column {column})',
+  GRAPH_KEY_MISMATCH: 'the description is for `{bodyTenant}/{bodyGraph}` but the path names `{tenant}/{graph}`',
+  GRAPH_EMPTY: 'the graph has no node',
+  EDGE_UNKNOWN_NODE: 'edge `{from}` -> `{to}` references unknown node `{unknown}`',
+  GRAPH_NOT_FOUND: 'unknown graph `{tenant}/{graph}`',
+  NODE_NOT_FOUND: 'unknown node `{node}` in graph `{tenant}/{graph}`',
+  NODE_CONFIG_NOT_OBJECT: 'the configuration of node `{node}` in graph `{tenant}/{graph}` is not an object and cannot be patched',
+  ROUTE_NOT_FOUND: 'nothing is served at `{path}`',
+  MOCK_CONFIG_INVALID: '{detail}',
+  MOCK_FAILURE: 'the mock failed: {detail}',
+};
+const textOf = (v) => (typeof v === 'string' ? v : Array.isArray(v) ? v.map(textOf).join(', ') : JSON.stringify(v));
+const err = (res, status, code, context = {}) => send(res, status, {
+  message: TEMPLATES[code].replace(/\{([^{}]*)\}/g, (all, k) => (k in context ? textOf(context[k]) : all)),
+  code,
+  context,
+});
 
 function serveStatic(res, urlPath) {
   let rel = urlPath === '/' ? '/index.html' : urlPath;
   let file = path.join(UI, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
   if (!file.startsWith(UI) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-    if (urlPath.startsWith('/assets/')) return err(res, 404, `no asset ${urlPath}`);
+    if (urlPath.startsWith('/assets/')) return err(res, 404, 'ROUTE_NOT_FOUND', { path: urlPath });
     file = path.join(UI, 'index.html');
   }
   res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
@@ -657,7 +679,7 @@ function readBody(req) {
     req.on('data', (c) => { s += c; });
     req.on('end', () => {
       if (!s) return resolve({ ok: true, value: undefined });
-      try { resolve({ ok: true, value: JSON.parse(s) }); } catch (e) { resolve({ ok: false, error: `invalid JSON body: ${e.message}` }); }
+      try { resolve({ ok: true, value: JSON.parse(s) }); } catch (e) { resolve({ ok: false, code: 'BODY_NOT_JSON', context: { line: 1, column: 0 } }); }
     });
   });
 }
@@ -677,14 +699,14 @@ async function handle(req, res) {
     if (p === '/__mock/commit') { S.slowCommit = on(body.on ?? q.on); return send(res, 200, { slowCommit: S.slowCommit }); }
     if (p === '/__mock/worker') {
       const w = S.workers.find((x) => x.worker === (body.worker ?? q.worker));
-      if (!w) return err(res, 404, 'unknown worker');
+      if (!w) return err(res, 404, 'ROUTE_NOT_FOUND', { path: p });
       w.alive = on(body.alive ?? q.alive);
       w.deadSince = w.alive ? 0 : Date.now();
       if (w.alive) { w.generation = Date.now(); }
       return send(res, 200, { worker: w.worker, alive: w.alive });
     }
     if (p === '/__mock/reset') { reset(); return send(res, 200, { reset: true }); }
-    return err(res, 404, 'unknown mock knob');
+    return err(res, 404, 'ROUTE_NOT_FOUND', { path: p });
   }
 
   const isApi = p.startsWith('/api/') || p === '/healthz';
@@ -717,26 +739,27 @@ async function handle(req, res) {
     return send(res, 200, { graphs: list });
   }
   mm = /^\/api\/v1\/tenants\/([^/]+)\/graphs\/([^/]+)(\/.*)?$/.exec(p);
-  if (!mm) return err(res, 404, `no route for ${m} ${p}`);
+  if (!mm) return err(res, 404, 'ROUTE_NOT_FOUND', { path: p });
   const tenant = decodeURIComponent(mm[1]); const graph = decodeURIComponent(mm[2]); const rest = mm[3] || '';
   const key = `${tenant}/${graph}`;
   const g = S.graphs.get(key);
 
   if (rest === '' && m === 'PUT') {
     const b = await readBody(req);
-    if (!b.ok) return err(res, 400, b.error);
+    if (!b.ok) return err(res, 400, b.code, b.context);
     const spec = b.value;
-    if (!spec || spec.tenant !== tenant || spec.graph !== graph) return err(res, 400, '`tenant` and `graph` in the body must match the path');
-    if (!Array.isArray(spec.nodes) || !spec.nodes.length) return err(res, 400, 'graph has no node');
-    for (const n of spec.nodes) { const e = validateConfig(n, n.config ?? {}); if (e) return err(res, 400, e); }
+    if (!spec || typeof spec !== 'object') return err(res, 400, 'BODY_INVALID', { detail: 'expected a graph description', line: 1, column: 0 });
+    if (spec.tenant !== tenant || spec.graph !== graph) return err(res, 400, 'GRAPH_KEY_MISMATCH', { tenant, graph, bodyTenant: String(spec.tenant), bodyGraph: String(spec.graph) });
+    if (!Array.isArray(spec.nodes) || !spec.nodes.length) return err(res, 400, 'GRAPH_EMPTY');
+    for (const n of spec.nodes) { const e = validateConfig(n, n.config ?? {}); if (e) return err(res, 400, 'MOCK_CONFIG_INVALID', { detail: e }); }
     const ids = new Set(spec.nodes.map((n) => n.id));
-    for (const [a, b2] of spec.edges || []) if (!ids.has(a) || !ids.has(b2)) return err(res, 400, `edge \`${a}\` -> \`${b2}\` references an unknown node`);
+    for (const [a, b2] of spec.edges || []) if (!ids.has(a) || !ids.has(b2)) return err(res, 400, 'EDGE_UNKNOWN_NODE', { from: a, to: b2, unknown: ids.has(a) ? b2 : a });
     const version = (g?.spec.version || 0) + 1;
     addGraph({ ...spec, version }, now);
     S.epoch += 1; place(now);
     return send(res, 200, { version });
   }
-  if (!g || g.gone) return err(res, 404, `graph \`${key}\` not found`);
+  if (!g || g.gone) return err(res, 404, 'GRAPH_NOT_FOUND', { tenant, graph });
 
   if (rest === '' && m === 'GET') return send(res, 200, graphDetail(key, snap, now));
   if (rest === '' && m === 'DELETE') {
@@ -749,16 +772,16 @@ async function handle(req, res) {
   if (mm && m === 'GET') {
     const node = decodeURIComponent(mm[1]);
     const n = g.spec.nodes.find((x) => x.id === node);
-    if (!n) return err(res, 404, `node \`${node}\` not found in \`${key}\``);
-    if (n.op !== 'std/kv-sink@1') return err(res, 400, `node \`${node}\` is not a std/kv-sink@1 node`);
+    if (!n) return err(res, 404, 'NODE_NOT_FOUND', { tenant, graph, node });
+    if (n.op !== 'std/kv-sink@1') return send(res, 200, { rows: [] });
     const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get('limit')) || 200));
     return send(res, 200, { rows: (S.outputs.get(`${key}/${node}`)?.rows || []).slice(0, limit) });
   }
   if (rest === '/state' && m === 'POST') {
     const b = await readBody(req);
-    if (!b.ok) return err(res, 400, b.error);
+    if (!b.ok) return err(res, 400, b.code, b.context);
     const st = b.value?.state;
-    if (!['running', 'paused', 'draining', 'stopped'].includes(st)) return err(res, 400, `invalid state ${JSON.stringify(st)}: expected one of running, paused, draining, stopped`);
+    if (!['running', 'paused', 'draining', 'stopped'].includes(st)) return err(res, 400, 'BODY_INVALID', { detail: `unknown variant ${JSON.stringify(String(st))}, expected one of \`running\`, \`paused\`, \`draining\`, \`stopped\``, line: 1, column: 0 });
     const prev = g.desired.state;
     g.desired.state = st;
     if (st === 'draining') g.transition = { state: 'draining', at: now };
@@ -771,7 +794,7 @@ async function handle(req, res) {
   if (mm) {
     const node = decodeURIComponent(mm[1]);
     const n = g.spec.nodes.find((x) => x.id === node);
-    if (!n) return err(res, 404, `node \`${node}\` not found in \`${key}\``);
+    if (!n) return err(res, 404, 'NODE_NOT_FOUND', { tenant, graph, node });
     if (mm[2] === 'pause' && m === 'POST') {
       if (!g.desired.pausedNodes.includes(node)) g.desired.pausedNodes = [...g.desired.pausedNodes, node].sort();
       bump(g); return send(res, 200, { pausedNodes: g.desired.pausedNodes });
@@ -782,22 +805,22 @@ async function handle(req, res) {
     }
     if (mm[2] === 'config' && m === 'PATCH') {
       const b = await readBody(req);
-      if (!b.ok) return err(res, 400, b.error);
-      if (!b.value || typeof b.value !== 'object' || Array.isArray(b.value)) return err(res, 400, 'body must be a JSON object');
+      if (!b.ok) return err(res, 400, b.code, b.context);
+      if (!b.value || typeof b.value !== 'object' || Array.isArray(b.value)) return err(res, 400, 'BODY_INVALID', { detail: 'invalid type, expected a map', line: 1, column: 0 });
       const merged = { ...(n.config || {}) };
       for (const [k, v] of Object.entries(b.value)) { if (v === null) delete merged[k]; else merged[k] = v; }
       const e = validateConfig(n, merged);
-      if (e) return err(res, 400, e);
+      if (e) return err(res, 400, 'MOCK_CONFIG_INVALID', { detail: e });
       const spec = { ...g.spec, version: g.spec.version + 1, nodes: g.spec.nodes.map((x) => (x.id === node ? { ...x, config: merged } : x)) };
       addGraph(spec, now);
       S.epoch += 1; place(now);
       return send(res, 200, { version: spec.version });
     }
   }
-  return err(res, 404, `no route for ${m} ${p}`);
+  return err(res, 404, 'ROUTE_NOT_FOUND', { path: p });
 }
 
 reset();
 http.createServer((req, res) => {
-  handle(req, res).catch((e) => { console.error(e); if (!res.headersSent) err(res, 500, String(e)); });
+  handle(req, res).catch((e) => { console.error(e); if (!res.headersSent) err(res, 500, 'MOCK_FAILURE', { detail: String(e) }); });
 }).listen(PORT, () => console.log(`mock streaming-rs API on http://127.0.0.1:${PORT}`));

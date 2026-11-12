@@ -220,7 +220,7 @@ are type-driven: each argument implements `OperationInput`, the return type
 therefore say what it reads and returns in its prototype: no `Bytes`,
 `RawQuery`, `serde_json::Value` or opaque `Response` (the owner agreed to
 this). `JsonBody<T>` and `QueryParams<T>` replace axum's `Json` and `Query`
-on input to keep `{"message": ...}` answers and to accept bodies without a
+on input to keep the error contract and to accept bodies without a
 `Content-Type`. Schemas come from `schemars` 1.x: a type crossing the API
 derives `schemars::JsonSchema`; hand-serialized types (ids, `SliceId`,
 `Position`, `TypeTag`, durations) have hand-written schemas that must follow
@@ -229,6 +229,14 @@ document, so a drift fails there. After changing the API, regenerate the
 committed copy: `UPDATE_OPENAPI=1 cargo test -p streaming-api --test openapi`.
 The version is 3.2.0; the document uses nothing 3.2-specific and validates
 as 3.1 too.
+
+**Errors** are `{"message", "code", "context"}` (the owner's rule). `code` is
+a constant from `streaming-api/src/error.rs`; `message` is for people and is
+*always* its template rendered with `context`, so that a client can rewrite
+it in another language from `code` + `context` alone (the UI does, in French,
+from `ui/assets/js/errors-fr.js`; a test checks it knows every code with the
+same placeholders). Never echo internals or configuration values (security);
+log them. A new error case gets a new code, never a reworded old one.
 
 ## Running and the UI
 

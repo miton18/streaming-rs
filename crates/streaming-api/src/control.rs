@@ -12,7 +12,7 @@
 
 use serde_json::{Map, Value};
 use streaming_core::{
-    Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, OpDescriptor, Topology,
+    Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, OpDescriptor, SpecError, Topology,
     control::{DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState, WorkerSnapshot},
     keys,
 };
@@ -20,12 +20,32 @@ use streaming_core::{
 /// Why a control operation failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ControlError {
-    /// The graph, node or tenant does not exist (HTTP 404).
-    #[error("{0}")]
-    NotFound(String),
-    /// The input is invalid (HTTP 400). Carries the validation message.
-    #[error("{0}")]
-    Invalid(String),
+    /// The graph is not in the index (HTTP 404).
+    #[error("unknown graph `{0}`")]
+    GraphNotFound(GraphKey),
+    /// The graph has no such node (HTTP 404).
+    #[error("unknown node `{node}` in graph `{graph}`")]
+    NodeNotFound {
+        /// The graph.
+        graph: GraphKey,
+        /// The missing node.
+        node: NodeId,
+    },
+    /// The graph is being deleted and cannot change any more (HTTP 400).
+    #[error("graph `{0}` is being deleted")]
+    GraphBeingDeleted(GraphKey),
+    /// The description is invalid (HTTP 400).
+    #[error(transparent)]
+    InvalidGraph(#[from] SpecError),
+    /// The configuration of the node is not an object, so it cannot be
+    /// patched key by key (HTTP 400).
+    #[error("the configuration of node `{node}` is not an object and cannot be patched")]
+    ConfigNotAnObject {
+        /// The graph.
+        graph: GraphKey,
+        /// The node.
+        node: NodeId,
+    },
     /// The KV failed or holds a malformed document (HTTP 503).
     #[error("{0}")]
     Kv(#[from] KvError),
@@ -132,7 +152,7 @@ async fn bump_epoch(kv: &dyn Kv) -> Result<(), ControlError> {
 }
 
 fn not_found_graph(graph: &GraphKey) -> ControlError {
-    ControlError::NotFound(format!("unknown graph `{graph}`"))
+    ControlError::GraphNotFound(graph.clone())
 }
 
 /// The index entry of a graph that exists and is not being deleted.
@@ -141,7 +161,7 @@ async fn live_entry(kv: &dyn Kv, graph: &GraphKey) -> Result<GraphIndexEntry, Co
         .await?
         .ok_or_else(|| not_found_graph(graph))?;
     if entry.deleting {
-        return Err(ControlError::Invalid(format!("graph `{graph}` is being deleted")));
+        return Err(ControlError::GraphBeingDeleted(graph.clone()));
     }
     Ok(entry)
 }
@@ -167,11 +187,11 @@ async fn save_desired(
 /// Validate `spec`, then store it as `previous version + 1`.
 async fn store_spec(kv: &dyn Kv, clock: &dyn Clock, mut spec: GraphSpec) -> Result<u64, ControlError> {
     let catalog = load_catalog(kv).await?;
-    Topology::build(&spec, &catalog).map_err(|e| ControlError::Invalid(e.to_string()))?;
+    Topology::build(&spec, &catalog)?;
     let key = spec.key();
     let entry = load_index_entry(kv, &key).await?;
     if entry.as_ref().is_some_and(|entry| entry.deleting) {
-        return Err(ControlError::Invalid(format!("graph `{key}` is being deleted")));
+        return Err(ControlError::GraphBeingDeleted(key));
     }
     let stored_version = match load_spec(kv, &key).await {
         Ok(stored) => stored.map_or(0, |stored| stored.version),
@@ -238,9 +258,10 @@ pub async fn set_state(kv: &dyn Kv, clock: &dyn Clock, graph: &GraphKey, state: 
 async fn spec_with_node(kv: &dyn Kv, graph: &GraphKey, node: &NodeId) -> Result<GraphSpec, ControlError> {
     let spec = load_spec(kv, graph).await?.ok_or_else(|| not_found_graph(graph))?;
     if spec.node(node).is_none() {
-        return Err(ControlError::NotFound(format!(
-            "unknown node `{node}` in graph `{graph}`"
-        )));
+        return Err(ControlError::NodeNotFound {
+            graph: graph.clone(),
+            node: node.clone(),
+        });
     }
     Ok(spec)
 }
@@ -285,10 +306,12 @@ pub async fn patch_node_config(
     let mut config = match std::mem::take(&mut target.config) {
         Value::Null => Map::new(),
         Value::Object(map) => map,
-        other => {
-            return Err(ControlError::Invalid(format!(
-                "the configuration of node `{node}` is not an object ({other}) and cannot be patched"
-            )));
+        // Not echoed back: a configuration may hold secrets.
+        _ => {
+            return Err(ControlError::ConfigNotAnObject {
+                graph: graph.clone(),
+                node: node.clone(),
+            });
         }
     };
     for (field, value) in patch {

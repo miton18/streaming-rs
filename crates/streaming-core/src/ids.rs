@@ -16,8 +16,45 @@ pub struct IdError {
     /// The rejected value.
     pub value: String,
     /// Why it was rejected.
-    pub reason: &'static str,
+    pub reason: IdProblem,
 }
+
+/// Why an identifier was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum IdProblem {
+    /// The value is empty.
+    #[error("must not be empty")]
+    Empty,
+    /// The value is longer than [`MAX_ID_LEN`] bytes.
+    #[error("must be at most 128 bytes")]
+    TooLong,
+    /// A character is outside the alphabet.
+    #[error("contains a character outside the allowed alphabet")]
+    InvalidCharacter,
+    /// A composite identifier does not have the expected shape.
+    #[error("expected `{0}`")]
+    Malformed(&'static str),
+    /// The partition of a slice id is not a number.
+    #[error("partition is not a number")]
+    BadPartition,
+}
+
+impl IdProblem {
+    /// A constant name for the problem, for machines (`empty`, `tooLong`, ...).
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::TooLong => "tooLong",
+            Self::InvalidCharacter => "invalidCharacter",
+            Self::Malformed(_) => "malformed",
+            Self::BadPartition => "badPartition",
+        }
+    }
+}
+
+/// Longest identifier, in bytes.
+pub const MAX_ID_LEN: usize = 128;
 
 fn check(kind: &'static str, value: &str, extra: &[char]) -> Result<(), IdError> {
     let err = |reason| IdError {
@@ -26,16 +63,16 @@ fn check(kind: &'static str, value: &str, extra: &[char]) -> Result<(), IdError>
         reason,
     };
     if value.is_empty() {
-        return Err(err("must not be empty"));
+        return Err(err(IdProblem::Empty));
     }
-    if value.len() > 128 {
-        return Err(err("must be at most 128 bytes"));
+    if value.len() > MAX_ID_LEN {
+        return Err(err(IdProblem::TooLong));
     }
     if !value
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || extra.contains(&c))
     {
-        return Err(err("contains a character outside the allowed alphabet"));
+        return Err(err(IdProblem::InvalidCharacter));
     }
     Ok(())
 }
@@ -184,7 +221,7 @@ impl FromStr for GraphKey {
         let (tenant, graph) = s.split_once('/').ok_or(IdError {
             kind: "graph key",
             value: s.to_owned(),
-            reason: "expected `tenant/graph`",
+            reason: IdProblem::Malformed("tenant/graph"),
         })?;
         Ok(Self {
             tenant: TenantId::new(tenant)?,
@@ -250,17 +287,17 @@ impl FromStr for SliceId {
         if let Some(rest) = s.strip_prefix("src.") {
             let (node, partition) = rest
                 .rsplit_once('.')
-                .ok_or_else(|| err("expected `src.<node>.<partition>`"))?;
+                .ok_or_else(|| err(IdProblem::Malformed("src.<node>.<partition>")))?;
             Ok(SliceId::Source {
                 node: NodeId::new(node)?,
-                partition: partition.parse().map_err(|_| err("partition is not a number"))?,
+                partition: partition.parse().map_err(|_| err(IdProblem::BadPartition))?,
             })
         } else if let Some(node) = s.strip_prefix("agg.") {
             Ok(SliceId::Emitter {
                 node: NodeId::new(node)?,
             })
         } else {
-            Err(err("expected a `src.` or `agg.` prefix"))
+            Err(err(IdProblem::Malformed("src.<node>.<partition>` or `agg.<node>")))
         }
     }
 }
@@ -325,7 +362,7 @@ impl FromStr for SliceKey {
             return Err(IdError {
                 kind: "slice key",
                 value: s.to_owned(),
-                reason: "expected `tenant/graph/slice`",
+                reason: IdProblem::Malformed("tenant/graph/slice"),
             });
         };
         Ok(Self {

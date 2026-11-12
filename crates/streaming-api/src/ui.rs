@@ -7,7 +7,7 @@ use axum::{
 };
 use rust_embed::RustEmbed;
 
-use crate::routes::ApiError;
+use crate::error::{self, ApiError};
 
 #[derive(RustEmbed)]
 #[folder = "ui/"]
@@ -30,7 +30,9 @@ fn file_response(path: &str) -> Option<Response> {
 pub async fn serve_ui(method: Method, uri: Uri) -> Response {
     let path = uri.path();
     if path == "/api" || path.starts_with("/api/") {
-        return ApiError::new(StatusCode::NOT_FOUND, "not found").into_response();
+        return ApiError::new(&error::ROUTE_NOT_FOUND)
+            .with("path", path.chars().take(160).collect::<String>())
+            .into_response();
     }
     if method != Method::GET && method != Method::HEAD {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -42,6 +44,5 @@ pub async fn serve_ui(method: Method, uri: Uri) -> Response {
     {
         return response;
     }
-    file_response("index.html")
-        .unwrap_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "the web UI is not embedded").into_response())
+    file_response("index.html").unwrap_or_else(|| ApiError::new(&error::UI_NOT_EMBEDDED).into_response())
 }

@@ -25,6 +25,7 @@ use streaming_core::{Clock, DynKv};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 pub mod control;
+pub mod error;
 mod routes;
 pub use routes::openapi;
 pub mod status;

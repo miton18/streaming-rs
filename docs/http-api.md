@@ -5,7 +5,36 @@ reads and writes documents in the KV (see `streaming_core::keys` and
 `streaming_core::control`): any process holding a KV handle can serve it, and
 workers converge on what it writes.
 
-Errors are `{"message": "<message>"}` with a 4xx/5xx status.
+## Errors
+
+An error is answered with a 4xx/5xx status and this body:
+
+```json
+{
+  "message": "unknown node `events` in graph `acme/count-per-key`",
+  "code": "NODE_NOT_FOUND",
+  "context": { "tenant": "acme", "graph": "count-per-key", "node": "events" }
+}
+```
+
+- `code` is a constant (`UPPER_SNAKE_CASE`) naming the case, so that two
+  answers sharing a status can be told apart (`IDENTIFIER_INVALID_CHARACTER`
+  and `WIRING_SINK_HAS_OUTPUTS` are both `400`). A code never changes meaning.
+- `context` maps names to the values the case is about (texts, numbers or
+  lists of texts).
+- `message` is for people, in English. It is always the template of the code
+  with the values of `context` put in its `{placeholders}`, and every
+  placeholder has its value: a client can write the message in another
+  language from `code` and `context` alone (the web UI does, in French, from
+  `ui/assets/js/errors-fr.js`). A list is written with its items separated by
+  `, `.
+- Nothing internal is echoed: no store key, address or driver message, no
+  operator configuration (it may hold a secret). Those go to the server's
+  log. Values the client sent are cut at 160 characters.
+
+The codes, their status and template are listed in `crates/streaming-api/src/error.rs`
+and in the description of the `ErrorBody` schema of the OpenAPI document. A
+`405` (method not allowed on a known path) has an empty body.
 
 The machine-readable contract is the OpenAPI 3.2 document served at
 `GET /api/v1/openapi.json` and committed as [`openapi.json`](openapi.json).
@@ -175,7 +204,8 @@ Body: a `GraphSpec`. `tenant` and `graph` in the body must match the path. The
 description is validated against the catalog (`Topology::build`); on success it
 is stored with `version = previous + 1`, the index entry is updated and the
 desired state is created as `running` if absent. Answers `{"version": 4}`.
-`400` with the validation message otherwise.
+`400` otherwise, with the code of the rule broken (`OPERATOR_UNKNOWN`,
+`TYPE_MISMATCH`, `WIRING_*`, `GRAPH_CYCLE`...).
 
 ### `DELETE /api/v1/tenants/{tenant}/graphs/{graph}`
 Sets the desired state to `stopped` and marks the index entry `deleting`. The

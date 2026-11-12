@@ -24,79 +24,9 @@ use streaming_openapi::{ApiRouter, Info, OpenApi, OperationContext, OperationInp
 use crate::{
     ApiState,
     control::{self, ControlError},
+    error::{self, ApiError},
     status::{self, GraphDetail, MemberReport},
 };
-
-/// Error answered as `{"message": "<message>"}`.
-#[derive(Debug)]
-pub struct ApiError {
-    status: StatusCode,
-    message: String,
-}
-
-impl ApiError {
-    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            message: message.into(),
-        }
-    }
-
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, message)
-    }
-
-    fn not_found(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_FOUND, message)
-    }
-}
-
-impl From<ControlError> for ApiError {
-    fn from(error: ControlError) -> Self {
-        match error {
-            ControlError::NotFound(message) => Self::not_found(message),
-            ControlError::Invalid(message) => Self::bad_request(message),
-            ControlError::Kv(e) => {
-                tracing::warn!(error = %e, "kv failure");
-                Self::new(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
-            }
-        }
-    }
-}
-
-impl From<streaming_core::IdError> for ApiError {
-    fn from(error: streaming_core::IdError) -> Self {
-        Self::bad_request(error.to_string())
-    }
-}
-
-/// The body of an error.
-#[derive(Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct ErrorBody {
-    /// What went wrong, for a person.
-    message: String,
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.status, axum::Json(ErrorBody { message: self.message })).into_response()
-    }
-}
-
-impl OperationOutput for ApiError {
-    fn describe(operation: &mut OperationContext<'_>) {
-        let schema = operation.response_schema::<ErrorBody>();
-        operation.add_response(
-            "default",
-            streaming_openapi::Response::json(
-                "Error: a malformed identifier or body (400), an unknown tenant, graph or node (404), or a \
-                 store that did not answer (503).",
-                schema,
-            ),
-        );
-    }
-}
 
 type ApiResult<T> = Result<axum::Json<T>, ApiError>;
 
@@ -108,12 +38,16 @@ impl<T: DeserializeOwned, S: Send + Sync> FromRequest<S> for JsonBody<T> {
     type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, ApiError> {
-        let body = Bytes::from_request(request, state)
-            .await
-            .map_err(|rejection| ApiError::new(rejection.status(), rejection.body_text()))?;
+        let body = Bytes::from_request(request, state).await.map_err(|rejection| {
+            ApiError::new(if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                &error::BODY_TOO_LARGE
+            } else {
+                &error::BODY_UNREADABLE
+            })
+        })?;
         serde_json::from_slice(&body)
             .map(JsonBody)
-            .map_err(|e| ApiError::bad_request(format!("invalid body: {e}")))
+            .map_err(|e| ApiError::body(&e))
     }
 }
 
@@ -133,7 +67,7 @@ impl<T: DeserializeOwned, S: Send + Sync> FromRequestParts<S> for QueryParams<T>
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
         serde_urlencoded::from_str(parts.uri.query().unwrap_or_default())
             .map(QueryParams)
-            .map_err(|e| ApiError::bad_request(e.to_string()))
+            .map_err(|e| ApiError::new(&error::QUERY_INVALID).with("detail", e.to_string()))
     }
 }
 
@@ -293,7 +227,7 @@ async fn tenant_graphs(State(state): State<ApiState>, Path(tenant): Path<String>
         .filter(|entry| entry.tenant == tenant)
         .collect();
     if entries.is_empty() {
-        return Err(ApiError::not_found(format!("unknown tenant `{tenant}`")));
+        return Err(ApiError::new(&error::TENANT_NOT_FOUND).with("tenant", tenant.as_str()));
     }
     let context = Context::load(&state).await?;
     let mut graphs = Vec::new();
@@ -308,7 +242,7 @@ async fn tenant_graphs(State(state): State<ApiState>, Path(tenant): Path<String>
 
 /// The detail of a graph, or 404 when it is not in the index.
 async fn existing_detail(state: &ApiState, key: &GraphKey) -> Result<GraphDetail, ApiError> {
-    let unknown = || ApiError::not_found(format!("unknown graph `{key}`"));
+    let unknown = || ApiError::from(ControlError::GraphNotFound(key.clone()));
     control::load_index_entry(&*state.kv, key).await?.ok_or_else(unknown)?;
     let context = Context::load(state).await?;
     detail(state, &context, key).await?.ok_or_else(unknown)
@@ -328,30 +262,38 @@ async fn dot(State(state): State<ApiState>, Path((tenant, graph)): Path<(String,
     let key = graph_key(&tenant, &graph)?;
     let spec = control::load_spec(&*state.kv, &key)
         .await?
-        .ok_or_else(|| ApiError::not_found(format!("unknown graph `{key}`")))?;
+        .ok_or_else(|| ControlError::GraphNotFound(key.clone()))?;
     Ok(Dot(status::dot(&spec)))
 }
 
 const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 2000;
 
-/// How many rows to return, at most 2000.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Limit(usize);
+/// How many rows to return, at most 2000. Kept as read until the handler
+/// checks it, so that a bad value is answered with its own error code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Limit(Result<usize, String>);
 
 impl Default for Limit {
     fn default() -> Self {
-        Self(DEFAULT_LIMIT)
+        Self(Ok(DEFAULT_LIMIT))
+    }
+}
+
+impl Limit {
+    fn rows(self) -> Result<usize, ApiError> {
+        self.0
+            .map(|limit| limit.min(MAX_LIMIT))
+            .map_err(|value| ApiError::new(&error::LIMIT_INVALID).with("value", value))
     }
 }
 
 impl<'de> Deserialize<'de> for Limit {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
-        value
-            .parse::<usize>()
-            .map(|limit| Self(limit.min(MAX_LIMIT)))
-            .map_err(|_| serde::de::Error::custom(format!("invalid limit `{value}`")))
+        Ok(Self(
+            value.parse::<usize>().map_err(|_| value.chars().take(160).collect()),
+        ))
     }
 }
 
@@ -395,15 +337,16 @@ struct OutputsView {
 async fn outputs(
     State(state): State<ApiState>,
     Path((tenant, graph, node)): Path<(String, String, String)>,
-    QueryParams(OutputsQuery { limit: Limit(limit) }): QueryParams<OutputsQuery>,
+    QueryParams(OutputsQuery { limit }): QueryParams<OutputsQuery>,
 ) -> ApiResult<OutputsView> {
     let key = graph_key(&tenant, &graph)?;
     let node = NodeId::new(node)?;
+    let limit = limit.rows()?;
     let spec = control::load_spec(&*state.kv, &key)
         .await?
-        .ok_or_else(|| ApiError::not_found(format!("unknown graph `{key}`")))?;
+        .ok_or_else(|| ControlError::GraphNotFound(key.clone()))?;
     if spec.node(&node).is_none() {
-        return Err(ApiError::not_found(format!("unknown node `{node}` in graph `{key}`")));
+        return Err(ControlError::NodeNotFound { graph: key, node }.into());
     }
     let mut rows: Vec<OutputRow> = state
         .kv
@@ -439,10 +382,11 @@ async fn put_graph(
 ) -> ApiResult<VersionReply> {
     let key = graph_key(&tenant, &graph)?;
     if spec.key() != key {
-        return Err(ApiError::bad_request(format!(
-            "the description is for `{}` but the path names `{key}`",
-            spec.key()
-        )));
+        return Err(ApiError::new(&error::GRAPH_KEY_MISMATCH)
+            .with("tenant", key.tenant.as_str())
+            .with("graph", key.graph.as_str())
+            .with("bodyTenant", spec.tenant.as_str())
+            .with("bodyGraph", spec.graph.as_str()));
     }
     let version = control::apply_graph(&*state.kv, &*state.clock, spec).await?;
     Ok(axum::Json(VersionReply { version }))
