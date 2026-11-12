@@ -166,6 +166,42 @@ pub(crate) async fn read_seal(kv: &dyn Kv, slice: &SliceKey) -> Result<Seal, KvE
     Ok(seal)
 }
 
+/// Take the epoch that follows `log` in the log of a retired slice, so that no
+/// instance can commit after the commits found emitted in `log`. Returns
+/// whether it is taken: `false` means an instance committed meanwhile, and
+/// what it committed must be emitted before the log can be closed.
+///
+/// The commits [`close_log`] voids must all be emitted already. Without this,
+/// an instance that has not heard of the retirement could commit between the
+/// check and the closing, find its commit valid, acknowledge the source, and
+/// see it voided unemitted. The record taken keeps the head's position and
+/// watermark under the current plan, so it stays the head once the log is
+/// closed.
+pub(crate) async fn claim_end(
+    kv: &dyn Kv,
+    slice: &SliceKey,
+    log: &LogView,
+    generation: u64,
+) -> Result<bool, StateError> {
+    let last = log
+        .live
+        .iter()
+        .chain(&log.sealed)
+        .copied()
+        .chain(log.records.iter().map(|record| record.epoch))
+        .fold(log.floor, u64::max);
+    let head = log.head();
+    let record = CommitRecord {
+        epoch: last + 1,
+        owner: format!("controller:retired:{generation}"),
+        position: head.and_then(|head| head.position),
+        watermark: head.map_or(NO_WATERMARK, |head| head.watermark),
+        changes: Vec::new(),
+        plan: generation,
+    };
+    Ok(try_commit(kv, slice, &record).await? == CommitOutcome::Committed)
+}
+
 /// Close the log of a retired slice, once all it committed is emitted, to
 /// every plan generation below `generation`.
 ///
@@ -868,6 +904,46 @@ mod tests {
             purge_closed(&kv, &slice(), &[node()]).await.unwrap();
             let seal = read_seal(&kv, &slice()).await.unwrap();
             assert_eq!((seal.floor, seal.plan), (0, 3));
+        });
+    }
+
+    #[test]
+    fn claiming_the_end_of_a_retired_log_fences_what_comes_after() {
+        block_on(async {
+            let kv = MemKv::new();
+            let stale = |epoch| CommitRecord {
+                changes: Vec::new(),
+                plan: 2,
+                ..record(epoch, "stale", &[])
+            };
+            try_commit(&kv, &slice(), &record(1, "o", &[("a", 1, 0)]))
+                .await
+                .unwrap();
+            // An instance that has not heard of the retirement commits after
+            // the view found drained: the claim fails, nothing is closed.
+            let view = read_log(&kv, &slice()).await.unwrap();
+            assert_eq!(
+                try_commit(&kv, &slice(), &stale(2)).await.unwrap(),
+                CommitOutcome::Committed
+            );
+            assert!(!claim_end(&kv, &slice(), &view, 3).await.unwrap());
+            // From a fresh view the claim takes the next epoch, which no
+            // instance can commit any more.
+            let view = read_log(&kv, &slice()).await.unwrap();
+            assert!(claim_end(&kv, &slice(), &view, 3).await.unwrap());
+            assert_eq!(
+                try_commit(&kv, &slice(), &stale(3)).await.unwrap(),
+                CommitOutcome::Fenced
+            );
+            // Taking it again after a lost reply is recognised as ours.
+            assert!(claim_end(&kv, &slice(), &view, 3).await.unwrap());
+            // Once closed, older plans are void and the claim is the head.
+            close_log(&kv, &slice(), 3).await.unwrap();
+            let head = read_log(&kv, &slice()).await.unwrap().head().cloned().unwrap();
+            assert_eq!(
+                (head.epoch, head.position, head.watermark, head.plan),
+                (3, Some(Position(0, 20, 0)), 2_000, 3)
+            );
         });
     }
 }

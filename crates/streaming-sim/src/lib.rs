@@ -535,7 +535,7 @@ impl<P: Providers> PartitionReader for ChaosReader<P> {
                 .and_then(|head| head.position);
             if committed.is_none_or(|at| at < upto)
                 && !*self.env.deleting.lock()
-                && !closed(self.env.kv.as_ref(), &slice).await
+                && !purged(self.env.kv.as_ref(), &slice).await
             {
                 self.env.audit.lock().push(format!(
                     "partition {} was acknowledged up to {upto:?} while {committed:?} is committed",
@@ -2058,16 +2058,27 @@ impl Workload for Operator {
     }
 }
 
-/// Whether the controller closed the log of `slice`: a retired slice, purged
-/// or about to be. Its log may vanish, and commits written into it after the
-/// closing are void, so its history is no longer audited.
-async fn closed(kv: &dyn streaming_core::Kv, slice: &streaming_core::SliceKey) -> bool {
+/// Whether the controller purged the log of `slice`, or is purging it: a
+/// retired slice whose log was closed two `gc_grace` ago. Its log vanishes, so
+/// its history is no longer audited. A log that is only closed still is: the
+/// controller takes the epoch after what it found emitted before closing, so
+/// that the head stays and nothing committed after it is acknowledged.
+async fn purged(kv: &dyn streaming_core::Kv, slice: &streaming_core::SliceKey) -> bool {
     let graph = streaming_core::GraphKey::new(slice.tenant.clone(), slice.graph.clone());
-    kv.get_json::<streaming_core::control::GraphPlan>(&keys::graph_plan(&graph))
+    let Ok(Some(plan)) = kv
+        .get_json::<streaming_core::control::GraphPlan>(&keys::graph_plan(&graph))
         .await
-        .ok()
-        .flatten()
-        .is_some_and(|plan| plan.closed.contains(&slice.slice) || plan.closing.contains_key(&slice.slice))
+    else {
+        return false;
+    };
+    if plan.closed.contains(&slice.slice) {
+        return true;
+    }
+    plan.closing.contains_key(&slice.slice)
+        && kv
+            .hgetall(&keys::slice_log(slice))
+            .await
+            .is_ok_and(|fields| fields.is_empty())
 }
 
 /// Watches the commit logs while the run is in progress and records anything
@@ -2112,7 +2123,7 @@ impl Workload for Auditor {
                 let Some(slice) = slice_of_log(&key) else {
                     continue;
                 };
-                if closed(kv.as_ref(), &slice).await {
+                if purged(kv.as_ref(), &slice).await {
                     seen.remove(&key);
                     continue;
                 }

@@ -49,6 +49,15 @@ pub enum Mutant {
     /// A worker takes the word of the index entry for a graph being
     /// deleted, and runs it again when the entry is written back.
     RunWhatIsBeingDeleted,
+    /// The log of a retired slice is closed without taking the epoch after
+    /// the commits found emitted.
+    ///
+    /// Not in [`Mutant::ALL`] yet: the race it opens (an instance left behind
+    /// committing between the drain check and the closing) shows in about
+    /// one seed in a thousand of the repartition scenarios, one in eighty
+    /// with six-second store stalls, too rarely for the bench. Plant it by
+    /// hand until a scenario makes it reliable.
+    CloseWithoutClaim,
 }
 
 impl Mutant {

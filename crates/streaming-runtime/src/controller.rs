@@ -269,9 +269,8 @@ async fn purge_slice(kv: &dyn Kv, nodes: &[NodeSpec], slice: &SliceKey) -> Resul
 /// Whether everything a retired slice committed has been emitted: each window
 /// it holds accumulators for, in the store or in its log, is behind the
 /// position of the emitter of its aggregate.
-async fn drained(kv: &dyn Kv, topology: &Topology, slice: &SliceKey) -> Result<bool, KvError> {
+async fn drained(kv: &dyn Kv, topology: &Topology, slice: &SliceKey, log: &state::LogView) -> Result<bool, KvError> {
     let unreadable = |error: state::StateError| KvError::Unavailable(error.to_string());
-    let log = state::read_log(kv, slice).await.map_err(unreadable)?;
     for node in topology.slice_nodes(&slice.slice) {
         if &node == slice.slice.root() || topology.kind(&node) != OpKind::Aggregate {
             continue;
@@ -509,7 +508,18 @@ pub(crate) async fn run_once<P: Providers>(
                         };
                         match current.closing.get(&slice).copied() {
                             None => {
-                                if drained(kv, &topology, &key).await? {
+                                let unreadable = |error: state::StateError| KvError::Unavailable(error.to_string());
+                                let log = state::read_log(kv, &key).await.map_err(unreadable)?;
+                                // Closing voids what the log holds: first take
+                                // the epoch after the one found drained, so that
+                                // an instance left behind cannot commit, then
+                                // acknowledge, what would be voided unemitted.
+                                if drained(kv, &topology, &key, &log).await?
+                                    && (planted(Mutant::CloseWithoutClaim)
+                                        || state::claim_end(kv, &key, &log, current.generation)
+                                            .await
+                                            .map_err(unreadable)?)
+                                {
                                     state::close_log(kv, &key, current.generation).await?;
                                     current.closing.insert(slice.clone(), now_ms);
                                     rewritten = true;

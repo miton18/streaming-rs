@@ -142,8 +142,12 @@ exactly-once.
      the slices already feeding the aggregate.
    - *Retired* slice: stops; the emitter still reads it (it no longer holds
      the watermark back) until all it committed is emitted; the controller
-     then closes its log (`p:<generation>` in the seal hash, older-plan
-     commits are void) and deletes its state two `gc_grace` later.
+     then takes the next epoch of its log itself (one `HSETNX`, from the very
+     read that found it drained: an instance left behind is fenced instead of
+     committing, acknowledging, then seeing its commit voided unemitted),
+     closes it (`p:<generation>` in the seal hash, older-plan commits are
+     void, the claimed record stays the head) and deletes its state two
+     `gc_grace` later.
    - A graph that cannot be planned keeps the previous plan's bookkeeping.
 10. **Deleting a graph.** The controller first closes every slice log
     (older commits void), then waits for workers to notice and for the
@@ -188,8 +192,13 @@ exactly-once.
     share it. Every new version is a new plan generation, which is what
     fences an instance still running the previous description.
 
-`streaming_runtime::mutation` holds fifteen **planted bugs**, one per precaution
-above (`SIM_MUTANT=<name>` plants a single one). When you add a precaution, add its mutant and make the simulation
+`streaming_runtime::mutation` holds fifteen **planted bugs** in its bench, one per precaution
+above (`SIM_MUTANT=<name>` plants a single one), and a sixteenth,
+`CloseWithoutClaim`, left out of `Mutant::ALL` because the simulation only
+notices it in about one seed in a thousand (one in eighty with
+`stall_ms: 6_000` on a repartition scenario); the precaution is held by
+`claiming_the_end_of_a_retired_log_fences_what_comes_after` in
+`streaming-runtime/src/state.rs`. When you add a precaution, add its mutant and make the simulation
 notice it.
 
 ## Verifying
@@ -301,7 +310,10 @@ watermark holding every window back (it now looks at its log when records
 lie beyond what it read and none comes; held by
 `a_slice_behind_what_another_instance_acknowledged_starts_again` in
 `streaming-runtime/tests/engine.rs`, the simulation meeting it about once in
-three thousand runs, too seldom for a planted bug).
+three thousand runs, too seldom for a planted bug); a retired
+slice closed between an instance's commit and its acknowledgement (the
+commit, valid when written, was voided by the closing: lost had it carried
+records).
 
 ## The HTTP API and its OpenAPI document
 
