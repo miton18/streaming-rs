@@ -262,6 +262,16 @@ After changing anything under `crates/streaming-api/ui/`, rebuild `streamd`
 - A partition removed then re-added under the same index resumes the old
   state.
 - `replan_interval` is a `WorkerConfig` field without a CLI flag.
+- The `warp10` crate (crates.io, 3.0.0) was evaluated to replace
+  `streaming-warp10` and not adopted. Its client is `reqwest` (tokio sockets,
+  not the Moonpool providers), so it cannot run in simulation, and `reqwest`
+  is a mandatory dependency even for the encoding alone. Its encoding loses
+  what this crate guarantees: a double `3.0` is written `3` (read back as a
+  long), NaN is written as is, string values are not escaped (a `'` or a
+  newline in a value injects lines), empty classes and empty label values
+  (which delete a label) pass, the time unit is fixed to microseconds, and
+  there is no parser for the fake ingress. Revisit if upstream fixes the
+  encoding and puts the HTTP client behind a feature.
 - The Pulsar sink is at-least-once (emit id in a property); messages it
   writes carry a wrong publish time (Magnetar's moonpool engine clock).
 - Never run against a real Materia KV or a real Warp 10. No quotas, fair
