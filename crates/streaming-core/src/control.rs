@@ -73,6 +73,20 @@ impl MemberInfo {
     }
 }
 
+/// A tenant, as created through the API. Field `<tenant>` of
+/// `cluster:tenants`, written once with `HSETNX`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantRecord {
+    /// Tenant id.
+    pub tenant: TenantId,
+    /// Name shown to people, when one was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// When the tenant was created.
+    pub created_ms: Timestamp,
+}
+
 /// Entry of the graph index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]

@@ -284,6 +284,12 @@ After changing anything under `crates/streaming-api/ui/`, rebuild `streamd`
   encoding and puts the HTTP client behind a feature.
 - The Pulsar sink is at-least-once (emit id in a property); messages it
   writes carry a wrong publish time (Magnetar's moonpool engine clock).
+- **Tenants are created explicitly** (`PUT /api/v1/tenants/{tenant}`, one
+  `HSETNX` on `cluster:tenants`, never overwritten; a retry with the same
+  display name answers 200). Submitting a graph to a tenant that was not
+  created is a 404; only the API checks it, the runtime never reads
+  `cluster:tenants`. The designer creates a missing tenant before deploying.
+  There is no tenant deletion or renaming yet.
 - Never run against a real Materia KV or a real Warp 10. No quotas, fair
   scheduling or API authentication.
 - The owner asked how to design interfaces with comments on components: a

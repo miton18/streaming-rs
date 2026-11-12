@@ -12,8 +12,10 @@
 
 use serde_json::{Map, Value};
 use streaming_core::{
-    Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, OpDescriptor, SpecError, Topology,
-    control::{DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState, WorkerSnapshot},
+    Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, OpDescriptor, SpecError, TenantId, Topology,
+    control::{
+        DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState, TenantRecord, WorkerSnapshot,
+    },
     keys,
 };
 
@@ -46,6 +48,18 @@ pub enum ControlError {
         /// The node.
         node: NodeId,
     },
+    /// A graph was submitted to a tenant that was not created (HTTP 404).
+    #[error("tenant `{0}` does not exist: create it before submitting graphs to it")]
+    TenantNotCreated(TenantId),
+    /// The tenant exists with another display name (HTTP 409).
+    #[error("tenant `{0}` already exists with another display name")]
+    TenantConflict(TenantId),
+    /// The display name is longer than [`MAX_DISPLAY_NAME_CHARS`] (HTTP 400).
+    #[error("the display name is longer than {MAX_DISPLAY_NAME_CHARS} characters")]
+    DisplayNameTooLong,
+    /// The display name holds a control character (HTTP 400).
+    #[error("the display name contains a control character")]
+    DisplayNameInvalidCharacter,
     /// The KV failed or holds a malformed document (HTTP 503).
     #[error("{0}")]
     Kv(#[from] KvError),
@@ -75,6 +89,103 @@ pub async fn load_epoch(kv: &dyn Kv) -> Result<i64, ControlError> {
                 }
                 .into()
             }),
+    }
+}
+
+/// Longest accepted tenant display name, in characters.
+pub const MAX_DISPLAY_NAME_CHARS: usize = 100;
+
+/// Created tenants, sorted by id. Undecodable records are skipped.
+pub async fn load_tenants(kv: &dyn Kv) -> Result<Vec<TenantRecord>, ControlError> {
+    let mut tenants: Vec<TenantRecord> = kv
+        .hgetall_json::<TenantRecord>(keys::CLUSTER_TENANTS)
+        .await?
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect();
+    tenants.sort_by(|a, b| a.tenant.cmp(&b.tenant));
+    Ok(tenants)
+}
+
+/// One tenant's record, if it was created.
+pub async fn load_tenant(kv: &dyn Kv, tenant: &TenantId) -> Result<Option<TenantRecord>, ControlError> {
+    Ok(kv.hget_json(keys::CLUSTER_TENANTS, tenant.as_str()).await?)
+}
+
+/// What [`create_tenant`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TenantCreation {
+    /// The tenant did not exist and was created.
+    Created(TenantRecord),
+    /// The tenant already existed with the same display name: nothing was
+    /// written. This is what a retry of a creation whose answer was lost
+    /// sees.
+    Unchanged(TenantRecord),
+}
+
+impl TenantCreation {
+    /// The stored record.
+    #[must_use]
+    pub fn record(&self) -> &TenantRecord {
+        match self {
+            Self::Created(record) | Self::Unchanged(record) => record,
+        }
+    }
+}
+
+fn normalize_display_name(display_name: Option<String>) -> Result<Option<String>, ControlError> {
+    let Some(name) = display_name else {
+        return Ok(None);
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if name.chars().count() > MAX_DISPLAY_NAME_CHARS {
+        return Err(ControlError::DisplayNameTooLong);
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ControlError::DisplayNameInvalidCharacter);
+    }
+    Ok(Some(name.to_owned()))
+}
+
+/// Create a tenant with one `HSETNX` on `cluster:tenants`, then bump the
+/// epoch. Creating a tenant that exists with the same display name changes
+/// nothing (so that a retry is harmless); with another one, it is a
+/// [`ControlError::TenantConflict`]. A tenant is never overwritten.
+pub async fn create_tenant(
+    kv: &dyn Kv,
+    clock: &dyn Clock,
+    tenant: TenantId,
+    display_name: Option<String>,
+) -> Result<TenantCreation, ControlError> {
+    let display_name = normalize_display_name(display_name)?;
+    let record = TenantRecord {
+        tenant,
+        display_name,
+        created_ms: clock.now_ms(),
+    };
+    let encoded = streaming_core::kv::encode_json(keys::CLUSTER_TENANTS, &record)?;
+    if kv
+        .hsetnx(keys::CLUSTER_TENANTS, record.tenant.as_str(), encoded)
+        .await?
+    {
+        bump_epoch(kv).await?;
+        return Ok(TenantCreation::Created(record));
+    }
+    let existing = load_tenant(kv, &record.tenant).await?.ok_or_else(|| {
+        // HSETNX refused the field, so it exists: an absent answer here is a
+        // store that lost a write, not a tenant that does not exist.
+        ControlError::Kv(KvError::Malformed {
+            key: keys::CLUSTER_TENANTS.to_owned(),
+            reason: format!("field `{}` vanished after HSETNX refused it", record.tenant),
+        })
+    })?;
+    if existing.display_name == record.display_name {
+        Ok(TenantCreation::Unchanged(existing))
+    } else {
+        Err(ControlError::TenantConflict(record.tenant))
     }
 }
 
@@ -227,7 +338,12 @@ async fn store_spec(kv: &dyn Kv, clock: &dyn Clock, mut spec: GraphSpec) -> Resu
 /// Validate a description against the catalog and store it. Returns the new
 /// version (`previous + 1`, 1 for a new graph). Writes the spec, the index
 /// entry, the desired state (`running`) when absent, then bumps the epoch.
+///
+/// The tenant must have been created ([`create_tenant`]).
 pub async fn apply_graph(kv: &dyn Kv, clock: &dyn Clock, spec: GraphSpec) -> Result<u64, ControlError> {
+    if load_tenant(kv, &spec.tenant).await?.is_none() {
+        return Err(ControlError::TenantNotCreated(spec.tenant));
+    }
     store_spec(kv, clock, spec).await
 }
 

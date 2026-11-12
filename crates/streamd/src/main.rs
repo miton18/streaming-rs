@@ -222,6 +222,9 @@ async fn standalone(listen: SocketAddr, workers: u32, no_open: bool, gossip_port
     let mut submitted = false;
     for _ in 0..100 {
         if !control::load_catalog(kv.as_ref()).await?.ops.is_empty() {
+            for (tenant, display_name) in demo::tenants() {
+                control::create_tenant(kv.as_ref(), clock.as_ref(), tenant, Some(display_name.to_owned())).await?;
+            }
             for spec in demo::graphs() {
                 let graph = spec.key();
                 let version = control::apply_graph(kv.as_ref(), clock.as_ref(), spec).await?;

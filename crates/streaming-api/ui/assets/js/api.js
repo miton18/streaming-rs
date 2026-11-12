@@ -38,6 +38,7 @@ export const paths = {
   cluster: () => `${BASE}/cluster`,
   catalog: () => `${BASE}/catalog`,
   tenants: () => `${BASE}/tenants`,
+  tenant: (t) => `${BASE}/tenants/${enc(t)}`,
   graphs: (t) => `${BASE}/tenants/${enc(t)}/graphs`,
   graph: (t, g) => `${BASE}/tenants/${enc(t)}/graphs/${enc(g)}`,
   outputs: (t, g, n, limit = 100) => `${BASE}/tenants/${enc(t)}/graphs/${enc(g)}/outputs/${enc(n)}?limit=${limit}`,

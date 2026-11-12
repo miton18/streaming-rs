@@ -17,7 +17,7 @@ use streaming_core::{
     DynKv, GraphKey, MemKv, OpDescriptor, OpKind, OpRef, Registry, TypeTag,
     control::{
         ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, Load, MemberInfo, OutputRow, Placement,
-        RunState, SliceSnapshot, TenantUsage, WorkerSnapshot,
+        RunState, SliceSnapshot, TenantRecord, TenantUsage, WorkerSnapshot,
     },
     keys,
 };
@@ -161,6 +161,15 @@ impl Env {
             kv.hset_json(keys::CLUSTER_CATALOG, op, &descriptor(op, kind))
                 .await
                 .unwrap();
+        }
+        // The tenants most tests use, created without bumping the epoch.
+        for tenant in ["acme", "globex"] {
+            let record = TenantRecord {
+                tenant: tenant.parse().unwrap(),
+                display_name: None,
+                created_ms: NOW - 1,
+            };
+            kv.hset_json(keys::CLUSTER_TENANTS, tenant, &record).await.unwrap();
         }
         let clock = Arc::new(AtomicI64::new(NOW));
         let clock_for_state = clock.clone();
@@ -522,7 +531,128 @@ async fn put_rejects_invalid_input_with_a_message() {
 
     // Nothing was written.
     assert_eq!(env.epoch().await, 0);
-    assert!(env.mem.keys().iter().all(|k| k.starts_with("cluster:catalog")));
+    assert!(
+        env.mem
+            .keys()
+            .iter()
+            .all(|k| k.starts_with("cluster:catalog") || k == keys::CLUSTER_TENANTS)
+    );
+}
+
+#[tokio::test]
+async fn tenants_are_created_once_and_retries_are_harmless() {
+    let env = Env::new().await;
+    let uri = "/api/v1/tenants/initech";
+    let (status, body) = env
+        .call(Method::PUT, uri, Some(json!({"displayName": "  Initech  "})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        body,
+        json!({"tenant": "initech", "displayName": "Initech", "createdMs": NOW})
+    );
+    assert_eq!(env.epoch().await, 1);
+    let record: TenantRecord = env
+        .kv
+        .hget_json(keys::CLUSTER_TENANTS, "initech")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.display_name.as_deref(), Some("Initech"));
+
+    // A retry changes nothing, not even the creation time.
+    env.clock.store(NOW + 10, Ordering::SeqCst);
+    let (status, again) = env
+        .call(Method::PUT, uri, Some(json!({"displayName": "Initech"})))
+        .await;
+    assert_eq!((status, &again), (StatusCode::OK, &body));
+    assert_eq!(env.epoch().await, 1, "an unchanged tenant does not bump the epoch");
+
+    // Another display name is a conflict; the tenant is never overwritten.
+    let (status, answer) = env.call(Method::PUT, uri, Some(json!({"displayName": "Other"}))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(answer["code"], "TENANT_DISPLAY_NAME_CONFLICT");
+    assert_eq!(answer["context"], json!({"tenant": "initech"}));
+    let (status, answer) = env.call(Method::PUT, uri, Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    let stored: TenantRecord = env
+        .kv
+        .hget_json(keys::CLUSTER_TENANTS, "initech")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, record);
+
+    // A created tenant without graphs is listed and readable.
+    let (status, body) = env.get(uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"tenant": "initech", "displayName": "Initech", "createdMs": NOW, "graphs": 0, "actors": 0, "inPerSec": 0.0})
+    );
+    let (status, body) = env.get("/api/v1/tenants/initech/graphs").await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"graphs": []})));
+    let (_, body) = env.get("/api/v1/tenants").await;
+    let ids: Vec<&str> = body["tenants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["tenant"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["acme", "globex", "initech"]);
+
+    // Without a display name.
+    let (status, body) = env.call(Method::PUT, "/api/v1/tenants/hooli", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body, json!({"tenant": "hooli", "createdMs": NOW + 10}));
+}
+
+#[tokio::test]
+async fn tenant_creation_rejects_invalid_input() {
+    let env = Env::new().await;
+    for (uri, body, needle) in [
+        ("/api/v1/tenants/bad.id", json!({}), "IDENTIFIER_INVALID_CHARACTER"),
+        (
+            "/api/v1/tenants/ok",
+            json!({"displayName": "a".repeat(101)}),
+            "DISPLAY_NAME_TOO_LONG",
+        ),
+        (
+            "/api/v1/tenants/ok",
+            json!({"displayName": "a\nb"}),
+            "DISPLAY_NAME_INVALID_CHARACTER",
+        ),
+        ("/api/v1/tenants/ok", json!({"name": "x"}), "BODY_UNKNOWN_FIELD"),
+    ] {
+        let (status, answer) = env.call(Method::PUT, uri, Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {answer}");
+        assert_eq!(answer["code"], needle, "{uri}: {answer}");
+    }
+    let (status, answer) = env.get("/api/v1/tenants/ok").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(answer["code"], "TENANT_NOT_FOUND");
+    assert_eq!(env.epoch().await, 0);
+}
+
+#[tokio::test]
+async fn graphs_need_a_created_tenant() {
+    let env = Env::new().await;
+    let mut body = graph_body("g");
+    body["tenant"] = json!("initech");
+    let (status, answer) = env
+        .call(Method::PUT, "/api/v1/tenants/initech/graphs/g", Some(body.clone()))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(answer["code"], "TENANT_NOT_CREATED");
+    assert_eq!(answer["context"], json!({"tenant": "initech"}));
+    assert_eq!(env.epoch().await, 0);
+    assert!(env.kv.hget(keys::CLUSTER_GRAPHS, "initech/g").await.unwrap().is_none());
+
+    env.call(Method::PUT, "/api/v1/tenants/initech", Some(json!({}))).await;
+    let (status, answer) = env
+        .call(Method::PUT, "/api/v1/tenants/initech/graphs/g", Some(body))
+        .await;
+    assert_eq!((status, answer), (StatusCode::OK, json!({"version": 1})));
 }
 
 #[tokio::test]
@@ -602,8 +732,8 @@ async fn graph_list_and_tenants() {
     assert_eq!(
         body,
         json!({"tenants": [
-            {"tenant": "acme", "graphs": 2, "actors": 7, "inPerSec": 1200.0},
-            {"tenant": "globex", "graphs": 1, "actors": 0, "inPerSec": 0.0}
+            {"tenant": "acme", "createdMs": NOW - 1, "graphs": 2, "actors": 7, "inPerSec": 1200.0},
+            {"tenant": "globex", "createdMs": NOW - 1, "graphs": 1, "actors": 0, "inPerSec": 0.0}
         ]})
     );
 
@@ -632,6 +762,7 @@ async fn unknown_resources_are_404_and_bad_ids_400() {
     let env = Env::new().await;
     env.put_graph("g").await;
     for uri in [
+        "/api/v1/tenants/nobody",
         "/api/v1/tenants/nobody/graphs",
         "/api/v1/tenants/acme/graphs/nope",
         "/api/v1/tenants/acme/graphs/nope/dot",
@@ -929,6 +1060,8 @@ async fn every_write_bumps_the_epoch() {
             assert_eq!(env.epoch().await, expected, $label);
         }};
     }
+    env.call(Method::PUT, "/api/v1/tenants/initech", Some(json!({}))).await;
+    check!("tenant");
     env.put_graph("g").await;
     check!("put");
     env.call(

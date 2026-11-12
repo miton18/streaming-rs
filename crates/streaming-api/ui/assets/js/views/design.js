@@ -27,7 +27,8 @@ export class DesignView {
       h('div', { class: 'design-grid' },
         h('div', { class: 'section' },
           h('div', { class: 'card design-id' },
-            this.field('Tenant', r.tenant = h('input', { class: 'input mono', value: 'acme', oninput: () => this.render() })),
+            this.field('Tenant', r.tenant = h('input', { class: 'input mono', value: 'acme', list: 'design-tenants', oninput: () => this.render() })),
+            r.tenants = h('datalist', { id: 'design-tenants' }),
             this.field('Graphe', r.graph = h('input', { class: 'input mono', value: 'mon-pipeline', oninput: () => this.render() }))),
           r.steps = h('div', { class: 'design-steps' }),
           h('div', null, h('button', { class: 'btn btn-secondary', type: 'button', onclick: () => this.add() }, '+ Ajouter une étape'))),
@@ -43,6 +44,12 @@ export class DesignView {
   needs() { return { catalog: true }; }
 
   update(store) {
+    const tenants = (store.tenants || []).map((t) => t.tenant);
+    if (store.tenants && tenants.join('\n') !== (this.tenants || []).join('\n')) {
+      this.tenants = tenants;
+      this.refs.tenants.replaceChildren(...tenants.map((t) => h('option', { value: t })));
+      this.refresh();
+    }
     const ops = store.catalog || [];
     if (ops.length === (this.ops || []).length) return;
     this.ops = ops;
@@ -134,7 +141,14 @@ export class DesignView {
     const tenant = this.refs.tenant.value.trim();
     const graph = this.refs.graph.value.trim();
     if (!tenant || !graph) problems.push('le tenant et le nom du graphe sont requis');
+    else if (!/^[A-Za-z0-9_-]+$/.test(tenant)) problems.push(`« ${tenant} » : un tenant n'accepte que lettres, chiffres, - et _`);
     return { spec: { tenant, graph, nodes, edges }, problems };
+  }
+
+  // Whether the tenant of the description is still to be created (unknown
+  // until the tenant list has been read once).
+  newTenant(tenant) {
+    return !!tenant && !!this.tenants && !this.tenants.includes(tenant);
   }
 
   render() {
@@ -150,7 +164,8 @@ export class DesignView {
     text(r.json, JSON.stringify(spec, null, 2));
     r.checks.replaceChildren(...(problems.length
       ? problems.map((p) => h('li', { class: 'bad' }, p))
-      : [h('li', { class: 'good' }, 'La description est cohérente : prête à déployer.')]));
+      : [h('li', { class: 'good' }, 'La description est cohérente : prête à déployer.')]),
+      ...(this.newTenant(spec.tenant) ? [h('li', { class: 'note' }, `Le tenant « ${spec.tenant} » n'existe pas : il sera créé au déploiement.`)] : []));
     r.deploy.disabled = problems.length > 0;
   }
 
@@ -199,6 +214,10 @@ export class DesignView {
     const { spec, problems } = this.spec();
     if (problems.length) return;
     try {
+      if (this.newTenant(spec.tenant)) {
+        await put(paths.tenant(spec.tenant), {});
+        this.tenants = [...this.tenants, spec.tenant];
+      }
       await put(paths.graph(spec.tenant, spec.graph), spec);
       this.ctx.toast(`${spec.tenant}/${spec.graph} : déployé`);
       this.ctx.refresh();

@@ -22,7 +22,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use streaming_core::{
-    Clock, Emit, GraphSpec, OpError, Registry, SinkConnector, SinkError, SourceConnector, SystemClock, TypeTag, datum,
+    Clock, Emit, GraphSpec, OpError, Registry, SinkConnector, SinkError, SourceConnector, SystemClock, TenantId,
+    TypeTag, datum,
 };
 use streaming_runtime::memlog::MemLog;
 
@@ -220,6 +221,16 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
     );
 }
 
+/// The tenants created when the demonstration cluster starts, with their
+/// display names. Every tenant of [`graphs`] is among them.
+#[must_use]
+pub fn tenants() -> Vec<(TenantId, &'static str)> {
+    [("acme", "Acme Corporation"), ("globex", "Globex")]
+        .into_iter()
+        .map(|(tenant, display_name)| (TenantId::new(tenant).expect("a valid tenant id"), display_name))
+        .collect()
+}
+
 /// The graphs submitted when the demonstration cluster starts.
 #[must_use]
 pub fn graphs() -> Vec<GraphSpec> {
@@ -302,7 +313,9 @@ mod tests {
         crate::stock::register(&mut registry);
         register(&mut registry, Arc::new(Generators::default()));
         let catalog = registry.catalog();
+        let tenants: Vec<TenantId> = tenants().into_iter().map(|(tenant, _)| tenant).collect();
         for spec in graphs() {
+            assert!(tenants.contains(&spec.tenant), "{}: tenant not created", spec.key());
             let topology = Topology::build(&spec, &catalog).unwrap_or_else(|error| panic!("{}: {error}", spec.key()));
             assert!(!topology.nodes_of(streaming_core::OpKind::Aggregate).is_empty());
         }

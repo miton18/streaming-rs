@@ -167,9 +167,11 @@ streamd worker --id worker-2 --kv redis://:TOKEN@kv-host:6379 \
     --gossip 0.0.0.0:7946 --gossip-advertise 10.0.0.2:7946 --seeds 10.0.0.1:7946
 ```
 
-Use `rediss://` for TLS (Materia KV). Submit a graph with the API:
+Use `rediss://` for TLS (Materia KV). Create the tenant, then submit a graph
+to it with the API:
 
 ```sh
+curl -X PUT http://10.0.0.1:8080/api/v1/tenants/acme --data '{"displayName": "Acme"}'
 curl -X PUT http://10.0.0.1:8080/api/v1/tenants/acme/graphs/count-per-key \
      --data @count-per-key.json
 ```

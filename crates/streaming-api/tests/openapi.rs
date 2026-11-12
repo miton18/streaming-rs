@@ -48,6 +48,8 @@ fn describes_every_operation() {
         "get /api/v1/cluster".to_owned(),
         "get /api/v1/catalog".to_owned(),
         "get /api/v1/tenants".to_owned(),
+        "get /api/v1/tenants/{tenant}".to_owned(),
+        "put /api/v1/tenants/{tenant}".to_owned(),
         "get /api/v1/tenants/{tenant}/graphs".to_owned(),
         format!("get {graph}"),
         format!("put {graph}"),

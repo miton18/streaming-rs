@@ -13,7 +13,7 @@ const POLL_MS = 1000;
 const CATALOG_TTL = 15000;
 
 const store = {
-  tenants: null,      // [{tenant, graphs, actors, inPerSec}]
+  tenants: null,      // [{tenant, displayName?, createdMs?, graphs, actors, inPerSec}]
   graphs: {},         // tenant -> [graph summary]
   cluster: null,
   clusterPrev: null,  // previous snapshot (KV rates)

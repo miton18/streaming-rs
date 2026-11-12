@@ -88,7 +88,9 @@ cat >"$WORK/graph.json" <<JSON
             ["count", "to-pulsar"], ["to-pulsar", "out"]]
 }
 JSON
-echo "== submitting the graph"
+echo "== creating the tenant, then submitting the graph"
+curl -sf -X PUT "http://$API/api/v1/tenants/acme" --data '{"displayName": "Acme"}'
+echo
 curl -sf -X PUT "http://$API/api/v1/tenants/acme/graphs/count-per-key" --data @"$WORK/graph.json"
 echo
 sleep 8

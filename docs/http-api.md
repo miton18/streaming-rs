@@ -97,10 +97,19 @@ parameter, or does not say.
 
 ### `GET /api/v1/tenants`
 ```json
-{"tenants": [{"tenant": "acme", "graphs": 2, "actors": 14, "inPerSec": 8400.0}]}
+{"tenants": [{"tenant": "acme", "displayName": "Acme", "createdMs": 1790000000000,
+              "graphs": 2, "actors": 14, "inPerSec": 8400.0}]}
 ```
+The created tenants (`cluster:tenants`), plus any tenant the graph index names
+without a record (written before tenants had to be created); those have no
+`createdMs`. `displayName` is absent when none was given.
+
+### `GET /api/v1/tenants/{tenant}`
+One entry of the list above; `404` (`TENANT_NOT_FOUND`) for a tenant neither
+created nor named by the index.
 
 ### `GET /api/v1/tenants/{tenant}/graphs`
+A created tenant without graphs answers `{"graphs": []}`.
 ```json
 {"graphs": [{
   "tenant": "acme", "graph": "count-per-key", "version": 3, "state": "running",
@@ -199,12 +208,24 @@ The topology as Graphviz DOT (`text/vnd.graphviz`).
 
 Every write bumps `cluster:epoch`.
 
+### `PUT /api/v1/tenants/{tenant}`
+Creates a tenant. Body: `{"displayName": "Acme"}` (optional, at most 100
+characters, trimmed; `{}` for none). The record is written once with
+`HSETNX` and never overwritten. Answers the record,
+`{"tenant": "acme", "displayName": "Acme", "createdMs": 1790000000000}`, with
+`201` when this request created it, `200` when it already existed with the
+same display name (a harmless retry: nothing is written, the epoch is not
+bumped), `409` (`TENANT_DISPLAY_NAME_CONFLICT`) when it exists with another
+one. `400` for a display name that is too long (`DISPLAY_NAME_TOO_LONG`) or
+holds a control character (`DISPLAY_NAME_INVALID_CHARACTER`).
+
 ### `PUT /api/v1/tenants/{tenant}/graphs/{graph}`
 Body: a `GraphSpec`. `tenant` and `graph` in the body must match the path. The
 description is validated against the catalog (`Topology::build`); on success it
 is stored with `version = previous + 1`, the index entry is updated and the
 desired state is created as `running` if absent. Answers `{"version": 4}`.
-`400` otherwise, with the code of the rule broken (`OPERATOR_UNKNOWN`,
+`404` (`TENANT_NOT_CREATED`) when the tenant was not created, `400`
+otherwise, with the code of the rule broken (`OPERATOR_UNKNOWN`,
 `TYPE_MISMATCH`, `WIRING_*`, `GRAPH_CYCLE`...).
 
 ### `DELETE /api/v1/tenants/{tenant}/graphs/{graph}`

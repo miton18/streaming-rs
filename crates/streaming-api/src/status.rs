@@ -11,7 +11,7 @@ use streaming_core::{
     Catalog, GraphSpec, NodeId, OpDescriptor, SliceId, SliceKey, TenantId, Timestamp, WorkerId,
     control::{
         ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, GraphPlan, Load, MemberInfo, Placement,
-        RunState, SliceSnapshot, TenantUsage, WorkerSnapshot,
+        RunState, SliceSnapshot, TenantRecord, TenantUsage, WorkerSnapshot,
     },
 };
 
@@ -125,6 +125,13 @@ pub fn catalog_view(catalog: &Catalog) -> CatalogView {
 pub struct TenantSummary {
     /// Tenant id.
     pub tenant: TenantId,
+    /// Name shown to people, when one was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// When the tenant was created; absent for a tenant that has graphs but
+    /// was never created (written before tenants had to be).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_ms: Option<Timestamp>,
     /// Graphs in the index (including those being deleted).
     pub graphs: usize,
     /// Actors of the tenant on alive workers.
@@ -156,25 +163,33 @@ fn alive_snapshots(
     })
 }
 
-/// Group the graph index by tenant; actor counts and input rates are the sums
-/// of the [`TenantUsage`] reported by alive workers.
+/// The created tenants, plus those the graph index names without a record,
+/// with their graph count; actor counts and input rates are the sums of the
+/// [`TenantUsage`] reported by alive workers.
 #[must_use]
 pub fn tenants_view(
+    records: &[TenantRecord],
     index: &[GraphIndexEntry],
     members: &[MemberReport],
     now_ms: Timestamp,
     member_timeout_ms: i64,
 ) -> TenantsView {
-    let mut tenants: BTreeMap<&TenantId, TenantSummary> = BTreeMap::new();
+    let summary = |tenant: &TenantId, record: Option<&TenantRecord>| TenantSummary {
+        tenant: tenant.clone(),
+        display_name: record.and_then(|record| record.display_name.clone()),
+        created_ms: record.map(|record| record.created_ms),
+        graphs: 0,
+        actors: 0,
+        in_per_sec: 0.0,
+    };
+    let mut tenants: BTreeMap<&TenantId, TenantSummary> = records
+        .iter()
+        .map(|record| (&record.tenant, summary(&record.tenant, Some(record))))
+        .collect();
     for entry in index {
         tenants
             .entry(&entry.tenant)
-            .or_insert_with(|| TenantSummary {
-                tenant: entry.tenant.clone(),
-                graphs: 0,
-                actors: 0,
-                in_per_sec: 0.0,
-            })
+            .or_insert_with(|| summary(&entry.tenant, None))
             .graphs += 1;
     }
     for (_, snapshot) in alive_snapshots(members, now_ms, member_timeout_ms) {
@@ -1630,14 +1645,32 @@ mod tests {
             (member("w2", NOW), Some(s2)),
             (member("w3", 0), Some(dead)),
         ];
-        let view = tenants_view(&index, &members, NOW, TIMEOUT);
-        assert_eq!(view.tenants.len(), 2, "tenants come from the index only");
-        assert_eq!(view.tenants[0].tenant.as_str(), "acme");
+        let record = |tenant: &str, display_name: Option<&str>| TenantRecord {
+            tenant: TenantId::new(tenant).unwrap(),
+            display_name: display_name.map(str::to_owned),
+            created_ms: 7,
+        };
+        let records = [record("acme", Some("Acme Corp")), record("empty", None)];
+        let view = tenants_view(&records, &index, &members, NOW, TIMEOUT);
+        let ids: Vec<&str> = view.tenants.iter().map(|t| t.tenant.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["acme", "empty", "globex"],
+            "tenants come from the records and the index, not from snapshots"
+        );
+        assert_eq!(view.tenants[0].display_name.as_deref(), Some("Acme Corp"));
+        assert_eq!(view.tenants[0].created_ms, Some(7));
         assert_eq!(view.tenants[0].graphs, 2);
         assert_eq!(view.tenants[0].actors, 14);
         assert_eq!(view.tenants[0].in_per_sec, 1000.0);
-        assert_eq!(view.tenants[1].graphs, 1);
-        assert_eq!(view.tenants[1].actors, 0);
+        assert_eq!(view.tenants[1].graphs, 0);
+        assert_eq!(view.tenants[1].created_ms, Some(7));
+        assert_eq!(view.tenants[2].graphs, 1);
+        assert_eq!(view.tenants[2].actors, 0);
+        assert_eq!(
+            view.tenants[2].created_ms, None,
+            "a tenant only the index names has no record"
+        );
     }
 
     #[test]

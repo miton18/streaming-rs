@@ -123,7 +123,7 @@ export class OverviewView {
       const r = {};
       const el = h('section', { class: 'section' },
         h('div', { class: 'section-head' },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, icon('tenant'), r.name = h('h2', null, t.tenant)),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, icon('tenant'), r.name = h('h2', null, t.tenant), r.display = h('span', { class: 'muted', style: { fontSize: '13px' } })),
           r.meta = h('div', { class: 'meta' })),
         r.grid = h('div', { class: 'grid-cards' }));
       el.querySelector('svg').setAttribute('style', 'width:20px;height:20px;color:var(--color-neutral-400)');
@@ -132,6 +132,8 @@ export class OverviewView {
     }, (el, t) => {
       const r = el._r;
       const gs = store.graphs[t.tenant] || [];
+      text(r.display, t.displayName || '');
+      r.grid.hidden = gs.length === 0;
       const bn = gs.filter((g) => g.bottleneck).length;
       text(r.meta, `${gs.length} graphe${gs.length > 1 ? 's' : ''} · ${int(t.actors)} acteurs · ${rate(t.inPerSec)} en entrée${bn ? ` · ${bn} goulot${bn > 1 ? 's' : ''}` : ''}`);
       syncList(r.grid, gs, (g) => g.graph, () => graphCard(this.ctx), updateGraphCard);

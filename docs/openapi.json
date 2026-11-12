@@ -288,7 +288,7 @@
         "type": "object"
       },
       "ErrorBody": {
-        "description": "An error. `message` is the template of `code` with the values of `context` in its `{placeholders}`, so that a client can write it in another language from `code` and `context` alone. The codes, their status and their template:\n- `IDENTIFIER_EMPTY` (400): the {parameter} must not be empty\n- `IDENTIFIER_TOO_LONG` (400): the {parameter} `{value}` is longer than {maxLength} bytes\n- `IDENTIFIER_INVALID_CHARACTER` (400): the {parameter} `{value}` may only contain letters, digits, `-` and `_`\n- `BODY_UNREADABLE` (400): the request body could not be read\n- `BODY_TOO_LARGE` (413): the request body is too large\n- `BODY_NOT_JSON` (400): the request body is not valid JSON (line {line}, column {column})\n- `BODY_UNKNOWN_FIELD` (400): the request body has an unknown field `{field}` (line {line}, column {column})\n- `BODY_MISSING_FIELD` (400): the request body lacks the field `{field}` (line {line}, column {column})\n- `BODY_INVALID` (400): the request body is invalid: {detail} (line {line}, column {column})\n- `LIMIT_INVALID` (400): invalid limit `{value}`: expected a number of rows\n- `QUERY_INVALID` (400): the query string is invalid: {detail}\n- `TENANT_NOT_FOUND` (404): unknown tenant `{tenant}`\n- `GRAPH_NOT_FOUND` (404): unknown graph `{tenant}/{graph}`\n- `NODE_NOT_FOUND` (404): unknown node `{node}` in graph `{tenant}/{graph}`\n- `GRAPH_KEY_MISMATCH` (400): the description is for `{bodyTenant}/{bodyGraph}` but the path names `{tenant}/{graph}`\n- `GRAPH_BEING_DELETED` (400): graph `{tenant}/{graph}` is being deleted\n- `NODE_CONFIG_NOT_OBJECT` (400): the configuration of node `{node}` in graph `{tenant}/{graph}` is not an object and cannot be patched\n- `GRAPH_EMPTY` (400): the graph has no node\n- `NODE_DUPLICATED` (400): node `{node}` is declared twice\n- `EDGE_UNKNOWN_NODE` (400): edge `{from}` -> `{to}` references unknown node `{unknown}`\n- `EDGE_INVALID` (400): edge `{from}` -> `{to}` is duplicated or a self-loop\n- `GRAPH_CYCLE` (400): the graph has a cycle through {nodes}\n- `OPERATOR_UNKNOWN` (400): node `{node}` references unknown operator `{op}`\n- `TYPE_MISMATCH` (400): edge `{from}` -> `{to}`: `{from}` produces `{produced}` but `{to}` expects `{expected}`\n- `WIRING_SOURCE_HAS_INPUTS` (400): node `{node}` ({kind}): a source cannot have inputs\n- `WIRING_SOURCE_WITHOUT_OUTPUTS` (400): node `{node}` ({kind}): a source needs at least one output\n- `WIRING_SINK_WITHOUT_INPUTS` (400): node `{node}` ({kind}): a sink needs at least one input\n- `WIRING_SINK_HAS_OUTPUTS` (400): node `{node}` ({kind}): a sink cannot have outputs\n- `WIRING_NEEDS_INPUT_AND_OUTPUT` (400): node `{node}` ({kind}): needs at least one input and one output\n- `WIRING_KEY_BY_MUST_FEED_WINDOWS` (400): node `{node}` ({kind}): a key_by node must feed window nodes only\n- `WIRING_WINDOW_MUST_BE_FED_BY_KEY_BY` (400): node `{node}` ({kind}): a window node must be fed by key_by nodes only\n- `WIRING_WINDOW_MUST_FEED_AGGREGATES` (400): node `{node}` ({kind}): a window node must feed aggregate nodes only\n- `WIRING_AGGREGATE_NEEDS_ONE_WINDOW` (400): node `{node}` ({kind}): an aggregate node needs exactly one input, a window node\n- `WIRING_AGGREGATE_WITHOUT_OUTPUTS` (400): node `{node}` ({kind}): an aggregate node needs at least one output\n- `DOCUMENT_TOO_LARGE` (413): the document is {size} bytes, above the store's limit of {limit}\n- `STORE_UNAVAILABLE` (503): the store did not answer, try again later\n- `STORE_DOCUMENT_UNREADABLE` (503): a document of the store is unreadable\n- `ROUTE_NOT_FOUND` (404): nothing is served at `{path}`\n- `UI_NOT_EMBEDDED` (404): the web UI is not embedded in this build",
+        "description": "An error. `message` is the template of `code` with the values of `context` in its `{placeholders}`, so that a client can write it in another language from `code` and `context` alone. The codes, their status and their template:\n- `IDENTIFIER_EMPTY` (400): the {parameter} must not be empty\n- `IDENTIFIER_TOO_LONG` (400): the {parameter} `{value}` is longer than {maxLength} bytes\n- `IDENTIFIER_INVALID_CHARACTER` (400): the {parameter} `{value}` may only contain letters, digits, `-` and `_`\n- `BODY_UNREADABLE` (400): the request body could not be read\n- `BODY_TOO_LARGE` (413): the request body is too large\n- `BODY_NOT_JSON` (400): the request body is not valid JSON (line {line}, column {column})\n- `BODY_UNKNOWN_FIELD` (400): the request body has an unknown field `{field}` (line {line}, column {column})\n- `BODY_MISSING_FIELD` (400): the request body lacks the field `{field}` (line {line}, column {column})\n- `BODY_INVALID` (400): the request body is invalid: {detail} (line {line}, column {column})\n- `LIMIT_INVALID` (400): invalid limit `{value}`: expected a number of rows\n- `QUERY_INVALID` (400): the query string is invalid: {detail}\n- `TENANT_NOT_FOUND` (404): unknown tenant `{tenant}`\n- `TENANT_NOT_CREATED` (404): tenant `{tenant}` does not exist: create it before submitting graphs to it\n- `TENANT_DISPLAY_NAME_CONFLICT` (409): tenant `{tenant}` already exists with another display name\n- `DISPLAY_NAME_TOO_LONG` (400): the display name is longer than {maxLength} characters\n- `DISPLAY_NAME_INVALID_CHARACTER` (400): the display name contains a control character\n- `GRAPH_NOT_FOUND` (404): unknown graph `{tenant}/{graph}`\n- `NODE_NOT_FOUND` (404): unknown node `{node}` in graph `{tenant}/{graph}`\n- `GRAPH_KEY_MISMATCH` (400): the description is for `{bodyTenant}/{bodyGraph}` but the path names `{tenant}/{graph}`\n- `GRAPH_BEING_DELETED` (400): graph `{tenant}/{graph}` is being deleted\n- `NODE_CONFIG_NOT_OBJECT` (400): the configuration of node `{node}` in graph `{tenant}/{graph}` is not an object and cannot be patched\n- `GRAPH_EMPTY` (400): the graph has no node\n- `NODE_DUPLICATED` (400): node `{node}` is declared twice\n- `EDGE_UNKNOWN_NODE` (400): edge `{from}` -> `{to}` references unknown node `{unknown}`\n- `EDGE_INVALID` (400): edge `{from}` -> `{to}` is duplicated or a self-loop\n- `GRAPH_CYCLE` (400): the graph has a cycle through {nodes}\n- `OPERATOR_UNKNOWN` (400): node `{node}` references unknown operator `{op}`\n- `TYPE_MISMATCH` (400): edge `{from}` -> `{to}`: `{from}` produces `{produced}` but `{to}` expects `{expected}`\n- `WIRING_SOURCE_HAS_INPUTS` (400): node `{node}` ({kind}): a source cannot have inputs\n- `WIRING_SOURCE_WITHOUT_OUTPUTS` (400): node `{node}` ({kind}): a source needs at least one output\n- `WIRING_SINK_WITHOUT_INPUTS` (400): node `{node}` ({kind}): a sink needs at least one input\n- `WIRING_SINK_HAS_OUTPUTS` (400): node `{node}` ({kind}): a sink cannot have outputs\n- `WIRING_NEEDS_INPUT_AND_OUTPUT` (400): node `{node}` ({kind}): needs at least one input and one output\n- `WIRING_KEY_BY_MUST_FEED_WINDOWS` (400): node `{node}` ({kind}): a key_by node must feed window nodes only\n- `WIRING_WINDOW_MUST_BE_FED_BY_KEY_BY` (400): node `{node}` ({kind}): a window node must be fed by key_by nodes only\n- `WIRING_WINDOW_MUST_FEED_AGGREGATES` (400): node `{node}` ({kind}): a window node must feed aggregate nodes only\n- `WIRING_AGGREGATE_NEEDS_ONE_WINDOW` (400): node `{node}` ({kind}): an aggregate node needs exactly one input, a window node\n- `WIRING_AGGREGATE_WITHOUT_OUTPUTS` (400): node `{node}` ({kind}): an aggregate node needs at least one output\n- `DOCUMENT_TOO_LARGE` (413): the document is {size} bytes, above the store's limit of {limit}\n- `STORE_UNAVAILABLE` (503): the store did not answer, try again later\n- `STORE_DOCUMENT_UNREADABLE` (503): a document of the store is unreadable\n- `ROUTE_NOT_FOUND` (404): nothing is served at `{path}`\n- `UI_NOT_EMBEDDED` (404): the web UI is not embedded in this build",
         "properties": {
           "code": {
             "description": "The case, a constant for machines.",
@@ -305,6 +305,10 @@
               "LIMIT_INVALID",
               "QUERY_INVALID",
               "TENANT_NOT_FOUND",
+              "TENANT_NOT_CREATED",
+              "TENANT_DISPLAY_NAME_CONFLICT",
+              "DISPLAY_NAME_TOO_LONG",
+              "DISPLAY_NAME_INVALID_CHARACTER",
               "GRAPH_NOT_FOUND",
               "NODE_NOT_FOUND",
               "GRAPH_KEY_MISMATCH",
@@ -1821,12 +1825,53 @@
         ],
         "type": "object"
       },
+      "TenantBody": {
+        "additionalProperties": false,
+        "description": "What a tenant is created with.",
+        "properties": {
+          "displayName": {
+            "default": null,
+            "description": "Name shown to people (at most 100 characters, trimmed; empty means\nnone).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "TenantId": {
         "description": "A tenant id: 1 to 128 letters, digits, `-` or `_`.",
         "maxLength": 128,
         "minLength": 1,
         "pattern": "^[A-Za-z0-9_-]+$",
         "type": "string"
+      },
+      "TenantRecord": {
+        "description": "A tenant, as created through the API. Field `<tenant>` of\n`cluster:tenants`, written once with `HSETNX`.",
+        "properties": {
+          "createdMs": {
+            "description": "When the tenant was created.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "displayName": {
+            "description": "Name shown to people, when one was given.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Tenant id."
+          }
+        },
+        "required": [
+          "tenant",
+          "createdMs"
+        ],
+        "type": "object"
       },
       "TenantSummary": {
         "description": "One tenant of `GET /api/v1/tenants`.",
@@ -1836,6 +1881,21 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "createdMs": {
+            "description": "When the tenant was created; absent for a tenant that has graphs but\nwas never created (written before tenants had to be).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "displayName": {
+            "description": "Name shown to people, when one was given.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "graphs": {
             "description": "Graphs in the index (including those being deleted).",
@@ -2123,7 +2183,108 @@
             "description": "Error: `code` names the case (see `ErrorBody`), `context` holds its values."
           }
         },
-        "summary": "The tenants that have graphs, with their consumption on alive workers.",
+        "summary": "The tenants: those created, and those the graph index names without having been created. Each comes with its consumption on alive workers.",
+        "tags": [
+          "tenants"
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant}": {
+      "get": {
+        "operationId": "tenant",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSummary"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Error: `code` names the case (see `ErrorBody`), `context` holds its values."
+          }
+        },
+        "summary": "A tenant with its consumption on alive workers.",
+        "tags": [
+          "tenants"
+        ]
+      },
+      "put": {
+        "description": "A tenant must exist before graphs are submitted to it. Creating it again\nwith the same display name changes nothing and answers 200, so a retry is\nharmless; with another display name it answers 409. A tenant is never\noverwritten.",
+        "operationId": "putTenant",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantRecord"
+                }
+              }
+            },
+            "description": "The tenant already existed with this display name; nothing changed."
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantRecord"
+                }
+              }
+            },
+            "description": "The tenant was created."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Error: `code` names the case (see `ErrorBody`), `context` holds its values."
+          }
+        },
+        "summary": "Create a tenant.",
         "tags": [
           "tenants"
         ]
@@ -2164,7 +2325,7 @@
             "description": "Error: `code` names the case (see `ErrorBody`), `context` holds its values."
           }
         },
-        "summary": "The graphs of a tenant, summarized.",
+        "summary": "The graphs of a tenant, summarized. A created tenant without graphs has an empty list.",
         "tags": [
           "tenants"
         ]

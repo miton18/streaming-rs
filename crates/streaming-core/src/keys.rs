@@ -5,6 +5,7 @@
 //! cluster:epoch                                  INCR on every control-plane change
 //! cluster:members                                hash  worker        -> MemberInfo (JSON)
 //! cluster:catalog                                hash  op ref        -> OpDescriptor (JSON)
+//! cluster:tenants                                hash  tenant        -> TenantRecord (JSON)
 //! cluster:graphs                                 hash  tenant/graph  -> GraphIndexEntry (JSON)
 //! cluster:placement                              string Placement (JSON)
 //! cluster:metrics:<worker>                       string WorkerSnapshot (JSON)
@@ -30,6 +31,9 @@ pub const CLUSTER_EPOCH: &str = "cluster:epoch";
 pub const CLUSTER_MEMBERS: &str = "cluster:members";
 /// Hash of the operators the cluster can run.
 pub const CLUSTER_CATALOG: &str = "cluster:catalog";
+/// Hash of created tenants. A graph can only be submitted to a tenant listed
+/// here.
+pub const CLUSTER_TENANTS: &str = "cluster:tenants";
 /// Hash of deployed graphs.
 pub const CLUSTER_GRAPHS: &str = "cluster:graphs";
 /// Which worker runs which slice.

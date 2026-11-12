@@ -79,8 +79,16 @@ codes! {
     /// The query string could not be parsed. `detail` is the parser's
     /// explanation, in English.
     QUERY_INVALID = BAD_REQUEST, "the query string is invalid: {detail}";
-    /// No graph of this tenant.
+    /// The tenant was neither created nor has graphs.
     TENANT_NOT_FOUND = NOT_FOUND, "unknown tenant `{tenant}`";
+    /// A graph was submitted to a tenant that was not created.
+    TENANT_NOT_CREATED = NOT_FOUND, "tenant `{tenant}` does not exist: create it before submitting graphs to it";
+    /// The tenant exists with another display name; it is never overwritten.
+    TENANT_DISPLAY_NAME_CONFLICT = CONFLICT, "tenant `{tenant}` already exists with another display name";
+    /// The display name of a tenant is too long.
+    DISPLAY_NAME_TOO_LONG = BAD_REQUEST, "the display name is longer than {maxLength} characters";
+    /// The display name of a tenant holds a control character.
+    DISPLAY_NAME_INVALID_CHARACTER = BAD_REQUEST, "the display name contains a control character";
     /// The graph does not exist.
     GRAPH_NOT_FOUND = NOT_FOUND, "unknown graph `{tenant}/{graph}`";
     /// The graph has no such node.
@@ -447,6 +455,14 @@ impl From<ControlError> for ApiError {
             ControlError::ConfigNotAnObject { graph, node } => {
                 graph_context(Self::new(&NODE_CONFIG_NOT_OBJECT), &graph).with("node", node.as_str())
             }
+            ControlError::TenantNotCreated(tenant) => Self::new(&TENANT_NOT_CREATED).with("tenant", tenant.as_str()),
+            ControlError::TenantConflict(tenant) => {
+                Self::new(&TENANT_DISPLAY_NAME_CONFLICT).with("tenant", tenant.as_str())
+            }
+            ControlError::DisplayNameTooLong => {
+                Self::new(&DISPLAY_NAME_TOO_LONG).with("maxLength", crate::control::MAX_DISPLAY_NAME_CHARS)
+            }
+            ControlError::DisplayNameInvalidCharacter => Self::new(&DISPLAY_NAME_INVALID_CHARACTER),
             ControlError::Kv(error) => error.into(),
         }
     }
@@ -563,6 +579,10 @@ mod tests {
                 node: node(),
             }
             .into(),
+            ControlError::TenantNotCreated(key.tenant.clone()).into(),
+            ControlError::TenantConflict(key.tenant.clone()).into(),
+            ControlError::DisplayNameTooLong.into(),
+            ControlError::DisplayNameInvalidCharacter.into(),
         ];
         for rule in [
             WiringRule::SourceHasInputs,

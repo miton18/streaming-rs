@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use streaming_core::{
     Catalog, GraphId, GraphKey, GraphSpec, NodeId, TenantId,
-    control::{GraphIndexEntry, OutputRow, RunState},
+    control::{GraphIndexEntry, OutputRow, RunState, TenantRecord},
     keys,
 };
 use streaming_openapi::{ApiRouter, Info, OpenApi, OperationContext, OperationInput, OperationOutput, route};
@@ -205,11 +205,13 @@ async fn catalog(State(state): State<ApiState>) -> ApiResult<status::CatalogView
     Ok(axum::Json(status::catalog_view(&catalog)))
 }
 
-/// The tenants that have graphs, with their consumption on alive workers.
+/// The tenants: those created, and those the graph index names without having
+/// been created. Each comes with its consumption on alive workers.
 #[route(GET, "/api/v1/tenants", tag = "tenants")]
 async fn tenants(State(state): State<ApiState>) -> ApiResult<status::TenantsView> {
     let kv = &*state.kv;
     Ok(axum::Json(status::tenants_view(
+        &control::load_tenants(kv).await?,
         &control::load_index(kv).await?,
         &control::load_member_reports(kv).await?,
         state.clock.now_ms(),
@@ -217,17 +219,106 @@ async fn tenants(State(state): State<ApiState>) -> ApiResult<status::TenantsView
     )))
 }
 
-/// The graphs of a tenant, summarized.
+/// A tenant with its consumption on alive workers.
+#[route(GET, "/api/v1/tenants/{tenant}", tag = "tenants")]
+async fn tenant(State(state): State<ApiState>, Path(tenant): Path<String>) -> ApiResult<status::TenantSummary> {
+    let tenant = TenantId::new(tenant)?;
+    let kv = &*state.kv;
+    let records: Vec<TenantRecord> = control::load_tenant(kv, &tenant).await?.into_iter().collect();
+    let entries = tenant_entries(&state, &tenant).await?;
+    let view = status::tenants_view(
+        &records,
+        &entries,
+        &control::load_member_reports(kv).await?,
+        state.clock.now_ms(),
+        state.config.member_timeout_ms,
+    );
+    view.tenants
+        .into_iter()
+        .next()
+        .map(axum::Json)
+        .ok_or_else(|| unknown_tenant(&tenant))
+}
+
+/// What a tenant is created with.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TenantBody {
+    /// Name shown to people (at most 100 characters, trimmed; empty means
+    /// none).
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+/// A tenant answered with `201 Created` when this request created it, `200`
+/// when it already existed as asked.
+struct TenantCreated(control::TenantCreation);
+
+impl IntoResponse for TenantCreated {
+    fn into_response(self) -> Response {
+        let status = match self.0 {
+            control::TenantCreation::Created(_) => StatusCode::CREATED,
+            control::TenantCreation::Unchanged(_) => StatusCode::OK,
+        };
+        (status, axum::Json(self.0.record())).into_response()
+    }
+}
+
+impl OperationOutput for TenantCreated {
+    fn describe(operation: &mut OperationContext<'_>) {
+        let schema = operation.response_schema::<TenantRecord>();
+        operation.add_response(
+            "201",
+            streaming_openapi::Response::json("The tenant was created.", schema.clone()),
+        );
+        operation.add_response(
+            "200",
+            streaming_openapi::Response::json(
+                "The tenant already existed with this display name; nothing changed.",
+                schema,
+            ),
+        );
+    }
+}
+
+/// Create a tenant.
+///
+/// A tenant must exist before graphs are submitted to it. Creating it again
+/// with the same display name changes nothing and answers 200, so a retry is
+/// harmless; with another display name it answers 409. A tenant is never
+/// overwritten.
+#[route(PUT, "/api/v1/tenants/{tenant}", tag = "tenants")]
+async fn put_tenant(
+    State(state): State<ApiState>,
+    Path(tenant): Path<String>,
+    JsonBody(body): JsonBody<TenantBody>,
+) -> Result<TenantCreated, ApiError> {
+    let tenant = TenantId::new(tenant)?;
+    let creation = control::create_tenant(&*state.kv, &*state.clock, tenant, body.display_name).await?;
+    Ok(TenantCreated(creation))
+}
+
+fn unknown_tenant(tenant: &TenantId) -> ApiError {
+    ApiError::new(&error::TENANT_NOT_FOUND).with("tenant", tenant.as_str())
+}
+
+/// The index entries of a tenant's graphs.
+async fn tenant_entries(state: &ApiState, tenant: &TenantId) -> Result<Vec<GraphIndexEntry>, ApiError> {
+    Ok(control::load_index(&*state.kv)
+        .await?
+        .into_iter()
+        .filter(|entry| &entry.tenant == tenant)
+        .collect())
+}
+
+/// The graphs of a tenant, summarized. A created tenant without graphs has
+/// an empty list.
 #[route(GET, "/api/v1/tenants/{tenant}/graphs", tag = "tenants")]
 async fn tenant_graphs(State(state): State<ApiState>, Path(tenant): Path<String>) -> ApiResult<status::GraphsView> {
     let tenant = TenantId::new(tenant)?;
-    let entries: Vec<GraphIndexEntry> = control::load_index(&*state.kv)
-        .await?
-        .into_iter()
-        .filter(|entry| entry.tenant == tenant)
-        .collect();
-    if entries.is_empty() {
-        return Err(ApiError::new(&error::TENANT_NOT_FOUND).with("tenant", tenant.as_str()));
+    let entries = tenant_entries(&state, &tenant).await?;
+    if entries.is_empty() && control::load_tenant(&*state.kv, &tenant).await?.is_none() {
+        return Err(unknown_tenant(&tenant));
     }
     let context = Context::load(&state).await?;
     let mut graphs = Vec::new();
@@ -491,6 +582,8 @@ fn api() -> ApiRouter<ApiState> {
         .route(cluster::route())
         .route(catalog::route())
         .route(tenants::route())
+        .route(tenant::route())
+        .route(put_tenant::route())
         .route(tenant_graphs::route())
         .route(graph::route())
         .route(put_graph::route())

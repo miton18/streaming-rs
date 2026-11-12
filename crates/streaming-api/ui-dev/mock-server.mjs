@@ -187,6 +187,10 @@ function reset() {
     slowCommit: false,
     workers: ['worker-1', 'worker-2', 'worker-3'].map((w, i) => ({ worker: w, alive: true, generation: now - 3600e3 * (i + 1) - 1234 * i, deadSince: 0 })),
     placement: { version: 9, computedBy: 'worker-1', computedMs: now - 600e3, assignments: {} },
+    tenants: new Map([
+      ['acme', { tenant: 'acme', displayName: 'Acme Corporation', createdMs: now - 86400e3 }],
+      ['globex', { tenant: 'globex', displayName: 'Globex', createdMs: now - 86400e3 }],
+    ]),
     graphs: new Map(),
     actors: new Map(),   // counters per actor
     slices: new Map(),   // per-slice progress
@@ -649,6 +653,9 @@ const TEMPLATES = {
   GRAPH_EMPTY: 'the graph has no node',
   EDGE_UNKNOWN_NODE: 'edge `{from}` -> `{to}` references unknown node `{unknown}`',
   GRAPH_NOT_FOUND: 'unknown graph `{tenant}/{graph}`',
+  TENANT_NOT_FOUND: 'unknown tenant `{tenant}`',
+  TENANT_NOT_CREATED: 'tenant `{tenant}` does not exist: create it before submitting graphs to it',
+  TENANT_DISPLAY_NAME_CONFLICT: 'tenant `{tenant}` already exists with another display name',
   NODE_NOT_FOUND: 'unknown node `{node}` in graph `{tenant}/{graph}`',
   NODE_CONFIG_NOT_OBJECT: 'the configuration of node `{node}` in graph `{tenant}/{graph}` is not an object and cannot be patched',
   ROUTE_NOT_FOUND: 'nothing is served at `{path}`',
@@ -723,7 +730,7 @@ async function handle(req, res) {
     return send(res, 200, { ops: Object.entries(OPS).sort(([a], [b]) => a.localeCompare(b)).map(([op, d]) => ({ op, kind: d.kind, input: d.input, output: d.output, description: d.description })) });
   }
   if (m === 'GET' && p === '/api/v1/tenants') {
-    const ts = new Map();
+    const ts = new Map([...S.tenants.values()].map((t) => [t.tenant, { ...t, graphs: 0, actors: 0, inPerSec: 0 }]));
     for (const [key] of S.graphs) {
       const s = summary(key, snap, now);
       const t = ts.get(s.tenant) || { tenant: s.tenant, graphs: 0, actors: 0, inPerSec: 0 };
@@ -732,7 +739,22 @@ async function handle(req, res) {
     }
     return send(res, 200, { tenants: [...ts.values()].sort((a, b) => a.tenant.localeCompare(b.tenant)) });
   }
-  let mm = /^\/api\/v1\/tenants\/([^/]+)\/graphs$/.exec(p);
+  let mm = /^\/api\/v1\/tenants\/([^/]+)$/.exec(p);
+  if (mm && m === 'PUT') {
+    const t = decodeURIComponent(mm[1]);
+    const b = await readBody(req);
+    if (!b.ok) return err(res, 400, b.code, b.context);
+    const displayName = (b.value?.displayName || '').trim() || undefined;
+    const existing = S.tenants.get(t);
+    if (existing) {
+      if (existing.displayName !== displayName) return err(res, 409, 'TENANT_DISPLAY_NAME_CONFLICT', { tenant: t });
+      return send(res, 200, existing);
+    }
+    const record = { tenant: t, ...(displayName ? { displayName } : {}), createdMs: now };
+    S.tenants.set(t, record); S.epoch += 1;
+    return send(res, 201, record);
+  }
+  mm = /^\/api\/v1\/tenants\/([^/]+)\/graphs$/.exec(p);
   if (mm && m === 'GET') {
     const t = decodeURIComponent(mm[1]);
     const list = [...S.graphs.keys()].filter((k) => k.startsWith(`${t}/`)).sort().map((k) => summary(k, snap, now));
@@ -745,6 +767,7 @@ async function handle(req, res) {
   const g = S.graphs.get(key);
 
   if (rest === '' && m === 'PUT') {
+    if (!S.tenants.has(tenant)) return err(res, 404, 'TENANT_NOT_CREATED', { tenant });
     const b = await readBody(req);
     if (!b.ok) return err(res, 400, b.code, b.context);
     const spec = b.value;
