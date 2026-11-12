@@ -22,7 +22,9 @@ BUDGET=${SWEEP_BUDGET_SECS:-900}
 JOBS=${SWEEP_JOBS:-$(nproc)}
 ITERATIONS=${SWEEP_ITERATIONS:-100}
 CONFIGS=${SWEEP_CONFIGS:-10}
-JOB_TIMEOUT=${SWEEP_JOB_TIMEOUT_SECS:-900}
+# A job lasts seconds; one that has not ended after five minutes holds a
+# seed that does not end.
+JOB_TIMEOUT=${SWEEP_JOB_TIMEOUT_SECS:-300}
 OUT=${SWEEP_OUT:-$ROOT/target/sim-sweep}
 PROFILE=${SWEEP_PROFILE:-release}
 REPLAYS=${SWEEP_REPLAYS:-3}     # replay commands listed per failing log
@@ -78,7 +80,7 @@ worker() {
         log=$OUT/runs/$(printf '%05d' "$n")-$test.log
         began=$(date +%s)
         rc=0
-        SIM_ITERATIONS=$iterations SIM_CONFIGS=$CONFIGS timeout "$JOB_TIMEOUT" \
+        SIM_TRACE_SEEDS=1 SIM_ITERATIONS=$iterations SIM_CONFIGS=$CONFIGS timeout "$JOB_TIMEOUT" \
             "$BIN" --exact "$test" --test-threads=1 --nocapture >"$log" 2>&1 || rc=$?
         printf '%s\t%s\t%s\t%s\n' "$test" "$seeds" "$rc" "$(($(date +%s) - began))" \
             >>"$OUT/runs.tsv"
@@ -135,7 +137,12 @@ FAILED_JOBS=$(awk -F'\t' '$3 != 0' "$OUT/runs.tsv" | wc -l)
             test=$(basename "$log" .log)
             test=${test#*-}
             if grep -q '^killed after' "$log"; then
-                echo "# $test: killed after ${JOB_TIMEOUT}s, see $(basename "$log")"
+                # The last seed that started is the one that never ended.
+                seed=$(grep -o '^\[SEED\] [0-9]*' "$log" | tail -n 1 | sed 's/.* //')
+                config=$(grep -o 'SIM_CONFIG_SEED=[0-9]* starts' "$log" | tail -n 1 | sed 's/ starts$//; s/$/ /')
+                echo "# $test: seed $seed did not end within ${JOB_TIMEOUT}s"
+                echo "${config}SIM_SEEDS=$seed cargo test --profile $PROFILE -p streaming-sim --test exactly_once $test -- --exact --nocapture"
+                continue
             fi
             if [[ $test == exactly_once_in_random_configurations ]]; then
                 # failing configurations (SIM_CONFIG_SEED, seeds): [(c, [s, ...]), ...]

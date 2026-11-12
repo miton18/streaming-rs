@@ -154,7 +154,9 @@ failing seed. `.github/workflows/nightly-simulation.yml` runs it every night
 at 02:17 UTC (schedule paused while the account has no Actions minutes; it
 still runs by hand, with a budget in minutes), uploads the results and
 opens or comments on a "Nightly simulation failed" issue. Release-profile
-seeds last about 70 ms each; replay them with `--release`.
+seeds last about 70 ms each; replay them with `--release`. A job still
+running after five minutes is killed and the seed it was on (traced by
+`SIM_TRACE_SEEDS=1`) is reported as a seed that does not end.
 
 Generated mutants (`cargo install cargo-mutants`, configured in
 `.cargo/mutants.toml`) measure the ordinary tests the way the planted bugs

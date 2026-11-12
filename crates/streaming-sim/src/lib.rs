@@ -1153,6 +1153,11 @@ impl Workload for Driver {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // Said as each seed starts, so that a seed that never ends can be
+        // named (`scripts/sim-sweep.sh` sets it).
+        if std::env::var_os("SIM_TRACE_SEEDS").is_some() {
+            eprintln!("[SEED] {} starts", moonpool_sim::current_sim_seed());
+        }
         let env = env_of(&self.slot)?;
         let scenario = &self.scenario;
         let clock = SimClock::exact(ctx.time().clone());
