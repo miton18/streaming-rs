@@ -629,4 +629,18 @@ mod tests {
         App::new().tenant("acme", "Acme").check().unwrap();
         assert!(App::new().registry(&scratch_kv()).catalog().ops.len() >= 8);
     }
+
+    #[test]
+    fn every_listening_failure_is_said_in_words() {
+        let address: SocketAddr = "10.1.2.3:80".parse().unwrap();
+        let said = |kind: std::io::ErrorKind| listen_error(address, &std::io::Error::from(kind));
+        assert_eq!(
+            said(std::io::ErrorKind::AddrNotAvailable),
+            "the address 10.1.2.3:80 does not belong to this machine"
+        );
+        assert_eq!(
+            said(std::io::ErrorKind::PermissionDenied),
+            "this user is not allowed to listen on the address 10.1.2.3:80"
+        );
+    }
 }

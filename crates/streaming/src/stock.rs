@@ -179,3 +179,50 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
         ],
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moonpool_core::TokioProviders;
+    use streaming_core::{Key, OpFactory, OpRef, Window, datum};
+
+    fn apply(op: &str, config: Value) -> Vec<streaming_core::Datum> {
+        let mut registry = Registry::<TokioProviders>::standard();
+        register(&mut registry);
+        let Some((_, OpFactory::Map(factory))) = registry.get(&OpRef::new(op).unwrap()) else {
+            panic!("{op} is not a map");
+        };
+        let map = factory(&config).unwrap();
+        let mut out = Vec::new();
+        let count = Windowed {
+            window: Window::new(1_000, 2_000),
+            key: Key::encode(&"alice".to_owned()).unwrap(),
+            value: 7_u64,
+        };
+        map.apply(&datum(count), &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_count_becomes_a_json_row() {
+        let out = apply(CountToJson::OP, Value::Null);
+        assert_eq!(
+            out[0].downcast_ref::<Value>().unwrap(),
+            &json!({"key": "alice", "count": 7, "windowStart": 1_000, "windowEnd": 2_000})
+        );
+    }
+
+    #[test]
+    fn a_count_becomes_a_point_labelled_with_its_key() {
+        for (config, label) in [
+            (json!({"class": "events.count"}), "key"),
+            (json!({"class": "events.count", "label": "user"}), "user"),
+        ] {
+            let out = apply(CountToGts::OP, config);
+            let point = out[0].downcast_ref::<Gts>().unwrap();
+            let expected = Gts::new("events.count").label(label, "alice").at(1_000).value(7);
+            assert_eq!(point, &expected);
+        }
+        assert_eq!(CountToGts::new("c").label, "key");
+    }
+}

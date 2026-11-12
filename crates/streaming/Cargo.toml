@@ -33,6 +33,11 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 async-trait.workspace = true
 parking_lot.workspace = true
 
+[[test]]
+name = "cli"
+# Runs itself as the demonstration application: see the file.
+harness = false
+
 [[example]]
 name = "demo"
 path = "examples/demo/main.rs"

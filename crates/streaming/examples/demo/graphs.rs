@@ -63,7 +63,7 @@ fn default_partitions() -> u32 {
     4
 }
 fn default_rate() -> u64 {
-    1_000
+    2_000
 }
 fn default_keys() -> u64 {
     50
@@ -177,6 +177,23 @@ fn parse<C: for<'de> Deserialize<'de>>(config: &Value) -> Result<C, OpError> {
     serde_json::from_value(config).map_err(|error| OpError::Config(error.to_string()))
 }
 
+fn check_generator(config: &Generator) -> Result<(), OpError> {
+    if config.partitions == 0 || config.partitions > 64 {
+        return Err(OpError::Config("`partitions` must be between 1 and 64".into()));
+    }
+    if config.rate_per_sec > 200_000 {
+        return Err(OpError::Config("`ratePerSec` must be at most 200000".into()));
+    }
+    Ok(())
+}
+
+fn check_slow_sink(config: &SlowSink) -> Result<(), OpError> {
+    if config.latency_ms > 60_000 {
+        return Err(OpError::Config("`latencyMs` must be at most 60000".into()));
+    }
+    Ok(())
+}
+
 /// Register the demonstration operators.
 pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Generators>) {
     registry.register_source::<Vec<u8>>(
@@ -184,12 +201,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
         "Synthetic events at a configurable rate, as JSON bytes.",
         move |context, config| {
             let config: Generator = parse(config)?;
-            if config.partitions == 0 || config.partitions > 64 {
-                return Err(OpError::Config("`partitions` must be between 1 and 64".into()));
-            }
-            if config.rate_per_sec > 200_000 {
-                return Err(OpError::Config("`ratePerSec` must be at most 200000".into()));
-            }
+            check_generator(&config)?;
             let topic = format!(
                 "{}/{}/{}/{}",
                 context.tenant, context.graph, context.node, config.partitions
@@ -229,9 +241,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>, generators: Arc<Genera
         TypeTag::Any,
         |context, config| {
             let config: SlowSink = parse(config)?;
-            if config.latency_ms > 60_000 {
-                return Err(OpError::Config("`latencyMs` must be at most 60000".into()));
-            }
+            check_slow_sink(&config)?;
             Ok(Arc::new(SlowSinkConnector {
                 providers: context.providers.clone(),
                 latency: Duration::from_millis(config.latency_ms),
@@ -330,10 +340,180 @@ fn clicks(settings: GraphSettings) -> GraphBuilder {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use moonpool_core::TokioProviders;
+    use streaming_core::{OpFactory, SinkConnector, TenantId};
+
     #[test]
     fn the_demo_application_is_valid() {
         let app = super::app();
         app.check().unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(app.graphs().len(), 2);
+    }
+
+    #[test]
+    fn the_demo_has_two_graphs() {
+        let keys: Vec<String> = app().graphs().iter().map(|spec| spec.key().to_string()).collect();
+        assert_eq!(keys, ["acme/count-per-key", "globex/clicks"]);
+    }
+
+    #[test]
+    fn the_described_defaults_are_the_parsed_ones() {
+        let parsed: Generator = parse(&Value::Null).unwrap();
+        assert_eq!(
+            parsed,
+            Generator {
+                partitions: 4,
+                rate_per_sec: 2_000,
+                keys: 50,
+            }
+        );
+        let mut registry = Registry::<TokioProviders>::standard();
+        register(&mut registry, Arc::new(Generators::default()));
+        let catalog = registry.catalog();
+        let described = |op: &str| -> serde_json::Map<String, Value> {
+            let (_, descriptor) = catalog.ops.iter().find(|(name, _)| name.as_str() == op).unwrap();
+            descriptor
+                .params
+                .iter()
+                .filter_map(|param| Some((param.name.clone(), param.default.clone()?)))
+                .collect()
+        };
+        assert_eq!(
+            Value::Object(described(Generator::OP)),
+            serde_json::to_value(parsed).unwrap()
+        );
+        let parsed: SlowSink = parse(&json!({})).unwrap();
+        assert_eq!(
+            Value::Object(described(SlowSink::OP)),
+            serde_json::to_value(parsed).unwrap()
+        );
+    }
+
+    #[test]
+    fn configurations_are_bounded() {
+        let generator = |partitions, rate_per_sec| Generator {
+            partitions,
+            rate_per_sec,
+            keys: 1,
+        };
+        assert!(check_generator(&generator(1, 0)).is_ok());
+        assert!(check_generator(&generator(64, 200_000)).is_ok());
+        assert!(check_generator(&generator(0, 10)).is_err());
+        assert!(check_generator(&generator(65, 10)).is_err());
+        assert!(check_generator(&generator(4, 200_001)).is_err());
+        assert!(check_slow_sink(&SlowSink { latency_ms: 60_000 }).is_ok());
+        assert!(check_slow_sink(&SlowSink { latency_ms: 60_001 }).is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_slow_sink_waits_then_counts() {
+        let sink = SlowSinkConnector {
+            providers: TokioProviders::new(),
+            latency: Duration::from_millis(80),
+            written: AtomicU64::new(0),
+        };
+        let started = std::time::Instant::now();
+        sink.write(&[]).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        assert_eq!(sink.written.load(Ordering::Relaxed), 0);
+        let fast = SlowSinkConnector {
+            providers: TokioProviders::new(),
+            latency: Duration::ZERO,
+            written: AtomicU64::new(0),
+        };
+        let started = std::time::Instant::now();
+        fast.write(&[]).await.unwrap();
+        assert!(started.elapsed() < Duration::from_millis(50));
+    }
+
+    /// The generator keeps its rate, spreads users over partitions by their
+    /// number, and cycles through the actions.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_generator_keeps_its_rate_and_spreads_users() {
+        let topic = Arc::new(Topic {
+            log: MemLog::with_retention(3, true),
+            rate_per_sec: AtomicU64::new(100),
+            keys: AtomicU64::new(7),
+            started: AtomicBool::new(true),
+            dropped: AtomicU64::new(0),
+        });
+        let running = tokio::spawn(generate(TokioProviders::new(), topic.clone()));
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        running.abort();
+        let mut events = Vec::new();
+        for partition in 0..3 {
+            for record in topic.log.read(partition, 0, usize::MAX) {
+                let bytes = record.value.downcast_ref::<Vec<u8>>().unwrap();
+                let event: Event = serde_json::from_slice(bytes).unwrap();
+                let user: u64 = event.user.strip_prefix("user-").unwrap().parse().unwrap();
+                assert!(user < 7, "{}", event.user);
+                assert_eq!(event.user, format!("user-{user:03}"));
+                assert_eq!(user % 3, u64::from(partition));
+                assert!((1.0..100.0).contains(&event.amount), "{}", event.amount);
+                events.push(event);
+            }
+        }
+        // About a hundred a second, never more than the rate allows.
+        assert!((70..=100).contains(&events.len()), "{} events", events.len());
+        // Spread over the users, skewed towards the first ones.
+        let users: std::collections::BTreeSet<&str> = events.iter().map(|event| event.user.as_str()).collect();
+        assert!(users.len() >= 4, "{users:?}");
+        let first = events.iter().filter(|event| event.user == "user-000").count();
+        let last = events.iter().filter(|event| event.user == "user-006").count();
+        assert!(first > last, "{first} for the first user, {last} for the last");
+        let mut actions: Vec<&str> = events.iter().map(|event| event.action.as_str()).collect();
+        actions.sort_unstable();
+        actions.dedup();
+        assert_eq!(actions, ["cart", "click", "purchase", "view"]);
+        assert_eq!(topic.dropped.load(Ordering::Relaxed), 0);
+    }
+
+    /// The settings the demonstration relies on: short windows of latency,
+    /// and a slow sink holding the source back within half a minute.
+    #[test]
+    fn the_demo_settings_are_tuned_for_a_live_display() {
+        for spec in app().graphs() {
+            let settings = &spec.settings;
+            assert_eq!(settings.max_out_of_orderness, Duration::from_millis(500));
+            assert_eq!(settings.idle_timeout, Duration::from_secs(3));
+            assert_eq!(settings.linger, Duration::from_millis(100));
+            assert_eq!(settings.flush_interval, Duration::from_millis(500));
+            assert_eq!(
+                (settings.max_batch, settings.chunk_size, settings.mailbox_capacity),
+                (500, 100, 4)
+            );
+            assert_eq!(settings.max_pending_windows, 3);
+        }
+    }
+
+    /// Two sources on the same topic share one generator, started once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_generator_is_shared_and_started_once() {
+        let generators = Arc::new(Generators::default());
+        let mut registry = Registry::<TokioProviders>::standard();
+        register(&mut registry, generators.clone());
+        let Some((_, OpFactory::Source(factory))) = registry.get(&streaming_core::OpRef::new(Generator::OP).unwrap())
+        else {
+            panic!("the generator is not a source");
+        };
+        let context = streaming_core::OpContext {
+            providers: TokioProviders::new(),
+            clock: Arc::new(SystemClock),
+            secrets: Arc::new(streaming_core::StaticSecrets::new()),
+            tenant: TenantId::new("acme").unwrap(),
+            graph: streaming_core::GraphId::new("g").unwrap(),
+            node: streaming_core::NodeId::new("events").unwrap(),
+        };
+        let config = json!({"partitions": 1, "ratePerSec": 200, "keys": 3});
+        factory(&context, &config).unwrap();
+        factory(&context, &config).unwrap();
+        assert!(factory(&context, &json!({"partitions": 0})).is_err());
+        assert_eq!(generators.topics.lock().len(), 1);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let topic = generators.topics.lock().values().next().unwrap().clone();
+        // Started once: about a hundred events, not twice as many.
+        let produced = topic.log.retained(0);
+        assert!((50..=100).contains(&produced), "{produced} events");
     }
 }
