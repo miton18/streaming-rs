@@ -1242,3 +1242,100 @@ pub(crate) fn build<In, T: Transformer<In>>(op: &T) -> Result<(Built, TypeTag, T
     };
     Ok((built, input, output))
 }
+
+/// A transformer that turns each element into exactly one other, and knows
+/// nothing of pipes: [`GraphBuilder::map`](crate::GraphBuilder::map) makes a
+/// node of it, wrapped in [`Stateless`].
+///
+/// ```ignore
+/// impl StatelessTransformer<u64> for Scale {
+///     type Out = u64;
+///     fn apply(&self, value: &u64) -> u64 { value * self.factor }
+/// }
+/// let scaled = graph.map(numbers, "scale", Scale { factor: 3 });
+/// ```
+pub trait StatelessTransformer<In>: Operator + Clone {
+    /// What flows out.
+    type Out: Any + Send + Sync;
+
+    /// Turn one element into another.
+    fn apply(&self, input: &In) -> Self::Out;
+}
+
+/// A transformer that turns each element into another or drops it, and
+/// knows nothing of pipes:
+/// [`GraphBuilder::filter_map`](crate::GraphBuilder::filter_map) makes a node
+/// of it, wrapped in [`StatelessFilter`].
+pub trait StatelessFilterMap<In>: Operator + Clone {
+    /// What flows out.
+    type Out: Any + Send + Sync;
+
+    /// Turn one element into another, or `None` to drop it.
+    fn apply(&self, input: &In) -> Option<Self::Out>;
+}
+
+/// A [`StatelessTransformer`] as a [`Transformer`]: the node it makes is
+/// registered, stored and shown under the operator's own name and
+/// configuration.
+///
+/// A wrapper rather than `impl<T: StatelessTransformer<In>> Transformer<In>
+/// for T`, which would conflict with every generic implementation of
+/// [`Transformer`] (`impl<T> Transformer<T> for Identity`, or an
+/// application's own).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stateless<T>(pub T);
+
+/// A [`StatelessFilterMap`] as a [`Transformer`], as [`Stateless`] is for a
+/// [`StatelessTransformer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatelessFilter<T>(pub T);
+
+/// The operator of a wrapper is the operator it wraps: same reference,
+/// parameters, checks, secrets and stored configuration.
+macro_rules! delegate_operator {
+    ($wrapper:ident) => {
+        impl<T: Serialize> Serialize for $wrapper<T> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.0.serialize(serializer)
+            }
+        }
+
+        impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for $wrapper<T> {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                T::deserialize(deserializer).map($wrapper)
+            }
+        }
+
+        impl<T: Operator> Operator for $wrapper<T> {
+            const ABOUT: &'static str = T::ABOUT;
+            const OP: &'static str = T::OP;
+
+            fn params() -> Vec<crate::ParamSpec> { T::params() }
+
+            fn check(&self) -> Result<(), OpError> { self.0.check() }
+
+            fn secrets(&self) -> Vec<&crate::Secret> { self.0.secrets() }
+        }
+    };
+}
+
+delegate_operator!(Stateless);
+delegate_operator!(StatelessFilter);
+
+impl<In: Any + Send + Sync, T: StatelessTransformer<In>> Transformer<In> for Stateless<T> {
+    type Out = T::Out;
+
+    fn transform(&self, input: Pipe<In>) -> Pipe<T::Out> {
+        let operator = self.0.clone();
+        input.map(move |element| operator.apply(element))
+    }
+}
+
+impl<In: Any + Send + Sync, T: StatelessFilterMap<In>> Transformer<In> for StatelessFilter<T> {
+    type Out = T::Out;
+
+    fn transform(&self, input: Pipe<In>) -> Pipe<T::Out> {
+        let operator = self.0.clone();
+        input.filter_map(move |element| operator.apply(element))
+    }
+}

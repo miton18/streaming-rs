@@ -294,16 +294,33 @@ one, returned, or the worker died) comes back with the same emit ids: the
 destination must be idempotent on them. `impl<T> Sink<T> for Archive` makes a
 sink of any type.
 
-**Everything else is a transformer**: it takes a pipe and returns a pipe.
+**Everything else is a transformer.** The simplest are plain functions,
+which know nothing of pipes: a `StatelessTransformer` turns each element into
+exactly one other, a `StatelessFilterMap` into another or none.
 
 ```rust
-impl Transformer<Vec<u8>> for Decode {
-    type Out = Event;
-    fn transform(&self, input: Pipe<Vec<u8>>) -> Pipe<Event> {
-        input.filter_map(|bytes| serde_json::from_slice::<Event>(bytes).ok())
-    }
+impl StatelessTransformer<u64> for Scale {
+    type Out = u64;
+    fn apply(&self, value: &u64) -> u64 { value * self.factor }
 }
 
+impl StatelessFilterMap<Vec<u8>> for Decode {
+    type Out = Event;
+    fn apply(&self, bytes: &Vec<u8>) -> Option<Event> { serde_json::from_slice(bytes).ok() }
+}
+```
+
+`graph.map(upstream, "scale", Scale { factor: 3 })` and
+`graph.filter_map(upstream, "decode", Decode)` make nodes of them. The node is
+an ordinary map, registered, stored and shown under the operator's own
+reference and configuration; its parameters, bounds and `check` hold as for
+any operator. The operator must be `Clone`. Outside a `GraphBuilder`, the
+wrappers `Stateless(op)` and `StatelessFilter(op)` make `Transformer`s of
+them.
+
+Any other transformer takes a pipe and returns a pipe:
+
+```rust
 impl Transformer<Event> for ByUser {
     type Out = Keyed<Event>;
     fn transform(&self, input: Pipe<Event>) -> Pipe<Keyed<Event>> { input.key_by(|event| event.user.clone()) }
@@ -329,7 +346,7 @@ let mut graph = GraphBuilder::new("acme", "count-per-key").settings(GraphSetting
     ..GraphSettings::default()
 });
 let events = graph.source("events", Generator { partitions: 4, rate_per_sec: 2_000 });
-let decoded = graph.then(events, "decode", Decode);
+let decoded = graph.filter_map(events, "decode", Decode);
 let by_user = graph.then(decoded, "by-user", ByUser);
 let windows = graph.then(by_user, "window", Tumbling::of(Duration::from_secs(300)));
 let counts = graph.then(windows, "count", Count);
@@ -338,7 +355,7 @@ graph.sink(rows, "results", KvSink { retain: 400 });
 graph.sink(decoded, "archive", Archive);                // any DAG
 ```
 
-`source`, `then` and `sink` only accept an operator written for what flows
+`source`, `map`, `filter_map`, `then` and `sink` only accept an operator written for what flows
 out of the node it is connected to. The application checks the graph when it
 starts (wiring, types, the configuration of every node against its operator)
 and refuses to run otherwise. The `std/*` operators have their types

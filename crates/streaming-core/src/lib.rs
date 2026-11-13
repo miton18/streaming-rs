@@ -47,7 +47,8 @@ pub use ops::{
 pub use param::private as __private;
 pub use param::{Param, Secret};
 pub use pipe::{
-    Batch, Closed, Context, Element, Keyed, Opaque, Pipe, Sink, SinkPipe, Source, SourcePipe, Transformer, Windows,
+    Batch, Closed, Context, Element, Keyed, Opaque, Pipe, Sink, SinkPipe, Source, SourcePipe, Stateless,
+    StatelessFilter, StatelessFilterMap, StatelessTransformer, Transformer, Windows,
 };
 pub use registry::{
     Catalog, OpContext, OpDescriptor, OpFactory, OpKind, ParamRefusal, ParamSpec, Registry, Shared, Signature, TypeTag,
