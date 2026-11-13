@@ -214,6 +214,9 @@ The API has no authentication: do not expose it publicly.
 
 ## Writing operators
 
+[docs/operators.md](docs/operators.md) describes every kind of operator, its
+contract, and the operators the project ships.
+
 An operator is a structure, and one trait saying what it does.
 
 The structure is its configuration: `#[derive(Operator)]` names it

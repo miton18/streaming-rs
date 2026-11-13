@@ -548,6 +548,22 @@ says `limitedBy`: `destination`, `work` or `store`.
 After changing anything under `crates/streaming-api/ui/`, rebuild the
 application (the UI is embedded) and check it in a real browser.
 
+## The project page
+
+`docs/index.html` is the project's page for GitHub Pages (served from `/docs`
+on `main`, `docs/.nojekyll` keeping the folder as it is). One self-contained
+page in English, in the Nocturne palette of the UI, with the Inter font of
+the UI copied under `docs/assets/fonts` and a screenshot of the demo in
+`docs/assets/img`. Its figures (scenarios, planted bugs, crates) and its
+limits come from this file and the README: change them together. It must
+never present the project as ready for production.
+
+`docs/operators.md` documents the kinds of operators, their contracts and the
+shipped catalogue (references, types, parameters, delivery). Only what is on
+`main` is described as existing; work in progress goes under *Not yet*.
+Adding, renaming or changing the parameters of a stock operator means
+updating its table.
+
 ## Known limits and open questions
 
 - **What the API refuses of a configuration, and what it still lets
