@@ -363,7 +363,7 @@ g.sink(decoded, <span class="s">"archive"</span>, <span class="t">Archive</span>
       reports being saturated.
     </p>
     <figure class="diagram">
-      <svg viewBox="0 0 1000 330" role="img" aria-label="Three source slices commit to their logs in the store; the emitter slice reads them and writes to the sink">
+      <svg viewBox="0 0 1000 340" role="img" aria-label="Three source slices commit to their logs in the store; the emitter slice reads them and writes to the sink">
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0 0 10 5 0 10z" style="fill: var(--faint)"/>
@@ -404,7 +404,7 @@ g.sink(decoded, <span class="s">"archive"</span>, <span class="t">Archive</span>
         <text class="d-sub" x="645" y="152" text-anchor="middle">seal f:&lt;epoch&gt;</text>
         <text class="d-sub" x="645" y="170" text-anchor="middle">window hashes</text>
         <path class="d-commit" d="M516 132 H558" marker-end="url(#arrow)"/>
-        <text class="d-sub" x="545" y="70" text-anchor="middle">commit</text>
+        
 
         <!-- emitter slice -->
         <rect class="d-slice" x="756" y="12" width="234" height="216" rx="12"/>
@@ -428,7 +428,8 @@ g.sink(decoded, <span class="s">"archive"</span>, <span class="t">Archive</span>
           <rect class="d-kv" x="300" width="14" height="14" rx="3"/><text class="d-sub" x="322" y="11">store: logs and window state</text>
           <rect class="d-sink" x="520" width="14" height="14" rx="3"/><text class="d-sub" x="542" y="11">sink</text>
           <path class="d-slice" d="M610 7 H650"/><text class="d-sub" x="658" y="11">slice: unit of placement and exactly-once</text>
-          <text class="d-sub" x="0" y="48">Windows close on watermarks. A partition added or removed at run time joins or retires its slice under a new plan generation.</text>
+          <path class="d-commit" d="M0 30 H40"/><text class="d-sub" x="48" y="34">commits into the store, and the emitter reading them</text>
+          <text class="d-sub" x="0" y="58">Windows close on watermarks. A partition added or removed at run time joins or retires its slice under a new plan generation.</text>
         </g>
       </svg>
       <figcaption>The first use case: a Pulsar topic with three partitions, a five-minute count per key, the results written to Warp 10.</figcaption>
