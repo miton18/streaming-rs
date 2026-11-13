@@ -438,7 +438,10 @@ lie beyond what it read and none comes; held by
 three thousand runs, too seldom for a planted bug); a retired
 slice closed between an instance's commit and its acknowledgement (the
 commit, valid when written, was voided by the closing: lost had it carried
-records).
+records); a source slice lingering for a full batch behind a
+source that redelivered faster than it moved on, polling for ever without
+ever awaiting the clock (the simulation's time stood still: a seed that does
+not end; the slice now stops lingering when a poll brings nothing new).
 
 ## The HTTP API and its OpenAPI document
 
