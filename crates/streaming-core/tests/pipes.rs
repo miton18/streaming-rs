@@ -12,10 +12,10 @@ use std::{
     time::Duration,
 };
 use streaming_core::{
-    Context, Emit, EmitId, GraphId, Keyed, MemKv, NodeId, OpContext, OpError, OpFactory, OpRef, Operator, Origin,
-    PartitionReader, Pipe, Position, Registry, Sink, SinkConnector, SinkError, SinkPipe, SliceId, Source,
-    SourceConnector, SourceError, SourcePipe, SourceRecord, StaticSecrets, SystemClock, TenantId, Transformer, Windows,
-    datum,
+    Context, Emit, EmitId, GraphBuilder, GraphId, Keyed, MemKv, NodeId, OpContext, OpError, OpFactory, OpRef, Operator,
+    Origin, PartitionReader, Pipe, Position, Registry, Sink, SinkConnector, SinkError, SinkPipe, SliceId, Source,
+    SourceConnector, SourceError, SourcePipe, SourceRecord, Stateless, StatelessFilter, StatelessFilterMap,
+    StatelessTransformer, StaticSecrets, SystemClock, TenantId, Transformer, Windows, datum,
     moonpool_core::{Providers, TokioProviders},
 };
 
@@ -711,4 +711,91 @@ fn a_transformer_that_is_not_one_node_is_refused_in_words() {
          elements, which only take a window"
     );
     assert!(registry.catalog().ops.is_empty());
+}
+
+/// Multiplies by a factor the API may change: a function, nothing more.
+#[derive(Debug, Clone, Operator)]
+#[operator("test/scale@1")]
+struct Scale {
+    /// Factor.
+    #[param(default = 2, min = 1, max = 1000)]
+    factor: u64,
+}
+
+impl StatelessTransformer<u64> for Scale {
+    type Out = String;
+
+    fn apply(&self, value: &u64) -> String { format!("{}", value * self.factor) }
+}
+
+#[test]
+fn a_stateless_transformer_is_a_map_under_its_own_name() {
+    let mut registry = Registry::<TokioProviders>::empty();
+    registry.transformer(&Stateless(Scale { factor: 2 })).unwrap();
+    let (descriptor, OpFactory::Map(factory)) = registry.get(&OpRef::new(Scale::OP).unwrap()).unwrap() else {
+        panic!("not a map");
+    };
+    assert_eq!(descriptor.params.len(), 1);
+    let map = factory(&json!({"factor": 7})).unwrap();
+    let mut out = Vec::new();
+    map.apply(&datum(3_u64), &mut out).unwrap();
+    assert_eq!(out[0].downcast_ref::<String>().unwrap(), "21");
+    assert!(factory(&json!({"factor": 0})).is_err());
+}
+
+/// Parses numbers, dropping what is not one.
+#[derive(Debug, Clone, Operator)]
+#[operator("test/parse@1")]
+struct Parse;
+
+impl StatelessFilterMap<String> for Parse {
+    type Out = u64;
+
+    fn apply(&self, text: &String) -> Option<u64> { text.parse().ok() }
+}
+
+#[test]
+fn a_stateless_filter_map_drops_what_it_returns_none_for() {
+    let mut registry = Registry::<TokioProviders>::empty();
+    registry.transformer(&StatelessFilter(Parse)).unwrap();
+    let (_, OpFactory::Map(factory)) = registry.get(&OpRef::new(Parse::OP).unwrap()).unwrap() else {
+        panic!("not a map");
+    };
+    let map = factory(&json!(null)).unwrap();
+    let mut out = Vec::new();
+    map.apply(&datum("12".to_owned()), &mut out).unwrap();
+    map.apply(&datum("twelve".to_owned()), &mut out).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(*out[0].downcast_ref::<u64>().unwrap(), 12);
+}
+
+#[test]
+fn a_graph_names_a_stateless_transformer_by_its_own_reference() {
+    let mut graph = GraphBuilder::<TokioProviders>::new("acme", "stateless");
+    let texts = graph.node("texts", Parse).typed::<String>();
+    let numbers = graph.filter_map(texts, "parse", Parse);
+    graph.map(numbers, "scale", Scale { factor: 3 });
+    let spec = graph.build().unwrap();
+    let ops: Vec<_> = spec
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.op.to_string()))
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            ("texts", "test/parse@1".to_owned()),
+            ("parse", "test/parse@1".to_owned()),
+            ("scale", "test/scale@1".to_owned())
+        ]
+    );
+    assert_eq!(spec.nodes[2].config, json!({"factor": 3}));
+}
+
+#[allow(dead_code)]
+fn a_graph_maps_with_a_stateless_transformer(
+    graph: &mut GraphBuilder,
+    numbers: streaming_core::Node<u64>,
+) -> streaming_core::Node<String> {
+    graph.map(numbers, "scale", Scale { factor: 3 })
 }

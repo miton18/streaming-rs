@@ -103,7 +103,7 @@ use crate::{
     ids::{GraphId, IdError, NodeId, OpRef, TenantId},
     ops::OpError,
     param::Secret,
-    pipe::{Sink, Source, Transformer},
+    pipe::{Sink, Source, Stateless, StatelessFilter, StatelessFilterMap, StatelessTransformer, Transformer},
     registry::{ParamSpec, Registry},
     spec::{GraphSettings, GraphSpec, NodeSpec},
 };
@@ -338,6 +338,28 @@ impl<P: Providers> GraphBuilder<P> {
             Ok(())
         });
         Node(node, PhantomData)
+    }
+
+    /// Add a node `id` turning each element of `upstream` into one other with
+    /// `operator`, a function that knows nothing of pipes.
+    pub fn map<In: Any + Send + Sync, T: StatelessTransformer<In>>(
+        &mut self,
+        upstream: Node<In>,
+        id: impl Into<String>,
+        operator: T,
+    ) -> Node<T::Out> {
+        self.then(upstream, id, Stateless(operator))
+    }
+
+    /// Add a node `id` turning each element of `upstream` into another with
+    /// `operator`, or dropping it.
+    pub fn filter_map<In: Any + Send + Sync, T: StatelessFilterMap<In>>(
+        &mut self,
+        upstream: Node<In>,
+        id: impl Into<String>,
+        operator: T,
+    ) -> Node<T::Out> {
+        self.then(upstream, id, StatelessFilter(operator))
     }
 
     /// Add a node `id` running `transformer` on what flows out of `upstream`.

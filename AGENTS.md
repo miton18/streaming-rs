@@ -253,20 +253,32 @@ the operators it names, `App` collects them).
    passed on. This is what Pulsar does; the simulation runs both ways
    (`Scenario::piped`). Likewise `SinkPipe::write_with` for sinks (Warp 10,
    Pulsar).
-6. **A transformer is one node, hence one kind**: any number of maps and
+6. **A stateless transformer is a map under its own name.**
+   `StatelessTransformer<In>` (`apply(&In) -> Out`) and
+   `StatelessFilterMap<In>` (`apply(&In) -> Option<Out>`) know nothing of
+   pipes; the wrappers `Stateless<T>` and `StatelessFilter<T>` make
+   `Transformer`s of them, delegating everything `Operator` says (reference,
+   parameters, `check`, secrets) and serializing as the operator itself, so
+   the stored configuration and the declaration fingerprint are those of the
+   wrapped operator. `GraphBuilder::map` and `filter_map` apply the wrappers.
+   Not a blanket `impl<T: StatelessTransformer<In>> Transformer<In> for T`:
+   it conflicts with every generic `Transformer` implementation
+   (`impl<T> Transformer<T> for Identity`, an application's own), and one
+   wrapper cannot implement both traits (a type could implement the two).
+7. **A transformer is one node, hence one kind**: any number of maps and
    filters in a row (fused), or one `key_by`, or one window, or one
    aggregate. `Registry::transformer` calls `transform` on an example to
    learn the kind and the types; what a transformer is must not depend on
    its configuration (a node whose configuration changes its kind is refused
    when it starts). `Keyed<T>` and `Windows<T>` only exist for the compiler:
    the values that flow are `T`.
-7. **An operator written for several types has one factory per type**
+8. **An operator written for several types has one factory per type**
    (registry *variants*: `impl<T> Sink<T>`, `impl<T> Transformer<Windows<T>>
    for Count`). The engine and `App::check` pick the one registered for what
    feeds the node (`Registry::get_for`, `OpDescriptor::signatures`,
    `output_for`). `Opaque` registers a type-agnostic transformer once for any
    type, which is how `Registry::standard()` serves graphs written by hand.
-8. **The stored configuration of a node is its operator as JSON**: camelCase
+9. **The stored configuration of a node is its operator as JSON**: camelCase
    names, unknown fields refused, a parameter that may be absent and has no
    value left out. This is part of the declaration fingerprint: changing how
    an operator serializes makes every graph naming it a new declaration.
