@@ -841,3 +841,21 @@ fn a_json_decoder_decodes_bytes_and_text_and_drops_what_is_not_json() {
     assert!(decode("test/decode-point@1", datum(r#"{"y": 1}"#.to_owned())).is_empty());
     assert_eq!(DecodePoint::ABOUT, "Decodes a point.");
 }
+
+#[test]
+fn flatten_gives_back_each_element_in_order() {
+    let mut registry = Registry::<TokioProviders>::empty();
+    registry
+        .transformer::<Vec<u32>, _>(&streaming_core::stdops::Flatten)
+        .unwrap();
+    let reference = OpRef::new("std/flatten@1").unwrap();
+    let (_, OpFactory::Map(factory)) = registry.get(&reference).unwrap() else {
+        panic!("not a map");
+    };
+    let mut out = Vec::new();
+    let flatten = factory(&json!(null)).unwrap();
+    flatten.apply(&datum(vec![3_u32, 1, 2]), &mut out).unwrap();
+    flatten.apply(&datum(Vec::<u32>::new()), &mut out).unwrap();
+    let values: Vec<u32> = out.iter().map(|value| *value.downcast_ref::<u32>().unwrap()).collect();
+    assert_eq!(values, [3, 1, 2]);
+}

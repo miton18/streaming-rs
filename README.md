@@ -386,7 +386,7 @@ let all = graph.union([valid, other], "all");
 out of the node it is connected to. The application checks the graph when it
 starts (wiring, types, the configuration of every node against its operator)
 and refuses to run otherwise. The `std/*` operators have their types
-(`Tumbling`, `Sliding`, `Count`, `Identity`, `KvSink`, `Warp10Sink`, and in
+(`Tumbling`, `Sliding`, `Count`, `Identity`, `Union`, `Flatten`, `KvSink`, `Warp10Sink`, and in
 `streaming::stock` `CountToJson`, `CountToGts` and the Pulsar nodes);
 `crates/streaming/examples/demo/graphs.rs` builds the demonstration graphs
 this way.

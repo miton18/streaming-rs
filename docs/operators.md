@@ -362,6 +362,7 @@ topic, through a durable Failover subscription.
 |---|---|---|---|
 | `std/identity@1` | `streaming-core` | any → same | none |
 | `std/union@1` | `streaming-core` | any → same, from several inputs | none |
+| `std/flatten@1` | `streaming-core` | `Vec<T>` → `T` | none; one element at a time, in order (`T: Clone`) |
 | `std/branch@1` | `streaming-core` | `Routed<T>` → `T` | `branch`, fixed by the code; added by `GraphBuilder::split`, registered for its type only |
 | `std/tumbling@1` | `streaming-core` | `Keyed<T>` → `Windows<T>` | `size` (≥ 1 ms), `allowedLateness` (default `0s`) |
 | `std/sliding@1` | `streaming-core` | `Keyed<T>` → `Windows<T>` | `size`, `slide` (≤ `size`), `allowedLateness` |
@@ -386,11 +387,12 @@ topic, through a durable Failover subscription.
 Being built in other threads of work, and not on `main`:
 
 - **Warp 10 behind a feature flag**, as Pulsar already is.
-- **`std/batch@1` and `std/flatten@1`**: gather elements into a `Vec<A>` until
-  a maximum wait (required) or an optional maximum size, flushed at every
-  epoch barrier so that a replay forms the same batches; and the reverse, a
-  `Vec<B>` given back one element at a time. They come beside the
-  event-time windows, not instead of them.
+- **`std/batch@1`**: gather elements into a `Vec<A>` until a maximum wait
+  (required) or an optional maximum size, beside the event-time windows.
+  Flushing at every epoch barrier is not enough for exactly-once: a replay
+  ends its epochs elsewhere, and a wait measured in processing time too, so
+  the replayed batches would differ under the same emit ids. Its design is
+  being chosen.
 
 Not started: a dedicated output for late records or for what a decoder
 refuses, session windows, joins, a keyed process function with timers,

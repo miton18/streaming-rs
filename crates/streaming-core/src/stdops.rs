@@ -7,6 +7,7 @@
 //! | `std/count@1` | aggregate | none; emits `Windowed<u64>` |
 //! | `std/identity@1` | map | none |
 //! | `std/union@1` | map | none; any number of inputs of one type |
+//! | `std/flatten@1` | map | none; a `Vec<T>` given back one element at a time |
 //! | `std/branch@1` | map | `{"branch": 0}`, fixed by the code; after a split, registered by the builder for its type only |
 //!
 //! [`json_decoder!`](crate::json_decoder) declares a decoder to a type of
@@ -155,6 +156,19 @@ impl<T: Any + Send + Sync> Transformer<T> for Union {
     type Out = T;
 
     fn transform(&self, input: Pipe<T>) -> Pipe<T> { input }
+}
+
+/// Gives back the elements of a `Vec<T>` one at a time, in order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/flatten@1")]
+pub struct Flatten;
+
+impl<T: Any + Clone + Send + Sync> Transformer<Vec<T>> for Flatten {
+    type Out = T;
+
+    fn transform(&self, input: Pipe<Vec<T>>) -> Pipe<T> {
+        input.flat_map(|elements, out| out.extend(elements.iter().cloned()))
+    }
 }
 
 /// Keeps what a split routed to one of its branches.
