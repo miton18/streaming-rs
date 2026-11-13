@@ -31,8 +31,9 @@ use streaming::{
     },
     moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider},
     runtime::{builtin::KvSink, memlog::MemLog},
-    stock::{CountToGts, CountToJson},
+    stock::CountToJson,
 };
+use streaming_warp10::CountToGts;
 
 /// What the generator produces, once decoded.
 #[derive(Debug, Clone, Serialize, Deserialize)]

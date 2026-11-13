@@ -173,17 +173,37 @@ light gossip for membership: each worker gossips a couple of hundred bytes
 | `streaming-runtime` | the engine: actors, edges, epochs, commit log, window state, worker loop, controller and placement |
 | `streaming-gossip` | Scuttlebutt gossip membership written against Moonpool providers |
 | `streaming-kv-redis` | RESP client for Redis and Materia KV (`HSCAN` paging, size limits, optional TLS) |
-| `streaming-pulsar` | Apache Pulsar source and sink on the [Magnetar](https://github.com/CleverCloud/magnetar) client |
-| `streaming-warp10` | Warp 10 sink (`/api/v0/update`) |
+| `streaming-pulsar` | Apache Pulsar source and sink on the [Magnetar](https://github.com/CleverCloud/magnetar) client, `PulsarKey`, `CountToPulsar` (feature `pulsar` of `streaming`) |
+| `streaming-warp10` | Warp 10 sink (`/api/v0/update`), `CountToGts` (feature `warp10` of `streaming`) |
 | `streaming-api` | HTTP API and embedded web UI ([docs/http-api.md](docs/http-api.md), [OpenAPI](docs/openapi.json)) |
 | `streaming-openapi` | `#[route]` attribute: registers an axum handler and derives its OpenAPI description from its signature (macro in `streaming-openapi-macros`) |
 | `streaming-sim` | simulation harness and the exactly-once tests |
 | `streaming` | the SDK: `App` (tenants, operators, graphs, the `standalone` and `worker` commands), the stock operators, the demonstration application (`examples/demo`) |
 
+## Connectors
+
+`streaming` turns on no connector by default: an application names those it
+uses as features, and each one adds its operators to the registry (the
+connector and its glue), re-exported under the feature's name.
+
+| feature | module | operators |
+|---|---|---|
+| `pulsar` | `streaming::pulsar` | `std/pulsar-source@1`, `std/pulsar-sink@1`, `std/pulsar-key@1`, `std/count-to-pulsar@1` |
+| `warp10` | `streaming::warp10` | `std/warp10-sink@1`, `std/count-to-gts@1` |
+| `tls` | | `rediss://` towards the store, and `https://` towards Warp 10 with `warp10` |
+
+```toml
+streaming = { git = "https://github.com/miton18/streaming-rs", features = ["pulsar", "warp10", "tls"] }
+```
+
+Any other source or sink is written the same way, as an operator
+(`Source`, `Sink`) in its own crate with a `register` function; naming it in a
+graph is enough for `App` to register it.
+
 ## Running a real cluster
 
-Build your application (a crate depending on `streaming`, features
-`pulsar` and `tls` as needed) and run the same binary on every machine:
+Build your application (a crate depending on `streaming`, with the features
+of the connectors it uses) and run the same binary on every machine:
 
 ```sh
 my-app worker --id worker-1 --kv redis://:TOKEN@kv-host:6379 \
@@ -362,8 +382,8 @@ graph.sink(decoded, "archive", Archive);                // any DAG
 out of the node it is connected to. The application checks the graph when it
 starts (wiring, types, the configuration of every node against its operator)
 and refuses to run otherwise. The `std/*` operators have their types
-(`Tumbling`, `Sliding`, `Count`, `Identity`, `KvSink`, `Warp10Sink`, and in
-`streaming::stock` `CountToJson`, `CountToGts` and the Pulsar nodes);
+(`Tumbling`, `Sliding`, `Count`, `Identity`, `KvSink`, `CountToJson` in
+`streaming::stock`, and those of the connectors, see below);
 `crates/streaming/examples/demo/graphs.rs` builds the demonstration graphs
 this way.
 

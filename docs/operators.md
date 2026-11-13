@@ -329,19 +329,21 @@ topic, through a durable Failover subscription.
 | `std/sliding@1` | `streaming-core` | `Keyed<T>` → `Windows<T>` | `size`, `slide` (≤ `size`), `allowedLateness` |
 | `std/count@1` | `streaming-core` | `Windows<T>` → `Windowed<u64>` | none |
 | `std/count-to-json@1` | `streaming` | `Windowed<u64>` → JSON | none; gives `{key, count, windowStart, windowEnd}` |
-| `std/count-to-gts@1` | `streaming` | `Windowed<u64>` → `Gts` | `class` (required), `label` (default `key`) |
-| `std/pulsar-key@1` | `streaming` (`pulsar`) | `PulsarMessage` → `Keyed<PulsarMessage>` | none; keys by the message key |
-| `std/count-to-pulsar@1` | `streaming` (`pulsar`) | `Windowed<u64>` → `PulsarOutput` | none; JSON payload, key as message key |
+| `std/count-to-gts@1` | `streaming-warp10` (`warp10`) | `Windowed<u64>` → `Gts` | `class` (required), `label` (default `key`) |
+| `std/pulsar-key@1` | `streaming-pulsar` (`pulsar`) | `PulsarMessage` → `Keyed<PulsarMessage>` | none; keys by the message key |
+| `std/count-to-pulsar@1` | `streaming-pulsar` (`pulsar`) | `Windowed<u64>` → `PulsarOutput` | none; JSON payload, key as message key |
 
 ### Sinks
 
 | Reference | Crate (feature) | In | Parameters | Delivery |
 |---|---|---|---|---|
-| `std/warp10-sink@1` | `streaming-warp10` | `Gts` | `endpoint`, `token` (secret, required); `timeUnit` (`ms` \| `us` \| `ns`, default `us`), `timeout` (default `10s`), `maxBatchBytes` (default 1 MiB) | idempotent by nature: a point written twice is written once |
+| `std/warp10-sink@1` | `streaming-warp10` (`warp10`) | `Gts` | `endpoint`, `token` (secret, required); `timeUnit` (`ms` \| `us` \| `ns`, default `us`), `timeout` (default `10s`), `maxBatchBytes` (default 1 MiB) | idempotent by nature: a point written twice is written once |
 | `std/pulsar-sink@1` | `streaming-pulsar` (`pulsar`) | `PulsarOutput` | `serviceUrl`, `topic` (required); `token`, `tlsTrustCertsFile`, `producerName`, `sendTimeoutMs` (default 30000), `brokerDedup` | at-least-once, emit id in a message property; effectively-once with `brokerDedup` and broker deduplication |
 | `std/kv-sink@1` | `streaming-runtime` | JSON | `retain` (default 500) | idempotent: a row per emit id; keeps the latest rows only, for inspection (the UI's *Résultats* tab) |
 
-`https://` towards Warp 10 and `pulsar+ssl://` need the `tls` feature.
+`https://` towards Warp 10 needs the `tls` feature (`pulsar+ssl://` does not:
+the Magnetar client always carries its TLS). The feature in parentheses is the
+one of `streaming` that registers the operator (none is on by default).
 
 ## Not yet
 
@@ -352,7 +354,6 @@ Being built in other threads of work, and not on `main`:
   outputs chosen by a predicate (side outputs, late records among them).
 - **A typed JSON decoder**: bytes to any `T: Deserialize`, dropping what does
   not parse.
-- **Warp 10 behind a feature flag**, as Pulsar already is.
 - **`std/batch@1` and `std/flatten@1`**: gather elements into a `Vec<A>` until
   a maximum wait (required) or an optional maximum size, flushed at every
   epoch barrier so that a replay forms the same batches; and the reverse, a

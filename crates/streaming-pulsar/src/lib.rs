@@ -5,6 +5,8 @@
 //! |---|---|---|---|
 //! | `std/pulsar-source@1` | source | out: [`PulsarMessage`] | see below |
 //! | `std/pulsar-sink@1` | sink | in: [`PulsarOutput`] | see below |
+//! | `std/pulsar-key@1` | key_by | [`PulsarMessage`] | |
+//! | `std/count-to-pulsar@1` | map | `Windowed<u64>` -> [`PulsarOutput`] | |
 //!
 //! The operators are [`PulsarSource`] and [`PulsarSink`], whose fields are
 //! the configuration below. What they do with the broker is carried by two
@@ -105,12 +107,14 @@ pub mod position;
 pub mod sequence;
 
 mod client;
+mod count;
 mod sink;
 mod source;
 
 pub use config::{
     ConnectionSettings, DedupConfig, EventTimeMode, InitialPosition, ServiceUrl, SinkConfig, SourceConfig,
 };
+pub use count::{CountToPulsar, PulsarKey};
 use moonpool_core::Providers;
 pub use position::{end_position_of, partition_topic, position_of};
 pub use sequence::{SequenceLayout, SequenceState};
@@ -308,10 +312,14 @@ impl Sink<PulsarOutput> for PulsarSink {
     }
 }
 
-/// Register `std/pulsar-source@1` and `std/pulsar-sink@1`.
+/// Register `std/pulsar-source@1`, `std/pulsar-sink@1`, and the glue of
+/// [`PulsarKey`] and [`CountToPulsar`].
 pub fn register<P: Providers>(registry: &mut Registry<P>) {
     registry.source::<PulsarSource>();
     registry.sink::<PulsarOutput, PulsarSink>();
+    let known = "a Pulsar operator is one kind of operator";
+    registry.transformer(&PulsarKey).expect(known);
+    registry.transformer(&CountToPulsar).expect(known);
 }
 
 #[cfg(test)]

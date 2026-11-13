@@ -92,11 +92,23 @@ was suggested as its place.
 | `streaming-sim` | Moonpool harness: fault-injecting KV, source and sinks written on the SDK traits, `Scenario`, `Driver`, `Operator`, `Auditor`; `tests/exactly_once.rs`, `tests/mutants.rs` |
 | `streaming-gossip` | Scuttlebutt membership, simulable |
 | `streaming-kv-redis` | `RedisKv` (RESP client, TLS feature), conformance kit |
-| `streaming-warp10` | `std/warp10-sink@1` |
-| `streaming-pulsar` | `std/pulsar-source@1`, `std/pulsar-sink@1` on Magnetar |
+| `streaming-warp10` | `std/warp10-sink@1`, `std/count-to-gts@1` |
+| `streaming-pulsar` | `std/pulsar-source@1`, `std/pulsar-sink@1` on Magnetar, `std/pulsar-key@1`, `std/count-to-pulsar@1` |
 | `streaming-api` | axum API, status aggregation, embedded UI in `ui/` (vanilla JS) |
 | `streaming-openapi` (+ `-macros`) | `#[route(GET, "/path")]` on a handler: registers it and derives its OpenAPI 3.2 operation from the signature |
-| `streaming` | The application side of the SDK: `App` (tenants, graphs and the operators they name; publication at start; the `standalone` and `worker` commands), stock operators (`stock`), examples `demo` (the two demonstration graphs) and `pulsar-e2e` |
+| `streaming` | The application side of the SDK: `App` (tenants, graphs and the operators they name; publication at start; the `standalone` and `worker` commands), stock operators (`stock`), the connectors behind features (`pulsar`, `warp10`, none by default), examples `demo` (the two demonstration graphs) and `pulsar-e2e` |
+
+**Connectors are features of `streaming`** (none by default; the owner asked
+for it, 2026-11-13: sources and sinks are many, Pulsar and Warp 10 only the
+first). A connector crate holds its operators *and their glue*
+(`CountToGts`, `PulsarKey`, `CountToPulsar`) with one `register` function,
+which `App` calls under the feature; `streaming::stock` keeps only what no
+connector owns. References are unchanged, so fingerprints are too. The
+demonstration names `CountToGts` through a dev-dependency on
+`streaming-warp10` and writes to a simulated sink: it builds and tests
+without any feature, and `cargo test --workspace` therefore covers the build
+without connectors. A test checks that each connector is in the catalogue
+with its feature and only then.
 
 Rust 1.95 minimum, edition 2024. Everything that does I/O is generic over
 `moonpool_core::Providers`: use `moonpool_core::select!`, never
@@ -313,6 +325,8 @@ cargo +nightly fmt --all                                  # rustfmt.toml uses ni
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p streaming-sim --features mutants --all-targets -- -D warnings
 cargo test --workspace                                   # every crate, a few minutes
+cargo clippy -p streaming --all-targets --features pulsar,warp10,tls -- -D warnings   # the connectors on
+cargo test -p streaming --features pulsar,warp10,tls
 cargo test -p streaming-core --test pipes                # the pipes of sources and sinks, in a second
 SIM_ITERATIONS=200 SIM_CONFIGS=40 cargo test --release -p streaming-sim --test exactly_once
 SIM_ITERATIONS=8 cargo test --release -p streaming-sim --features mutants --test mutants -- --nocapture
