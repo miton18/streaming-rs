@@ -558,6 +558,12 @@ the UI copied under `docs/assets/fonts` and a screenshot of the demo in
 limits come from this file and the README: change them together. It must
 never present the project as ready for production.
 
+`docs/operators.md` documents the kinds of operators, their contracts and the
+shipped catalogue (references, types, parameters, delivery). Only what is on
+`main` is described as existing; work in progress goes under *Not yet*.
+Adding, renaming or changing the parameters of a stock operator means
+updating its table.
+
 ## Known limits and open questions
 
 - **What the API refuses of a configuration, and what it still lets

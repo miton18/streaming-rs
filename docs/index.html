@@ -508,6 +508,12 @@ g.sink(decoded, <span class="s">"archive"</span>, <span class="t">Archive</span>
       <div class="card"><h3>Stored as JSON</h3><p>The store holds a description that references operators by name (<code>std/count@1</code>); the code lives in the binary. The stored configuration of a node is its operator as camelCase JSON, unknown fields refused.</p></div>
       <div class="card"><h3>Checked before it is stored</h3><p>The catalogue carries each parameter's kind, choices and bounds. The API refuses what the operator would, its own <code>check</code> function included, before a change restarts the node.</p></div>
     </div>
+    <p class="intro" style="margin-top: 28px;">
+      A step that only turns an <code>A</code> into a <code>B</code> needs no pipe at all: implement
+      <code>StatelessTransformer</code> (or <code>StatelessFilterMap</code> to drop elements) and add it with
+      <code>graph.map(...)</code>. Every kind of operator, its contract and the shipped catalogue are described in
+      <a href="https://github.com/miton18/streaming-rs/blob/main/docs/operators.md">docs/operators.md</a>.
+    </p>
   </div>
 </section>
 
@@ -549,8 +555,8 @@ g.sink(decoded, <span class="s">"archive"</span>, <span class="t">Archive</span>
     </p>
     <div class="stats">
       <div class="stat"><b>27</b><span>hand-written exactly-once scenarios, plus random configurations</span></div>
-      <div class="stat"><b>17</b><span>planted bugs, one per precaution of the protocol</span></div>
-      <div class="stat"><b>17 / 17</b><span>noticed by the simulation, each planted alone</span></div>
+      <div class="stat"><b>18</b><span>planted bugs, one per precaution of the protocol</span></div>
+      <div class="stat"><b>18 / 18</b><span>noticed by the simulation, each planted alone</span></div>
       <div class="stat"><b>~70 ms</b><span>per seed in release, replayable from its number</span></div>
     </div>
     <div class="grid two">
@@ -584,7 +590,7 @@ g.sink(decoded, <span class="s">"archive"</span>, <span class="t">Archive</span>
         <code>ForgetAtOnce</code><code>RestartWithoutWatermark</code><code>RestoreWithoutPending</code><code>EmptyWithoutCopy</code>
         <code>JoinWithoutWatermark</code><code>EmitWithoutRetired</code><code>DeleteWithoutClosing</code><code>RunAnotherDeclaration</code>
         <code>DeleteByTheIndexEntry</code><code>AsideByTheIndexEntry</code><code>RunWhatIsBeingDeleted</code><code>ConfirmWithoutTheSink</code>
-        <code>CloseWithoutClaim</code>
+        <code>CloseWithoutClaim</code><code>ForgetPurgedSlices</code>
       </div>
     </div>
     <div class="grid two">
