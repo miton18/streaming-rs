@@ -1,0 +1,704 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>streaming-rs</title>
+<meta name="description" content="A stream-processing SDK in Rust: DAG pipelines of actors, event-time windows and exactly-once state on a store that only guarantees single-command atomicity, validated under deterministic simulation.">
+<meta name="color-scheme" content="dark light">
+<style>
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("assets/fonts/inter-latin-wght-normal.woff2") format("woff2");
+}
+
+/* Nocturne tokens, the palette of the project's web UI. */
+:root {
+  --bg: #141925;
+  --surface: #1f2533;
+  --surface-2: #262d3d;
+  --text: #e8ebf2;
+  --muted: #aab2c2;
+  --faint: #8e97aa;
+  --divider: #2f3646;
+  --accent: #5b8fd6;
+  --accent-300: #c0d5f8;
+  --accent-400: #90b4ec;
+  --accent-800: #243f67;
+  --accent-900: #172944;
+  --success: #4fb286;
+  --success-800: #1d4636;
+  --warn: #e0a33a;
+  --warn-text: #f0c46e;
+  --warn-800: #4a3613;
+  --danger: #d65a4e;
+  --code-bg: #10141e;
+  --glow: rgb(91 143 214 / 0.18);
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 14px;
+  --gutter: clamp(16px, 4vw, 48px);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f6f7fa; --surface: #ffffff; --surface-2: #eef0f5; --text: #191e2a;
+    --muted: #4f576a; --faint: #6c7589; --divider: #d0d5df;
+    --accent: #35598c; --accent-300: #243f67; --accent-400: #35598c;
+    --accent-800: #dde8fc; --accent-900: #f1f6ff;
+    --success: #1f7a52; --success-800: #d9f1e4;
+    --warn: #9a6512; --warn-text: #7a4f0c; --warn-800: #fbecd0;
+    --danger: #b9473c; --code-bg: #f1f3f8; --glow: rgb(70 115 179 / 0.12);
+    color-scheme: light;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv11", "ss01";
+}
+a { color: var(--accent-400); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
+code, pre { font-family: var(--font-mono); font-size: 0.9em; }
+:not(pre) > code {
+  background: var(--surface-2); padding: 0.1em 0.4em; border-radius: 5px; white-space: nowrap;
+}
+h1, h2, h3 { line-height: 1.15; letter-spacing: -0.02em; margin: 0; }
+h2 { font-size: clamp(26px, 3.4vw, 36px); font-weight: 650; }
+h3 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+p { margin: 0 0 1em; }
+
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 var(--gutter); }
+
+/* Navigation */
+nav.top {
+  position: sticky; top: 0; z-index: 10;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--divider);
+}
+nav.top .wrap { display: flex; align-items: center; gap: 24px; height: 56px; }
+.brand { font-weight: 700; color: var(--text); letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px; }
+.brand:hover { text-decoration: none; }
+.brand svg { flex: none; }
+nav.top ul { display: flex; gap: 20px; list-style: none; margin: 0 0 0 auto; padding: 0; font-size: 14px; }
+nav.top ul a { color: var(--muted); }
+nav.top ul a:hover { color: var(--text); text-decoration: none; }
+@media (max-width: 760px) { nav.top ul li:not(.keep) { display: none; } }
+
+/* Hero */
+header.hero { position: relative; overflow: hidden; padding: clamp(56px, 9vw, 112px) 0 clamp(48px, 7vw, 88px); }
+header.hero::before {
+  content: ""; position: absolute; inset: -40% -10% auto; height: 120%;
+  background: radial-gradient(60% 50% at 70% 30%, var(--glow), transparent 70%);
+  pointer-events: none;
+}
+.hero .wrap { position: relative; display: grid; grid-template-columns: 1fr 1.1fr; gap: clamp(32px, 4vw, 56px); align-items: center; }
+@media (max-width: 920px) { .hero .wrap { grid-template-columns: 1fr; } }
+.status {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 550; color: var(--warn-text);
+  background: var(--warn-800); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  padding: 4px 12px; border-radius: 999px; margin-bottom: 22px;
+}
+.status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+.hero h1 { font-size: clamp(36px, 4.6vw, 54px); font-weight: 720; letter-spacing: -0.035em; margin-bottom: 20px; }
+.hero h1 em { font-style: normal; color: var(--accent-400); }
+.lede { font-size: clamp(17px, 1.6vw, 19px); color: var(--muted); max-width: 36em; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 10px;
+  font-weight: 600; font-size: 15px; border: 1px solid var(--divider); color: var(--text); background: var(--surface);
+}
+.btn:hover { text-decoration: none; border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); }
+
+.term {
+  background: var(--code-bg); border: 1px solid var(--divider); border-radius: var(--radius);
+  box-shadow: 0 20px 50px rgb(0 0 0 / 0.35); overflow: hidden; min-width: 0;
+}
+.term-bar { display: flex; gap: 6px; padding: 12px 14px; border-bottom: 1px solid var(--divider); }
+.term-bar span { width: 10px; height: 10px; border-radius: 50%; background: var(--divider); }
+.term pre { margin: 0; padding: 18px 20px; overflow-x: auto; line-height: 1.65; font-size: 12.5px; }
+
+/* Syntax colours, kept to four */
+.k { color: #c49bf0; } .s { color: #8fd1a8; } .c { color: var(--faint); font-style: italic; } .t { color: #f0c46e; }
+.p { color: var(--accent-400); user-select: none; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .k { color: #7a3fbf; }
+  :root:not([data-theme="dark"]) .s { color: #1f7a52; }
+  :root:not([data-theme="dark"]) .t { color: #8a5a00; }
+}
+
+/* Sections */
+section { padding: clamp(56px, 8vw, 96px) 0; border-top: 1px solid var(--divider); }
+.eyebrow { font-size: 13px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-400); margin-bottom: 12px; }
+.intro { color: var(--muted); max-width: 46em; margin-top: 16px; font-size: 17px; }
+
+.grid { display: grid; gap: 16px; margin-top: 40px; }
+.grid.three { grid-template-columns: repeat(3, 1fr); }
+.grid.two { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 920px) { .grid.three { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 640px) { .grid.three, .grid.two { grid-template-columns: 1fr; } }
+.card { background: var(--surface); border: 1px solid var(--divider); border-radius: var(--radius); padding: 22px 22px 8px; min-width: 0; }
+.card h3 { margin-bottom: 10px; display: flex; align-items: center; gap: 10px; }
+.card p { color: var(--muted); font-size: 15px; }
+.icon {
+  flex: none; width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+  background: var(--accent-900); color: var(--accent-400); border: 1px solid var(--accent-800);
+}
+
+figure.diagram { margin: 40px 0 0; background: var(--surface); border: 1px solid var(--divider); border-radius: var(--radius); padding: clamp(14px, 3vw, 28px); }
+figure.diagram svg { display: block; width: 100%; height: auto; }
+figure.diagram figcaption { color: var(--faint); font-size: 14px; margin-top: 14px; }
+.d-node { fill: var(--surface-2); stroke: var(--divider); }
+.d-src { fill: var(--accent-900); stroke: var(--accent); }
+.d-kv { fill: var(--success-800); stroke: var(--success); }
+.d-sink { fill: var(--warn-800); stroke: var(--warn); }
+.d-text { fill: var(--text); font: 600 13px var(--font-body); }
+.d-sub { fill: var(--faint); font: 500 11px var(--font-mono); }
+.d-edge { stroke: var(--faint); stroke-width: 1.5; fill: none; }
+.d-slice { fill: none; stroke: var(--accent); stroke-dasharray: 5 5; opacity: 0.7; }
+.d-label { fill: var(--accent-400); font: 600 11.5px var(--font-mono); }
+.d-commit { stroke: var(--success); stroke-width: 1.5; fill: none; stroke-dasharray: 3 4; }
+
+figure.shot { margin: 40px 0 0; }
+figure.shot img {
+  display: block; width: 100%; height: auto; border-radius: var(--radius);
+  border: 1px solid var(--divider); box-shadow: 0 24px 60px rgb(0 0 0 / 0.35);
+}
+figure.shot figcaption { color: var(--faint); font-size: 14px; margin-top: 14px; }
+
+/* Code panels */
+.code { background: var(--code-bg); border: 1px solid var(--divider); border-radius: var(--radius); overflow: hidden; min-width: 0; }
+.code .label { font-size: 13px; color: var(--faint); padding: 10px 16px; border-bottom: 1px solid var(--divider); font-family: var(--font-mono); }
+.code pre { margin: 0; padding: 16px 18px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+
+/* Protocol steps */
+ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 40px 0 0; display: grid; gap: 14px; }
+ol.steps li {
+  counter-increment: s; position: relative; padding: 18px 20px 18px 64px;
+  background: var(--surface); border: 1px solid var(--divider); border-radius: var(--radius);
+}
+ol.steps li::before {
+  content: counter(s); position: absolute; left: 18px; top: 17px; width: 30px; height: 30px; border-radius: 50%;
+  display: grid; place-items: center; font-weight: 700; font-size: 14px;
+  background: var(--accent-900); color: var(--accent-400); border: 1px solid var(--accent-800);
+}
+ol.steps li strong { display: block; margin-bottom: 4px; }
+ol.steps li span { color: var(--muted); font-size: 15px; }
+
+/* Numbers */
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 40px; }
+@media (max-width: 820px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+.stat { background: var(--surface); border: 1px solid var(--divider); border-radius: var(--radius); padding: 20px; }
+.stat b { display: block; font-size: clamp(30px, 4vw, 40px); font-weight: 720; letter-spacing: -0.03em; color: var(--accent-400); line-height: 1.1; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 14px; }
+
+ul.ticks { list-style: none; padding: 0; margin: 0 0 14px; }
+ul.ticks li { position: relative; padding-left: 26px; margin-bottom: 9px; color: var(--muted); font-size: 15px; }
+ul.ticks li::before { content: ""; position: absolute; left: 4px; top: 0.55em; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
+ul.ticks.warn li::before { background: var(--warn); }
+ul.ticks.ok li::before { background: var(--success); }
+
+.mutants { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.mutants code { font-size: 12.5px; white-space: nowrap; }
+
+/* Table */
+.table { margin-top: 40px; overflow-x: auto; border: 1px solid var(--divider); border-radius: var(--radius); background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+th, td { text-align: left; padding: 12px 18px; border-bottom: 1px solid var(--divider); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font-size: 13px; color: var(--faint); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+td:first-child { white-space: nowrap; }
+td { color: var(--muted); }
+
+.callout {
+  margin-top: 40px; padding: 20px 22px; border-radius: var(--radius);
+  background: var(--warn-800); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.callout p { margin: 0; color: var(--text); }
+
+footer { border-top: 1px solid var(--divider); padding: 36px 0 48px; color: var(--faint); font-size: 14px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; justify-content: space-between; }
+</style>
+</head>
+<body>
+
+<nav class="top">
+  <div class="wrap">
+    <a class="brand" href="#">
+      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7c3 0 3 3 6 3s3-3 6-3 3 3 6 3M3 14c3 0 3 3 6 3s3-3 6-3 3 3 6 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--accent-400)"/></svg>
+      streaming-rs
+    </a>
+    <ul>
+      <li><a href="#sdk">SDK</a></li>
+      <li><a href="#exactly-once">Exactly-once</a></li>
+      <li><a href="#simulation">Simulation</a></li>
+      <li><a href="#limits">Limits</a></li>
+      <li class="keep"><a href="https://github.com/miton18/streaming-rs">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div>
+      <div class="status">Early: not production-ready</div>
+      <h1>Exactly-once streaming in Rust, on <em>one atomic command</em>.</h1>
+      <p class="lede">
+        streaming-rs is a stream-processing SDK in the spirit of Flink, but smaller.
+        Pipelines are DAGs of operators written in Rust and run as actors, with
+        backpressure, per-node metrics, event-time windows and exactly-once state
+        kept in a Redis-protocol store. Every line of I/O runs under
+        deterministic simulation.
+      </p>
+      <div class="actions">
+        <a class="btn primary" href="#try">Run the demo</a>
+        <a class="btn" href="https://github.com/miton18/streaming-rs">Source on GitHub</a>
+        <a class="btn" href="https://github.com/miton18/streaming-rs/blob/main/docs/http-api.md">HTTP API</a>
+      </div>
+    </div>
+    <div class="term" aria-label="A graph declared in Rust">
+      <div class="term-bar"><span></span><span></span><span></span></div>
+<pre><span class="k">let mut</span> g = <span class="t">GraphBuilder</span>::new(<span class="s">"acme"</span>, <span class="s">"count-per-key"</span>);
+<span class="k">let</span> events = g.source(<span class="s">"events"</span>, <span class="t">Generator</span> {
+    partitions: <span class="t">4</span>, rate_per_sec: <span class="t">2_000</span>,
+});
+<span class="k">let</span> decoded = g.then(events, <span class="s">"decode"</span>, <span class="t">Decode</span>);
+<span class="k">let</span> by_user = g.then(decoded, <span class="s">"by-user"</span>, <span class="t">ByUser</span>);
+<span class="k">let</span> windows = g.then(by_user, <span class="s">"window"</span>, <span class="t">Tumbling</span>::of(<span class="t">FIVE_MIN</span>));
+<span class="k">let</span> counts = g.then(windows, <span class="s">"count"</span>, <span class="t">Count</span>);
+<span class="k">let</span> rows = g.then(counts, <span class="s">"to-row"</span>, <span class="t">CountToJson</span>);
+g.sink(rows, <span class="s">"results"</span>, <span class="t">KvSink</span> { retain: <span class="t">400</span> });
+g.sink(decoded, <span class="s">"archive"</span>, <span class="t">Archive</span>); <span class="c">// any DAG</span>
+
+<span class="t">App</span>::new()
+    .tenant(<span class="s">"acme"</span>, <span class="s">"Acme Corporation"</span>)
+    .graph(g)
+    .main() <span class="c">// `standalone` or `worker`</span></pre>
+    </div>
+  </div>
+</header>
+
+<section id="what">
+  <div class="wrap">
+    <div class="eyebrow">What it is</div>
+    <h2>An SDK, not a daemon.</h2>
+    <p class="intro">
+      Your application declares its tenants, operators and graphs in Rust, and its
+      binary is the worker. Every worker of a cluster runs the same binary and publishes
+      the graphs of its code into the store when it starts. Built for one first use case:
+      a Pulsar topic, five-minute windows, a count per key, flushed to Pulsar or Warp 10.
+    </p>
+    <div class="grid three">
+      <div class="card">
+        <h3><span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m8 6-6 6 6 6M16 6l6 6-6 6"/></svg></span>The code is the truth</h3>
+        <p>Graphs are checked at start (acyclic, types along each edge, every configuration accepted by its operator). The API changes only what is not structure: run states, paused nodes, and the parameters an operator exposes.</p>
+      </div>
+      <div class="card">
+        <h3><span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M3 12h18"/></svg></span>Exactly-once on one command</h3>
+        <p>An epoch is committed with a single <code>HSETNX</code>. No <code>MULTI</code>, no scripting: the protocol runs on Redis and on Clever Cloud Materia KV, which only guarantees single-command atomicity.</p>
+      </div>
+      <div class="card">
+        <h3><span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h12M12 6l6 6-6 6"/></svg></span>Actors and backpressure</h3>
+        <p>Every node is an actor behind a bounded edge. A full edge suspends its producer up to the source; across an aggregate, a slice stops reading once too many of its closed windows wait to be emitted.</p>
+      </div>
+      <div class="card">
+        <h3><span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 20h18M6 16V9M11 16V5M16 16v-4"/></svg></span>The bottleneck has a name</h3>
+        <p>Each actor accounts its time as busy, idle or backpressured. The control plane names the node that limits a graph, and says whether it is limited by its <code>destination</code>, its <code>work</code> or the <code>store</code>.</p>
+      </div>
+      <div class="card">
+        <h3><span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="9" r="3"/><circle cx="16" cy="9" r="3"/><path d="M3 19c1-3 3-4 5-4s4 1 5 4M11 19c1-3 3-4 5-4s4 1 5 4"/></svg></span>Multi-tenant</h3>
+        <p>Every graph, actor, metric and key belongs to a tenant, and secrets are resolved per tenant. Workers are shared by all of them; membership is a light, re-implemented Scuttlebutt gossip.</p>
+      </div>
+      <div class="card">
+        <h3><span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h10M4 12h16M4 17h7"/><circle cx="18" cy="7" r="2"/></svg></span>Rolling deployments</h3>
+        <p>Each graph remembers its declarations by fingerprint. While two binaries run side by side, the older one steps aside from a graph the newer one declares otherwise. No state is deleted by a deployment.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="observe">
+  <div class="wrap">
+    <div class="eyebrow">Pilotable and observable</div>
+    <h2>Find the bottleneck, then turn the knob.</h2>
+    <p class="intro">
+      Every worker started with <code>--listen</code> serves the HTTP API and an embedded
+      web UI (in French for now). Below, the demonstration graph after the
+      <code>archive</code> sink's latency was raised to 400 ms through the API: the sink is
+      busy all the time waiting for its destination, backpressure has climbed to the source,
+      and the node is named as the graph's bottleneck.
+    </p>
+    <figure class="shot">
+      <img src="assets/img/ui-bottleneck.webp" width="2880" height="1720" loading="lazy"
+           alt="The web UI showing the count-per-key graph: the archive sink is flagged as the bottleneck at 100% busy, and the events source and decode map are backpressured at 100%.">
+      <figcaption>The graph view of the standalone demo: topology with per-node busy, idle and backpressure, the named bottleneck, slices and their commits.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <div class="eyebrow">How it runs</div>
+    <h2>A graph is cut into slices.</h2>
+    <p class="intro">
+      A graph is cut at its aggregates. <code>src.&lt;node&gt;.&lt;partition&gt;</code> runs one
+      source partition up to the first aggregates; <code>agg.&lt;node&gt;</code> reads the
+      closed windows and runs everything downstream. A slice is the unit of placement
+      and of exactly-once: all slices of a graph share one worker until that worker
+      reports being saturated.
+    </p>
+    <figure class="diagram">
+      <svg viewBox="0 0 1000 330" role="img" aria-label="Three source slices commit to their logs in the store; the emitter slice reads them and writes to the sink">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 10 5 0 10z" style="fill: var(--faint)"/>
+          </marker>
+        </defs>
+        <!-- source slices -->
+        <rect class="d-slice" x="10" y="12" width="520" height="216" rx="12"/>
+        <text class="d-label" x="26" y="34">src.events.0 … src.events.2</text>
+        <g>
+          <rect class="d-src" x="30" y="52" width="110" height="44" rx="9"/>
+          <text class="d-text" x="85" y="79" text-anchor="middle">events · p0</text>
+          <rect class="d-src" x="30" y="110" width="110" height="44" rx="9"/>
+          <text class="d-text" x="85" y="137" text-anchor="middle">events · p1</text>
+          <rect class="d-src" x="30" y="168" width="110" height="44" rx="9"/>
+          <text class="d-text" x="85" y="195" text-anchor="middle">events · p2</text>
+        </g>
+        <g>
+          <rect class="d-node" x="180" y="110" width="96" height="44" rx="9"/>
+          <text class="d-text" x="228" y="131" text-anchor="middle">by-key</text>
+          <text class="d-sub" x="228" y="146" text-anchor="middle">key_by</text>
+          <rect class="d-node" x="306" y="110" width="96" height="44" rx="9"/>
+          <text class="d-text" x="354" y="131" text-anchor="middle">window</text>
+          <text class="d-sub" x="354" y="146" text-anchor="middle">5m tumbling</text>
+          <rect class="d-node" x="432" y="110" width="84" height="44" rx="9"/>
+          <text class="d-text" x="474" y="131" text-anchor="middle">count</text>
+          <text class="d-sub" x="474" y="146" text-anchor="middle">accumulate</text>
+        </g>
+        <path class="d-edge" d="M140 74 C160 74 160 132 178 132" marker-end="url(#arrow)"/>
+        <path class="d-edge" d="M140 132 H178" marker-end="url(#arrow)"/>
+        <path class="d-edge" d="M140 190 C160 190 160 132 178 132" marker-end="url(#arrow)"/>
+        <path class="d-edge" d="M276 132 H304" marker-end="url(#arrow)"/>
+        <path class="d-edge" d="M402 132 H430" marker-end="url(#arrow)"/>
+
+        <!-- store -->
+        <rect class="d-kv" x="560" y="80" width="170" height="104" rx="12"/>
+        <text class="d-text" x="645" y="110" text-anchor="middle">Redis / Materia KV</text>
+        <text class="d-sub" x="645" y="134" text-anchor="middle">HSETNX c:&lt;epoch&gt;</text>
+        <text class="d-sub" x="645" y="152" text-anchor="middle">seal f:&lt;epoch&gt;</text>
+        <text class="d-sub" x="645" y="170" text-anchor="middle">window hashes</text>
+        <path class="d-commit" d="M516 132 H558" marker-end="url(#arrow)"/>
+        <text class="d-sub" x="545" y="70" text-anchor="middle">commit</text>
+
+        <!-- emitter slice -->
+        <rect class="d-slice" x="756" y="12" width="234" height="216" rx="12"/>
+        <text class="d-label" x="772" y="34">agg.count</text>
+        <rect class="d-node" x="776" y="52" width="194" height="44" rx="9"/>
+        <text class="d-text" x="873" y="73" text-anchor="middle">emit count</text>
+        <text class="d-sub" x="873" y="88" text-anchor="middle">merge · deterministic EmitId</text>
+        <rect class="d-node" x="776" y="110" width="194" height="44" rx="9"/>
+        <text class="d-text" x="873" y="137" text-anchor="middle">to-gts</text>
+        <rect class="d-sink" x="776" y="168" width="194" height="44" rx="9"/>
+        <text class="d-text" x="873" y="189" text-anchor="middle">Warp 10 /update</text>
+        <text class="d-sub" x="873" y="204" text-anchor="middle">idempotent on EmitId</text>
+        <path class="d-commit" d="M730 112 C750 112 752 74 774 74" marker-end="url(#arrow)"/>
+        <path class="d-edge" d="M873 96 V108" marker-end="url(#arrow)"/>
+        <path class="d-edge" d="M873 154 V166" marker-end="url(#arrow)"/>
+
+        <!-- legend -->
+        <g transform="translate(10 262)">
+          <rect class="d-src" width="14" height="14" rx="3"/><text class="d-sub" x="22" y="11">source partition</text>
+          <rect class="d-node" x="150" width="14" height="14" rx="3"/><text class="d-sub" x="172" y="11">operator (actor)</text>
+          <rect class="d-kv" x="300" width="14" height="14" rx="3"/><text class="d-sub" x="322" y="11">store: logs and window state</text>
+          <rect class="d-sink" x="520" width="14" height="14" rx="3"/><text class="d-sub" x="542" y="11">sink</text>
+          <path class="d-slice" d="M610 7 H650"/><text class="d-sub" x="658" y="11">slice: unit of placement and exactly-once</text>
+          <text class="d-sub" x="0" y="48">Windows close on watermarks. A partition added or removed at run time joins or retires its slice under a new plan generation.</text>
+        </g>
+      </svg>
+      <figcaption>The first use case: a Pulsar topic with three partitions, a five-minute count per key, the results written to Warp 10.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="sdk">
+  <div class="wrap">
+    <div class="eyebrow">The SDK</div>
+    <h2>One structure, one trait.</h2>
+    <p class="intro">
+      An operator is a structure, and the structure is its configuration.
+      <code>#[derive(Operator)]</code> names it and turns the fields marked
+      <code>#[param]</code> into parameters the API and the UI may change, with their
+      defaults and bounds. A field without <code>#[param]</code> is fixed by the code.
+      Then the operator says what it is: a <code>Source</code>, a <code>Sink</code>, or,
+      for everything else, a <code>Transformer</code>.
+    </p>
+    <div class="grid two">
+      <div class="code">
+        <div class="label">a source, started once per partition</div>
+<pre><span class="c">/// Synthetic events, as JSON bytes.</span>
+#[derive(<span class="t">Debug</span>, <span class="t">Clone</span>, <span class="t">Operator</span>)]
+#[operator(<span class="s">"acme/generator@1"</span>)]
+<span class="k">pub struct</span> <span class="t">Generator</span> {
+    <span class="c">/// Number of partitions.</span>
+    #[param(default = <span class="t">4</span>, min = <span class="t">1</span>, max = <span class="t">64</span>)]
+    <span class="k">pub</span> partitions: <span class="t">u32</span>,
+    <span class="c">/// Events per second.</span>
+    #[param(default = <span class="t">2000</span>, max = <span class="t">200000</span>)]
+    <span class="k">pub</span> rate_per_sec: <span class="t">u64</span>,
+}
+
+<span class="k">impl</span> <span class="t">Source</span> <span class="k">for</span> <span class="t">Generator</span> {
+    <span class="k">type</span> <span class="t">Out</span> = <span class="t">Vec</span>&lt;<span class="t">u8</span>&gt;;
+    <span class="k">async fn</span> start&lt;P: <span class="t">Providers</span>&gt;(&amp;<span class="k">self</span>, ctx: &amp;<span class="t">Context</span>&lt;P&gt;, partition: <span class="t">u32</span>,
+        after: <span class="t">Option</span>&lt;<span class="t">Position</span>&gt;, out: <span class="t">SourcePipe</span>&lt;<span class="t">Vec</span>&lt;<span class="t">u8</span>&gt;&gt;,
+    ) -&gt; <span class="t">Result</span>&lt;(), <span class="t">OpError</span>&gt; {
+        <span class="k">let mut</span> next = after.map_or(<span class="t">0</span>, |p| p.<span class="t">2</span> + <span class="t">1</span>);
+        <span class="k">loop</span> {
+            <span class="c">// Waits while downstream is full: the backpressure.</span>
+            out.send(<span class="t">Position</span>(<span class="t">0</span>, <span class="t">0</span>, next), ctx.clock.now_ms(), event(next)).<span class="k">await</span>?;
+            next += <span class="t">1</span>;
+        }
+    }
+}</pre>
+      </div>
+      <div style="display: grid; gap: 16px; min-width: 0;">
+        <div class="code">
+          <div class="label">a transformer takes a pipe and returns a pipe</div>
+<pre><span class="k">impl</span> <span class="t">Transformer</span>&lt;<span class="t">Vec</span>&lt;<span class="t">u8</span>&gt;&gt; <span class="k">for</span> <span class="t">Decode</span> {
+    <span class="k">type</span> <span class="t">Out</span> = <span class="t">Event</span>;
+    <span class="k">fn</span> transform(&amp;<span class="k">self</span>, input: <span class="t">Pipe</span>&lt;<span class="t">Vec</span>&lt;<span class="t">u8</span>&gt;&gt;) -&gt; <span class="t">Pipe</span>&lt;<span class="t">Event</span>&gt; {
+        input.filter_map(|b| serde_json::from_slice(b).ok())
+    }
+}</pre>
+        </div>
+        <div class="code">
+          <div class="label">a sink confirms each batch</div>
+<pre><span class="k">impl</span> <span class="t">Sink</span>&lt;<span class="t">Event</span>&gt; <span class="k">for</span> <span class="t">Archive</span> {
+    <span class="k">async fn</span> start&lt;P: <span class="t">Providers</span>&gt;(&amp;<span class="k">self</span>, ctx: &amp;<span class="t">Context</span>&lt;P&gt;,
+        <span class="k">mut</span> input: <span class="t">SinkPipe</span>&lt;<span class="t">Event</span>&gt;) -&gt; <span class="t">Result</span>&lt;(), <span class="t">OpError</span>&gt; {
+        <span class="k">while let</span> <span class="t">Some</span>(batch) = input.next().<span class="k">await</span> {
+            <span class="k">for</span> e <span class="k">in</span> batch.iter() { <span class="c">/* e.id, e.value */</span> }
+            batch.done();   <span class="c">// or batch.failed("why")</span>
+        }
+        <span class="t">Ok</span>(())
+    }
+}</pre>
+        </div>
+      </div>
+    </div>
+    <div class="grid three">
+      <div class="card"><h3>Typed end to end</h3><p><code>key_by</code> gives a <code>Pipe&lt;Keyed&lt;T&gt;&gt;</code>, on which <code>window</code> gives <code>Pipe&lt;Windows&lt;T&gt;&gt;</code>, on which <code>aggregate(init, add, merge)</code> runs. A window on a pipe without a key does not compile.</p></div>
+      <div class="card"><h3>Stored as JSON</h3><p>The store holds a description that references operators by name (<code>std/count@1</code>); the code lives in the binary. The stored configuration of a node is its operator as camelCase JSON, unknown fields refused.</p></div>
+      <div class="card"><h3>Checked before it is stored</h3><p>The catalogue carries each parameter's kind, choices and bounds. The API refuses what the operator would, its own <code>check</code> function included, before a change restarts the node.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="exactly-once">
+  <div class="wrap">
+    <div class="eyebrow">Exactly-once</div>
+    <h2>Correct without trusting membership.</h2>
+    <p class="intro">
+      Two workers may run the same slice at the same time: the store decides which one
+      commits, so membership and placement are never needed for correctness. The protocol
+      only relies on single-command atomicity.
+    </p>
+    <ol class="steps">
+      <li><strong>Epochs and barriers.</strong><span>A slice cuts its input into epochs. A barrier travels through the actors; once every aggregate and sink has seen it, the epoch is committed with one <code>HSETNX c:&lt;epoch&gt;</code> holding the source position, the watermark and every accumulator the epoch changed.</span></li>
+      <li><strong>Fencing.</strong><span><code>HSETNX</code> succeeds for one writer only. The loser is fenced and restarts from the log. The source is acknowledged only after the commit.</span></li>
+      <li><strong>Seals.</strong><span>Superseded records are emptied in place, and fields are deleted only below a write-once seal that every committer re-reads after its write, so a worker left far behind cannot revive an old epoch.</span></li>
+      <li><strong>Window state.</strong><span>Only the owner copies accumulators out of the log into one hash per window. Once a window is emitted its state is deleted; its index entry stays for <code>gcGrace</code>, so a late write from a worker that lost the slice cannot leave a window behind.</span></li>
+      <li><strong>Idempotent sinks.</strong><span>The emitter checks it still owns its log after reading and before emitting, and gives each element a deterministic <code>EmitId</code>. After a failure the same elements are written again under the same ids.</span></li>
+    </ol>
+    <p class="intro" style="margin-top: 28px;">
+      The same discipline covers partitions added and removed at run time (plan generations,
+      joining and retired slices), graph deletion (logs closed first, then a resumable purge)
+      and deployments (declarations by fingerprint). The full list of invariants is in
+      <a href="https://github.com/miton18/streaming-rs/blob/main/AGENTS.md">AGENTS.md</a>.
+    </p>
+  </div>
+</section>
+
+<section id="simulation">
+  <div class="wrap">
+    <div class="eyebrow">Deterministic simulation</div>
+    <h2>A green run is not an argument.</h2>
+    <p class="intro">
+      Everything that does I/O is generic over Moonpool's providers, so the real worker
+      code runs under the <a href="https://github.com/PierreZ/moonpool">Moonpool</a> simulator,
+      with crashes, a hostile store and a hostile broker. And because a simulation that
+      passes proves little until it is known to fail, bugs are planted on purpose to
+      measure the harness itself.
+    </p>
+    <div class="stats">
+      <div class="stat"><b>27</b><span>hand-written exactly-once scenarios, plus random configurations</span></div>
+      <div class="stat"><b>17</b><span>planted bugs, one per precaution of the protocol</span></div>
+      <div class="stat"><b>17 / 17</b><span>noticed by the simulation, each planted alone</span></div>
+      <div class="stat"><b>~70 ms</b><span>per seed in release, replayable from its number</span></div>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <h3>Faults injected</h3>
+        <ul class="ticks warn">
+          <li>Worker processes crashed and rebooted.</li>
+          <li>Store commands lost, applied without a reply, applied after their sender was told they failed (even after its death), or stalled for seconds.</li>
+          <li>Source redeliveries and batches cut anywhere.</li>
+          <li>Sinks failing halfway, or not confirming a batch in each of the three ways a sink can.</li>
+          <li>Partitions added and removed while events flow; drifting worker clocks.</li>
+          <li>Rolling deployments, rollbacks and a failed release, while events flow.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>What is checked</h3>
+        <ul class="ticks ok">
+          <li>Every event counted exactly once on four paths: windowed count, stateless, diamond, second-level aggregation.</li>
+          <li>Committed history never goes backwards nor loses its head, audited every 100 ms.</li>
+          <li>Nothing acknowledged to the source before being committed.</li>
+          <li>No commit into a window already emitted, checked the instant it lands.</li>
+          <li>No window state or orphan log left once everything settled; logs stay small.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="card" style="margin-top: 16px;">
+      <h3>The planted bugs</h3>
+      <p>Compiled only with the <code>mutants</code> feature, so a production build cannot carry one. <code>SIM_MUTANT=&lt;name&gt;</code> plants a single one.</p>
+      <div class="mutants" style="margin-bottom: 16px;">
+        <code>CommitWithoutFencing</code><code>CommitBelowTheSeal</code><code>AckBeforeCommit</code><code>EmitWithoutOwnership</code>
+        <code>ForgetAtOnce</code><code>RestartWithoutWatermark</code><code>RestoreWithoutPending</code><code>EmptyWithoutCopy</code>
+        <code>JoinWithoutWatermark</code><code>EmitWithoutRetired</code><code>DeleteWithoutClosing</code><code>RunAnotherDeclaration</code>
+        <code>DeleteByTheIndexEntry</code><code>AsideByTheIndexEntry</code><code>RunWhatIsBeingDeleted</code><code>ConfirmWithoutTheSink</code>
+        <code>CloseWithoutClaim</code>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="code">
+        <div class="label">run, replay, measure</div>
+<pre><span class="p">$</span> SIM_ITERATIONS=200 SIM_CONFIGS=40 cargo test --release \
+    -p streaming-sim --test exactly_once
+<span class="p">$</span> SIM_SEEDS=&lt;seed&gt; cargo test -p streaming-sim \
+    --test exactly_once &lt;scenario&gt; -- --nocapture
+<span class="p">$</span> cargo test --release -p streaming-sim \
+    --features mutants --test mutants -- --nocapture</pre>
+      </div>
+      <div class="card">
+        <h3>Beyond the simulation</h3>
+        <ul class="ticks">
+          <li>Gossip, the Redis client and the Warp 10 sink have simulation suites of their own.</li>
+          <li>Generated mutants (<code>cargo-mutants</code>) measure the ordinary tests the way planted bugs measure the simulation.</li>
+          <li>An end-to-end script runs real Pulsar and Redis with two workers, one killed with <code>SIGKILL</code> halfway, and checks the counts.</li>
+          <li>A sweep script runs fresh seeds on every core for a time budget and reports a replay command per failing seed.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="crates">
+  <div class="wrap">
+    <div class="eyebrow">Inside the workspace</div>
+    <h2>Twelve crates, one binary.</h2>
+    <div class="table">
+      <table>
+        <thead><tr><th>Crate</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>streaming</code></td><td>The SDK: <code>App</code> (tenants, operators, graphs, the <code>standalone</code> and <code>worker</code> commands), stock operators, the demonstration application.</td></tr>
+          <tr><td><code>streaming-core</code></td><td>Contracts: ids, time, the <code>Kv</code> trait, the <code>Operator</code>, <code>Source</code>, <code>Sink</code> and <code>Transformer</code> traits and their pipes, the typed <code>GraphBuilder</code>, registry and catalogue.</td></tr>
+          <tr><td><code>streaming-macros</code></td><td><code>#[derive(Operator)]</code> and <code>#[derive(Param)]</code>.</td></tr>
+          <tr><td><code>streaming-runtime</code></td><td>The engine: actors, epochs and commits, commit log and window state, worker loop, controller and placement.</td></tr>
+          <tr><td><code>streaming-sim</code></td><td>The Moonpool harness and the exactly-once scenarios.</td></tr>
+          <tr><td><code>streaming-gossip</code></td><td>Scuttlebutt membership, simulable.</td></tr>
+          <tr><td><code>streaming-kv-redis</code></td><td>RESP client for Redis and Materia KV, with size limits and optional TLS.</td></tr>
+          <tr><td><code>streaming-pulsar</code></td><td>Apache Pulsar source and sink on the <a href="https://github.com/CleverCloud/magnetar">Magnetar</a> client.</td></tr>
+          <tr><td><code>streaming-warp10</code></td><td>Warp 10 sink (<code>/api/v0/update</code>).</td></tr>
+          <tr><td><code>streaming-api</code></td><td>HTTP API (axum) and the embedded web UI: graphs, metrics, bottleneck, results, exposed parameters.</td></tr>
+          <tr><td><code>streaming-openapi</code></td><td><code>#[route]</code> registers a handler and derives its OpenAPI 3.2 operation from its signature, so router and document cannot diverge (macro in <code>streaming-openapi-macros</code>).</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <div class="eyebrow">Honest limits</div>
+    <h2>What it does not do yet.</h2>
+    <p class="intro">Nothing is deployed in production, and the on-disk formats may still change.</p>
+    <div class="grid two">
+      <div class="card">
+        <ul class="ticks warn">
+          <li>Parallelism follows the source partitions: no keyed exchange between workers, no node scaled on its own.</li>
+          <li>Placement moves slices off a saturated worker, but never brings them back together.</li>
+          <li>Aggregations only: tumbling and sliding windows; no joins, no session windows.</li>
+          <li>Throughput and state size are bounded by the store: one commit per epoch.</li>
+          <li>Sinks must be idempotent; the Pulsar sink is at-least-once with the emit id in a property.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <ul class="ticks warn">
+          <li>The HTTP API has no authentication: do not expose it publicly.</li>
+          <li>Tenant isolation is logical: no quotas, no fair scheduling.</li>
+          <li>A parameter change that invalidates state, such as a window's size, is not told apart yet.</li>
+          <li>Never run against a real Materia KV or a real Warp 10.</li>
+          <li>A source that pushes acknowledges late; a source on a real broker should be built on a connector, as Pulsar is.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="try">
+  <div class="wrap">
+    <div class="eyebrow">Try it</div>
+    <h2>A whole cluster in one process.</h2>
+    <p class="intro">
+      The demonstration application runs three in-memory workers gossiping over loopback,
+      two graphs fed by a generator, and the web UI on <code>http://127.0.0.1:8080</code>.
+      Open <code>acme / count-per-key</code>, set the <code>archive</code> sink's
+      <code>latencyMs</code> to <code>400</code>, and watch backpressure climb to the source
+      while the node is named the bottleneck.
+    </p>
+    <div class="grid two">
+      <div class="code">
+        <div class="label">standalone demo (Rust 1.95+)</div>
+<pre><span class="p">$</span> git clone https://github.com/miton18/streaming-rs
+<span class="p">$</span> cd streaming-rs
+<span class="p">$</span> cargo run --release -p streaming --example demo -- standalone</pre>
+      </div>
+      <div class="code">
+        <div class="label">a real cluster: the same binary on every machine</div>
+<pre><span class="p">$</span> my-app worker --id worker-1 --kv rediss://:TOKEN@kv-host:6379 \
+    --listen 0.0.0.0:8080 --gossip 0.0.0.0:7946 \
+    --gossip-advertise 10.0.0.1:7946
+<span class="p">$</span> my-app worker --id worker-2 --kv rediss://:TOKEN@kv-host:6379 \
+    --listen 0.0.0.0:8080 --gossip 0.0.0.0:7946 \
+    --gossip-advertise 10.0.0.2:7946 --seeds 10.0.0.1:7946</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>streaming-rs, an early-stage project. No licence is declared yet.</span>
+    <span><a href="https://github.com/miton18/streaming-rs">GitHub</a> · <a href="https://github.com/miton18/streaming-rs/blob/main/README.md">README</a> · <a href="https://github.com/miton18/streaming-rs/blob/main/docs/http-api.md">HTTP API</a> · <a href="openapi.json">OpenAPI</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
