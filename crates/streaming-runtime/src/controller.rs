@@ -268,6 +268,70 @@ async fn purge_slice(kv: &dyn Kv, nodes: &[NodeSpec], slice: &SliceKey) -> Resul
     kv.del(vec![keys::slice_log(slice), keys::slice_seal(slice)]).await
 }
 
+/// What the mark of a graph keeps once its purge is over: a controller that
+/// took over while the purge ended may still close a log the purge removed,
+/// from a plan it read before the plan went. Its seal would then outlive the
+/// graph, and close to every plan the logs of a graph declared again under
+/// the same name. So the mark stays, with what the plan listed, until such
+/// writes have landed; then whatever came back is deleted and the mark goes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Purged {
+    /// Every slice the plan knew of.
+    slices: Vec<SliceId>,
+    /// The aggregates, which keep window state.
+    aggregates: Vec<streaming_core::NodeId>,
+    /// When the purge ended, and how long writes issued before may take to land.
+    at_ms: i64,
+    grace_ms: i64,
+}
+
+impl Purged {
+    /// What `self` and an earlier purge of the same graph listed, counted
+    /// from the later one.
+    fn merge(mut self, earlier: Purged) -> Purged {
+        for slice in earlier.slices {
+            if !self.slices.contains(&slice) {
+                self.slices.push(slice);
+            }
+        }
+        for node in earlier.aggregates {
+            if !self.aggregates.contains(&node) {
+                self.aggregates.push(node);
+            }
+        }
+        self.grace_ms = self.grace_ms.max(earlier.grace_ms);
+        self
+    }
+}
+
+/// Delete what came back of the slices of a purged graph.
+async fn sweep_purged(kv: &dyn Kv, graph: &GraphKey, purged: &Purged) -> Result<(), KvError> {
+    // Only a controller closing a log comes back this late (every instance
+    // stopped writing before the purge began): deletes alone, no reads, so
+    // that the sweep ends in a call or two whatever the store does.
+    let mut doomed = Vec::new();
+    for slice in &purged.slices {
+        let slice = SliceKey {
+            tenant: graph.tenant.clone(),
+            graph: graph.graph.clone(),
+            slice: slice.clone(),
+        };
+        doomed.push(keys::slice_log(&slice));
+        doomed.push(keys::slice_seal(&slice));
+        doomed.extend(
+            purged
+                .aggregates
+                .iter()
+                .map(|node| keys::slice_window_index(&slice, node)),
+        );
+    }
+    for chunk in doomed.chunks(100) {
+        kv.del(chunk.to_vec()).await?;
+    }
+    Ok(())
+}
+
 /// Whether everything a retired slice committed has been emitted: each window
 /// it holds accumulators for, in the store or in its log, is behind the
 /// position of the emitter of its aggregate.
@@ -320,7 +384,12 @@ async fn close_graph(kv: &dyn Kv, graph: &GraphKey) -> Result<Duration, KvError>
 /// issued now could land after it is over. Returns whether the graph is gone:
 /// only a round that finds every slice purged already deletes the documents
 /// that tell what to look for.
-async fn purge_graph(kv: &dyn Kv, graph: &GraphKey, catalog: &streaming_core::Catalog) -> Result<bool, KvError> {
+async fn purge_graph(
+    kv: &dyn Kv,
+    graph: &GraphKey,
+    catalog: &streaming_core::Catalog,
+    now_ms: i64,
+) -> Result<bool, KvError> {
     let spec: Option<GraphSpec> = read_doc(kv, &keys::graph_spec(graph)).await?;
     let plan: GraphPlan = read_doc(kv, &keys::graph_plan(graph)).await?.unwrap_or_default();
     let all = spec.as_ref().map(|spec| spec.nodes.clone()).unwrap_or_default();
@@ -362,6 +431,36 @@ async fn purge_graph(kv: &dyn Kv, graph: &GraphKey, catalog: &streaming_core::Ca
         // meanwhile has landed.
         return Ok(false);
     }
+    if !planted(Mutant::ForgetPurgedSlices) {
+        let purged = Purged {
+            slices: plan
+                .slices
+                .iter()
+                .chain(&plan.retired)
+                .chain(&plan.closed)
+                .cloned()
+                .collect(),
+            aggregates: nodes.iter().map(|node| node.id.clone()).collect(),
+            at_ms: now_ms,
+            grace_ms: 2 * spec
+                .as_ref()
+                .map_or_else(
+                    || streaming_core::spec::GraphSettings::default().gc_grace,
+                    |spec| spec.settings.gc_grace,
+                )
+                .as_millis() as i64,
+        };
+        // A deletion undone by an index entry written back is purged again,
+        // without the plan the first purge removed: keep what it listed.
+        let earlier = kv.hget(keys::CLUSTER_DELETING, &graph.to_string()).await?;
+        let purged = match earlier.and_then(|value| serde_json::from_slice::<Purged>(&value).ok()) {
+            Some(earlier) => purged.merge(earlier),
+            None => purged,
+        };
+        let value = serde_json::to_vec(&purged).map_err(|error| KvError::Unavailable(error.to_string()))?;
+        kv.hset(keys::CLUSTER_DELETING, vec![(graph.to_string(), value)])
+            .await?;
+    }
     let mut doomed: Vec<String> = all.iter().map(|node| keys::graph_output(graph, &node.id)).collect();
     doomed.extend([
         keys::graph_spec(graph),
@@ -396,14 +495,10 @@ pub(crate) async fn run_once<P: Providers>(
 
     // Read before the index: a graph marked after this read is seen as
     // deleted by the next round, never taken for a mark left behind.
-    let marked: BTreeSet<String> = if planted(Mutant::DeleteByTheIndexEntry) {
-        BTreeSet::new()
+    let marked: BTreeMap<String, Vec<u8>> = if planted(Mutant::DeleteByTheIndexEntry) {
+        BTreeMap::new()
     } else {
-        kv.hgetall(keys::CLUSTER_DELETING)
-            .await?
-            .into_iter()
-            .map(|(graph, _)| graph)
-            .collect()
+        kv.hgetall(keys::CLUSTER_DELETING).await?.into_iter().collect()
     };
     let index: Vec<(String, GraphIndexEntry)> = kv.hgetall_json(keys::CLUSTER_GRAPHS).await?;
     let known: BTreeSet<GraphKey> = index
@@ -411,15 +506,36 @@ pub(crate) async fn run_once<P: Providers>(
         .map(|(_, entry)| GraphKey::new(entry.tenant.clone(), entry.graph.clone()))
         .collect();
     state.deleting_since.retain(|graph, _| known.contains(graph));
-    // The mark of a graph that is gone: its purge ended without removing it.
-    let left: Vec<String> = marked
-        .iter()
-        .filter(|graph| !known.iter().any(|known| known.to_string() == **graph))
-        .cloned()
-        .collect();
+    // The mark of a graph that is gone: its purge is over. Once the writes
+    // issued before it have landed, delete what came back, then the mark.
+    let now_ms = env.clock.now_ms();
+    let mut left = Vec::new();
+    for field in marked.keys() {
+        if known.iter().any(|known| known.to_string() == *field) {
+            continue;
+        }
+        let Some(graph) = field.parse::<GraphKey>().ok() else {
+            left.push(field.clone());
+            continue;
+        };
+        // Read again: the mark read before the index may be older than the
+        // purge that ended in between, which writes its list into the mark
+        // before it removes the index entry.
+        let Some(value) = kv.hget(keys::CLUSTER_DELETING, field).await? else {
+            continue;
+        };
+        match serde_json::from_slice::<Purged>(&value) {
+            Ok(purged) if now_ms.saturating_sub(purged.at_ms) < purged.grace_ms => continue,
+            Ok(purged) => sweep_purged(kv, &graph, &purged).await?,
+            // Marked, then purged before this kind of mark existed.
+            Err(_) => {}
+        }
+        left.push(field.clone());
+    }
     if !left.is_empty() {
         kv.hdel(keys::CLUSTER_DELETING, left).await?;
     }
+    let marked: BTreeSet<String> = marked.into_keys().collect();
 
     for (field, mut entry) in index {
         let graph = GraphKey::new(entry.tenant.clone(), entry.graph.clone());
@@ -445,9 +561,11 @@ pub(crate) async fn run_once<P: Providers>(
             }
             let (since, linger) = state.deleting_since[&graph];
             if now.saturating_sub(since) >= grace.max(linger) {
-                if purge_graph(kv, &graph, &env.registry.catalog()).await? {
+                if purge_graph(kv, &graph, &env.registry.catalog(), env.clock.now_ms()).await? {
                     state.deleting_since.remove(&graph);
-                    kv.hdel(keys::CLUSTER_DELETING, vec![graph.to_string()]).await?;
+                    if planted(Mutant::ForgetPurgedSlices) {
+                        kv.hdel(keys::CLUSTER_DELETING, vec![graph.to_string()]).await?;
+                    }
                 } else {
                     state.deleting_since.insert(graph.clone(), (now, linger));
                 }
@@ -875,6 +993,75 @@ mod tests {
                 api_addr: None,
                 version: String::new(),
                 aside: Default::default(),
+            }
+        }
+
+        /// A controller that takes over while another one ends a purge may
+        /// close a log the purge removed, from a plan read before it went:
+        /// what it writes back is swept once such writes have landed, and only
+        /// then does the mark of the deletion go.
+        #[tokio::test]
+        async fn what_a_late_controller_closes_after_the_purge_is_swept() {
+            let kv: DynKv = MemKv::shared();
+            let env = env(&kv);
+            let graph = submit(&kv, 1).await;
+            let me = WorkerId::new("w1").unwrap();
+            let members = [member("w1", 0.1)];
+            let hour = Duration::from_secs(3600);
+            let mut first = ControllerState::new(hour);
+            run_once(&env, &me, &members, &mut first, hour, hour).await.unwrap();
+            let plan: GraphPlan = kv.get_json(&keys::graph_plan(&graph)).await.unwrap().unwrap();
+            let slices: Vec<SliceKey> = plan
+                .slices
+                .iter()
+                .map(|slice| SliceKey {
+                    tenant: graph.tenant.clone(),
+                    graph: graph.graph.clone(),
+                    slice: slice.clone(),
+                })
+                .collect();
+            for slice in &slices {
+                kv.hset(&keys::slice_log(slice), vec![("c:1".into(), b"x".to_vec())])
+                    .await
+                    .unwrap();
+            }
+            kv.hset(keys::CLUSTER_DELETING, vec![(graph.to_string(), b"1".to_vec())])
+                .await
+                .unwrap();
+            // The first controller closes every log, purges the slices, then
+            // makes its last pass, which removes the plan.
+            close_graph(kv.as_ref(), &graph).await.unwrap();
+            assert!(
+                !purge_graph(kv.as_ref(), &graph, &env.registry.catalog(), 0)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                purge_graph(kv.as_ref(), &graph, &env.registry.catalog(), 0)
+                    .await
+                    .unwrap()
+            );
+            // Another one had read the plan before it went, and closes after.
+            kv.set_json(&keys::graph_plan(&graph), &plan).await.unwrap();
+            close_graph(kv.as_ref(), &graph).await.unwrap();
+            kv.del(vec![keys::graph_plan(&graph)]).await.unwrap();
+            assert!(
+                kv.hget(keys::CLUSTER_DELETING, &graph.to_string())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            // The next round, long after the purge, sweeps it.
+            run_once(&env, &me, &members, &mut first, hour, hour).await.unwrap();
+            assert!(
+                kv.hget(keys::CLUSTER_DELETING, &graph.to_string())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            for slice in &slices {
+                let seal = kv.hgetall(&keys::slice_seal(slice)).await.unwrap();
+                assert!(seal.is_empty(), "{slice} kept {seal:?}");
             }
         }
 

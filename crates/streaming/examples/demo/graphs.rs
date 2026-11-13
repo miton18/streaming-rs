@@ -26,7 +26,7 @@ use streaming::{
     App,
     core::{
         Clock, Context, GraphBuilder, GraphSettings, Keyed, OpError, Operator, Pipe, Position, Sink, SinkPipe, Source,
-        SourcePipe, SystemClock, Transformer, datum,
+        SourcePipe, StatelessFilterMap, SystemClock, Transformer, datum,
         stdops::{Count, Sliding, Tumbling},
     },
     moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider},
@@ -159,12 +159,10 @@ impl Source for Generator {
 #[operator("demo/decode@1")]
 pub struct Decode;
 
-impl Transformer<Vec<u8>> for Decode {
+impl StatelessFilterMap<Vec<u8>> for Decode {
     type Out = Event;
 
-    fn transform(&self, input: Pipe<Vec<u8>>) -> Pipe<Event> {
-        input.filter_map(|bytes| serde_json::from_slice::<Event>(bytes).ok())
-    }
+    fn apply(&self, bytes: &Vec<u8>) -> Option<Event> { serde_json::from_slice(bytes).ok() }
 }
 
 /// Groups events by user.
@@ -273,7 +271,7 @@ fn count_per_key(settings: GraphSettings) -> GraphBuilder {
             keys: 50,
         },
     );
-    let decoded = graph.then(events, "decode", Decode);
+    let decoded = graph.filter_map(events, "decode", Decode);
     let by_user = graph.then(decoded, "by-user", ByUser);
     let windows = graph.then(by_user, "window", Tumbling::of(Duration::from_secs(10)));
     let counts = graph.then(windows, "count", Count);
@@ -296,7 +294,7 @@ fn clicks(settings: GraphSettings) -> GraphBuilder {
             keys: 12,
         },
     );
-    let decoded = graph.then(clicks, "decode", Decode);
+    let decoded = graph.filter_map(clicks, "decode", Decode);
     let by_user = graph.then(decoded, "by-user", ByUser);
     let windows = graph.then(
         by_user,
