@@ -172,16 +172,33 @@ let scaled = graph.map(numbers, "scale", Scale { factor: 3 });
 ```
 
 `StatelessFilterMap` is the same, but `apply` returns `Option<Out>`, and
-`None` drops the element. The demonstration decodes JSON this way:
+`None` drops the element:
 
 ```rust
-impl StatelessFilterMap<Vec<u8>> for Decode {
-    type Out = Event;
-    fn apply(&self, bytes: &Vec<u8>) -> Option<Event> { serde_json::from_slice(bytes).ok() }
+impl StatelessFilterMap<String> for Parse {
+    type Out = u64;
+    fn apply(&self, text: &String) -> Option<u64> { text.parse().ok() }
+}
+
+let numbers = graph.filter_map(texts, "parse", Parse);
+```
+
+`json_decoder!` declares one decoding JSON, from `Vec<u8>` or `String`, into a
+type of the application's, under a reference the application names; what
+does not decode is dropped. The demonstration decodes its events this way:
+
+```rust
+json_decoder! {
+    /// Decodes a JSON event.
+    pub struct Decode("demo/decode@1") -> Event;
 }
 
 let decoded = graph.filter_map(events, "decode", Decode);
 ```
+
+A generic `JsonDecoder<T>` would have one reference for every `T`: the
+registry keeps one factory per reference and input type, so two graphs
+decoding into two types would share one.
 
 The operator must be `Clone`. The node is an ordinary map, stored and shown
 under the operator's own reference and configuration.
@@ -286,6 +303,23 @@ A sink built on an existing `SinkConnector` hands it the batches with
 `input.write_with(&connector)`, as the Warp 10 and Pulsar sinks do.
 `impl<T> Sink<T> for Archive` makes a sink of any type.
 
+### Split: one branch per element
+
+```rust
+impl Split<Event> for Check {
+    fn branch(&self, event: &Event) -> usize { usize::from(event.amount < 0.0) }
+}
+
+let [valid, invalid] = graph.split(decoded, "check", Check, ["valid", "invalid"]);
+```
+
+`branch` returns an index into the names given to `split`; an index with no
+branch drops the element. The split node runs the operator once per element
+and wraps it in a `Routed<T>` (its branch and an `Arc` of the element, never
+copied); each `std/branch@1` node keeps its own and unwraps them. The routing
+and its parameters live in one node: changing them through the API cannot
+make two branches disagree. Every branch carries the type of what was split.
+
 ## Building a graph
 
 `GraphBuilder` connects typed nodes and registers the operators it names:
@@ -295,6 +329,8 @@ A sink built on an existing `SinkConnector` hands it the batches with
 | `source(id, source)` | a source node; gives `Node<S::Out>` |
 | `map(upstream, id, op)` | a `StatelessTransformer` |
 | `filter_map(upstream, id, op)` | a `StatelessFilterMap` |
+| `union(inputs, id)` | a `std/union@1` node fed by every node of `inputs`, all of one type; gives that type |
+| `split(upstream, id, op, [names])` | a node running a `Split` once per element, and one `std/branch@1` node per name, `<id>-<name>`; gives one `Node` per branch, of the type of `upstream` |
 | `then(upstream, id, transformer)` | any `Transformer` |
 | `sink(upstream, id, sink)` | a sink |
 | `edge(from, to)` | one more edge: a node fed by several others (types checked when the application starts, not by the compiler) |
@@ -325,6 +361,8 @@ topic, through a durable Failover subscription.
 | Reference | Crate (feature) | In → Out | Parameters |
 |---|---|---|---|
 | `std/identity@1` | `streaming-core` | any → same | none |
+| `std/union@1` | `streaming-core` | any → same, from several inputs | none |
+| `std/branch@1` | `streaming-core` | `Routed<T>` → `T` | `branch`, fixed by the code; added by `GraphBuilder::split`, registered for its type only |
 | `std/tumbling@1` | `streaming-core` | `Keyed<T>` → `Windows<T>` | `size` (≥ 1 ms), `allowedLateness` (default `0s`) |
 | `std/sliding@1` | `streaming-core` | `Keyed<T>` → `Windows<T>` | `size`, `slide` (≤ `size`), `allowedLateness` |
 | `std/count@1` | `streaming-core` | `Windows<T>` → `Windowed<u64>` | none |
@@ -347,11 +385,6 @@ topic, through a durable Failover subscription.
 
 Being built in other threads of work, and not on `main`:
 
-- **`union` and `split`**: several inputs merged into one node with types the
-  compiler checks (today `edge` does it, checked at start only), and several
-  outputs chosen by a predicate (side outputs, late records among them).
-- **A typed JSON decoder**: bytes to any `T: Deserialize`, dropping what does
-  not parse.
 - **Warp 10 behind a feature flag**, as Pulsar already is.
 - **`std/batch@1` and `std/flatten@1`**: gather elements into a `Vec<A>` until
   a maximum wait (required) or an optional maximum size, flushed at every
@@ -359,5 +392,6 @@ Being built in other threads of work, and not on `main`:
   `Vec<B>` given back one element at a time. They come beside the
   event-time windows, not instead of them.
 
-Not started: session windows, joins, a keyed process function with timers,
+Not started: a dedicated output for late records or for what a decoder
+refuses, session windows, joins, a keyed process function with timers,
 and standard aggregates beyond `count`.
