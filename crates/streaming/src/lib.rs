@@ -98,12 +98,12 @@ use std::{
 pub use streaming_api as api;
 use streaming_api::{
     ApiConfig, ApiState,
-    control::{self, Publisher},
+    control::{self, ConfigCheck, IgnoredOverride, Publisher},
 };
 pub use streaming_core as core;
 use streaming_core::{
-    Clock, DynKv, EnvSecrets, GraphBuilder, GraphKey, GraphSpec, Kv, MemKv, Operators, Registry, SecretProvider,
-    Shared, SystemClock, TenantId, WorkerId,
+    Clock, DynKv, EnvSecrets, GraphBuilder, GraphKey, GraphSpec, Kv, MemKv, OpError, Operators, Registry,
+    SecretProvider, Shared, SystemClock, TenantId, WorkerId,
 };
 use streaming_kv_redis::{RedisConfig, RedisKv};
 #[cfg(feature = "pulsar")]
@@ -214,6 +214,22 @@ impl App {
         (registry, problems)
     }
 
+    /// What the API asks before it stores a configuration: whether the
+    /// operator takes it, for the reasons [`App::check`] goes by. An operator
+    /// this binary does not have belongs to another one, which is its judge.
+    fn config_check(&self) -> ConfigCheck {
+        let registry = Arc::new(self.registry());
+        Arc::new(move |op, fed, config| match registry.get_for(op, fed) {
+            Some(_) => registry.accepts(op, fed, config).map_err(|error| match error {
+                // The answer already says a configuration is refused, and
+                // names the node: the operator's own words are enough.
+                OpError::Config(why) => why.strip_prefix(&format!("{op}: ")).unwrap_or(&why).to_owned(),
+                other => other.to_string(),
+            }),
+            None => Ok(()),
+        })
+    }
+
     /// Why the application cannot run: a declaration that is invalid, or a
     /// graph that does not fit its operators.
     ///
@@ -315,10 +331,23 @@ impl App {
                  Stepping aside from it until every worker runs this binary"
             );
         }
-        for (graph, node, field) in &publication.ignored_overrides {
-            eprintln!(
-                "  graph {graph}: node {node} no longer exposes `{field}`, its value set through the API is not applied"
-            );
+        for IgnoredOverride {
+            graph,
+            node,
+            field,
+            refusal,
+        } in &publication.ignored_overrides
+        {
+            match refusal {
+                None => eprintln!(
+                    "  graph {graph}: node {node} no longer exposes `{field}`, its value set through the API is not \
+                     applied"
+                ),
+                Some(refusal) => eprintln!(
+                    "  graph {graph}: node {node} no longer takes the value set through the API for `{field}` \
+                     ({refusal}), it is not applied"
+                ),
+            }
         }
         Ok(())
     }
@@ -607,6 +636,7 @@ async fn standalone(
             })
         })),
         config: ApiConfig::default(),
+        accepts: Some(app.config_check()),
     };
     let api = tokio::spawn(streaming_api::serve(
         listener,
@@ -675,6 +705,7 @@ async fn worker(
                 clock,
                 kv_stats: None,
                 config: ApiConfig::default(),
+                accepts: Some(app.config_check()),
             },
             shutdown.clone().cancelled_owned(),
         )));
@@ -730,6 +761,22 @@ mod tests {
         let windows = graph.then(events, window, Tumbling::of(std::time::Duration::from_secs(5)));
         graph.then(windows, "count", Count);
         graph
+    }
+
+    #[test]
+    fn the_api_asks_the_operators_of_the_application() {
+        let accepts = App::new().config_check();
+        let op = |name: &str| streaming_core::OpRef::new(name).unwrap();
+        let sliding = |slide: &str| serde_json::json!({"size": "10s", "slide": slide});
+        assert_eq!(accepts(&op("std/sliding@1"), None, &sliding("5s")), Ok(()));
+        // What no description of a parameter tells: two fields that do not
+        // go together.
+        assert_eq!(
+            accepts(&op("std/sliding@1"), None, &sliding("20s")),
+            Err("`slide` must not exceed `size`".to_owned())
+        );
+        // An operator of another binary is not this one's to judge.
+        assert_eq!(accepts(&op("other/unknown@1"), None, &sliding("20s")), Ok(()));
     }
 
     fn problems(app: &App) -> String { app.check().expect_err("the application is refused").to_string() }

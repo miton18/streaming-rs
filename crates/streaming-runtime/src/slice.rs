@@ -744,11 +744,18 @@ async fn run_source<P: Providers>(
                 }
                 match open.poll(max_batch - polled.len(), deadline - now).await {
                     Ok(more) => {
+                        let before = polled.len();
                         for record in more {
                             if last.is_none_or(|seen| record.position > seen) {
                                 last = Some(record.position);
                                 polled.push(record);
                             }
+                        }
+                        if polled.len() == before {
+                            // Nothing new: a source redelivering faster than
+                            // it moves on would keep this loop going for ever
+                            // under a clock that only moves when awaited.
+                            break;
                         }
                     }
                     Err(error) => {

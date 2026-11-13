@@ -630,6 +630,32 @@ class NodePanel {
  * its catalog entry describes); PATCH .../nodes/<node>/config. The other
  * fields are set by the code of the application.
  */
+/** The bounds of a parameter in a few words, or null when it has none. */
+function boundsOf(param) {
+  const shown = (bound) => (typeof bound === 'string' ? bound : JSON.stringify(bound));
+  const min = param.min ?? null;
+  const max = param.max ?? null;
+  if (min !== null && max !== null) return `de ${shown(min)} à ${shown(max)}`;
+  if (min !== null) return `au moins ${shown(min)}`;
+  if (max !== null) return `au plus ${shown(max)}`;
+  return null;
+}
+
+const KINDS_FR = { integer: 'entier', number: 'nombre', boolean: 'booléen', text: 'texte', duration: 'durée (par exemple 5m)', secret: 'secret', json: 'JSON' };
+
+/** Why the API refused the value of a field, in a few words, or null for another error. */
+function refusalOf(error) {
+  const c = error.context || {};
+  const shown = (value) => (typeof value === 'string' ? value : JSON.stringify(value));
+  switch (error.code) {
+    case 'NODE_FIELD_WRONG_KIND': return `type attendu : ${KINDS_FR[c.kind] || c.kind}`;
+    case 'NODE_FIELD_NOT_A_CHOICE': return `valeurs possibles : ${(c.choices || []).join(', ')}`;
+    case 'NODE_FIELD_BELOW_MIN': return `au moins ${shown(c.min)}`;
+    case 'NODE_FIELD_ABOVE_MAX': return `au plus ${shown(c.max)}`;
+    default: return null;
+  }
+}
+
 class ConfigForm {
   constructor(view) {
     this.view = view;
@@ -702,14 +728,14 @@ class ConfigForm {
       : param.kind === 'boolean' ? 'bool'
         : param.kind === 'json' || param.kind === 'secret' || (value !== undefined && value !== null && typeof value === 'object') ? 'json'
           : 'string';
-    const f = { key, kind, original: value };
+    const f = { key, kind, original: value, param };
     const id = `cfg-${this.node}-${key}`.replace(/[^a-zA-Z0-9_-]/g, '_');
     const onInput = () => { f.errEl.hidden = true; toggle(f.input, 'invalid', false); this.refreshState(); };
     if (kind === 'bool') {
       f.input = h('input', { type: 'checkbox', id, checked: value === true, onchange: onInput });
       f.wrap = h('label', { class: 'toggle', for: id }, f.input, h('span', { class: 'track' }), f.lbl = h('span', null, value ? 'true' : 'false'));
     } else if (kind === 'number') {
-      f.input = h('input', { class: 'input mono', type: 'number', id, step: param.kind === 'integer' ? '1' : 'any', value: value === undefined ? '' : String(value), oninput: onInput });
+      f.input = h('input', { class: 'input mono', type: 'number', id, step: param.kind === 'integer' ? '1' : 'any', min: typeof param.min === 'number' ? String(param.min) : null, max: typeof param.max === 'number' ? String(param.max) : null, value: value === undefined ? '' : String(value), oninput: onInput });
       f.wrap = f.input;
     } else if (kind === 'string' && param.choices?.length) {
       f.input = h('select', { class: 'input', id, onchange: onInput },
@@ -730,6 +756,7 @@ class ConfigForm {
       h('label', { class: 'fl', for: id, title: param.description || '' }, h('span', null, key), h('span', { class: 'ty' }, param.required ? `${tyLabel} · requis` : tyLabel)),
       f.wrap,
       param.description ? h('div', { class: 'muted', style: { fontSize: '12px' } }, param.description) : null,
+      boundsOf(param) ? h('div', { class: 'muted', style: { fontSize: '12px' } }, `Valeurs acceptées : ${boundsOf(param)}`) : null,
       f.errEl = h('div', { class: 'ferr', hidden: true }));
     this.fields.push(f);
     this.r.fields.appendChild(f.row);
@@ -745,6 +772,13 @@ class ConfigForm {
       if (raw === '' && f.original === undefined) return { ok: true, value: undefined, changed: false };
       if (raw === '' || Number.isNaN(Number(raw))) return { ok: false, error: 'nombre attendu', changed: true };
       const v = Number(raw);
+      // what the API would refuse, said before asking it
+      const { min, max } = f.param;
+      if (v !== f.original) {
+        if (f.param.kind === 'integer' && !Number.isInteger(v)) return { ok: false, error: 'entier attendu', changed: true };
+        if (typeof min === 'number' && v < min) return { ok: false, error: `au moins ${min}`, changed: true };
+        if (typeof max === 'number' && v > max) return { ok: false, error: `au plus ${max}`, changed: true };
+      }
       return { ok: true, value: v, changed: v !== f.original };
     }
     if (f.kind === 'string') {
@@ -802,6 +836,10 @@ class ConfigForm {
       r.error.hidden = false;
       text(r.errText, e.message);
       text(r.status, e.status ? `HTTP ${e.status}` : '');
+      // a refusal that names a field is shown on it as well
+      const refused = this.fields.find((f) => f.key === e.context?.field);
+      const why = refused && refusalOf(e);
+      if (why) { refused.errEl.hidden = false; text(refused.errEl, why); toggle(refused.input, 'invalid', true); }
       this.refreshState();
     }
   }

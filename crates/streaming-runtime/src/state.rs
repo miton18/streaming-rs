@@ -330,15 +330,12 @@ pub(crate) async fn try_commit(
         slice: slice.to_string(),
         reason: format!("cannot encode epoch {}: {e}", record.epoch),
     })?;
-    if !kv.hsetnx(&log, &field, bytes).await? {
+    if !kv.hsetnx(&log, &field, bytes.clone()).await? {
         // The field exists: ours from an attempt whose reply was lost, or
-        // somebody else's (possibly already emptied or deleted).
-        let ours = match kv.hget(&log, &field).await? {
-            Some(existing) if !existing.is_empty() => {
-                postcard::from_bytes::<CommitRecord>(&existing).is_ok_and(|existing| existing.owner == record.owner)
-            }
-            _ => false,
-        };
+        // somebody else's (possibly already emptied or deleted). Ours is
+        // this very record, byte for byte: an owner token alone does not
+        // tell this attempt from another instance that drew the same token.
+        let ours = kv.hget(&log, &field).await?.is_some_and(|existing| existing == bytes);
         if !ours && !planted(Mutant::CommitWithoutFencing) {
             return Ok(CommitOutcome::Fenced);
         }
@@ -699,6 +696,26 @@ mod tests {
             );
             let log = read_log(&kv, &slice()).await.unwrap();
             assert_eq!(log.head(), Some(&ours));
+        });
+    }
+
+    #[test]
+    fn an_instance_that_drew_the_token_of_another_is_fenced() {
+        block_on(async {
+            let kv = MemKv::new();
+            // The commit of an instance, landing after the instance died...
+            let late = record(1, "worker-a#1", &[("k", 1, 0)]);
+            assert_eq!(
+                try_commit(&kv, &slice(), &late).await.unwrap(),
+                CommitOutcome::Committed
+            );
+            // ...is not taken for its own by the next instance of the same
+            // worker, which drew the same token and read further.
+            let mut next = record(1, "worker-a#1", &[("k", 2, 0)]);
+            next.position = Some(Position(0, 11, 0));
+            assert_eq!(try_commit(&kv, &slice(), &next).await.unwrap(), CommitOutcome::Fenced);
+            let log = read_log(&kv, &slice()).await.unwrap();
+            assert_eq!(log.head(), Some(&late));
         });
     }
 

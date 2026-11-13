@@ -542,7 +542,8 @@ async fn patch_config(
 ) -> ApiResult<VersionReply> {
     let key = graph_key(&tenant, &graph)?;
     let node = NodeId::new(node)?;
-    let version = control::patch_node_config(&*state.kv, &*state.clock, &key, &node, patch).await?;
+    let version =
+        control::patch_node_config(&*state.kv, &*state.clock, state.accepts.as_ref(), &key, &node, patch).await?;
     Ok(axum::Json(VersionReply { version }))
 }
 

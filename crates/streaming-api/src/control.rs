@@ -11,10 +11,10 @@
 //! last writer wins.
 
 use serde_json::{Map, Value};
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use streaming_core::{
-    Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, NodeSpec, OpDescriptor, SpecError, TenantId, Topology,
-    WorkerId,
+    Catalog, Clock, GraphKey, GraphSpec, Kv, KvError, NodeId, NodeSpec, OpDescriptor, OpRef, ParamRefusal, ParamSpec,
+    SpecError, TenantId, Topology, TypeTag, WorkerId,
     control::{
         Declaration, DesiredState, GraphIndexEntry, GraphPlan, MemberInfo, Placement, RunState, TenantRecord,
         WorkerSnapshot,
@@ -69,6 +69,33 @@ pub enum ControlError {
         node: NodeId,
         /// The field.
         field: String,
+    },
+    /// The value given to a configuration field is not one its parameter
+    /// describes: of another kind, none of its choices, or beyond its bounds
+    /// (HTTP 400).
+    #[error(
+        "the configuration field `{field}` of node `{node}` of graph `{graph}` does not take this value: {refusal}"
+    )]
+    FieldRefused {
+        /// The graph.
+        graph: GraphKey,
+        /// The node.
+        node: NodeId,
+        /// The field.
+        field: String,
+        /// What its parameter says of the value.
+        refusal: Box<ParamRefusal>,
+    },
+    /// The operator of the node refuses the configuration it would have
+    /// (HTTP 400).
+    #[error("the operator of node `{node}` of graph `{graph}` refuses this configuration: {detail}")]
+    ConfigRefused {
+        /// The graph.
+        graph: GraphKey,
+        /// The node.
+        node: NodeId,
+        /// The operator's explanation.
+        detail: String,
     },
     /// A graph belongs to a tenant that was not created (HTTP 404).
     #[error("tenant `{0}` does not exist: declare it with the graphs of its code")]
@@ -411,25 +438,46 @@ async fn load_code(kv: &dyn Kv, graph: &GraphKey) -> Result<GraphSpec, ControlEr
 
 /// Whether the operator of `node` exposes `field`: whether it lists it among
 /// the parameters it describes.
-fn exposes(catalog: &Catalog, node: &NodeSpec, field: &str) -> bool {
-    catalog
-        .get(&node.op)
-        .is_some_and(|descriptor| descriptor.params.iter().any(|param| param.name == field))
+/// The parameter of the operator of `node` that `field` is, if it exposes it.
+fn param<'a>(catalog: &'a Catalog, node: &NodeSpec, field: &str) -> Option<&'a ParamSpec> {
+    catalog.get(&node.op)?.params.iter().find(|param| param.name == field)
+}
+
+/// A field set through the API that a publication did not apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredOverride {
+    /// The graph.
+    pub graph: GraphKey,
+    /// The node.
+    pub node: NodeId,
+    /// The field.
+    pub field: String,
+    /// Why its parameter no longer takes the value stored, as its
+    /// description tells. `None` when the code no longer has the node, or
+    /// its operator the field.
+    pub refusal: Option<ParamRefusal>,
 }
 
 /// `code` with `overrides` laid over the configurations of its nodes. A field
-/// its operator no longer exposes, or a node the code no longer has, is left
-/// out and returned, as `(node, field)`.
+/// its operator no longer exposes, a value its parameter no longer takes
+/// (the code changed its kind, its choices or its bounds), or a node the
+/// code no longer has, is left out and returned.
 fn lay_overrides(
     catalog: &Catalog,
     mut code: GraphSpec,
     overrides: &Overrides,
-) -> Result<(GraphSpec, Vec<(NodeId, String)>), ControlError> {
+) -> Result<(GraphSpec, Vec<IgnoredOverride>), ControlError> {
     let mut ignored = Vec::new();
     let graph = code.key();
+    let left_out = |node: &NodeId, field: &str, refusal| IgnoredOverride {
+        graph: graph.clone(),
+        node: node.clone(),
+        field: field.to_owned(),
+        refusal,
+    };
     for (node_id, fields) in overrides {
         let Some(node) = code.nodes.iter_mut().find(|node| &node.id == node_id) else {
-            ignored.extend(fields.keys().map(|field| (node_id.clone(), field.clone())));
+            ignored.extend(fields.keys().map(|field| left_out(node_id, field, None)));
             continue;
         };
         let mut config = match std::mem::take(&mut node.config) {
@@ -438,16 +486,18 @@ fn lay_overrides(
             // Not echoed back: a configuration may hold secrets.
             _ => {
                 return Err(ControlError::ConfigNotAnObject {
-                    graph,
+                    graph: graph.clone(),
                     node: node_id.clone(),
                 });
             }
         };
         for (field, value) in fields {
-            if exposes(catalog, node, field) {
-                config.insert(field.clone(), value.clone());
-            } else {
-                ignored.push((node_id.clone(), field.clone()));
+            match param(catalog, node, field).map(|param| param.refuses(value)) {
+                Some(None) => {
+                    config.insert(field.clone(), value.clone());
+                }
+                Some(refusal @ Some(_)) => ignored.push(left_out(node_id, field, refusal)),
+                None => ignored.push(left_out(node_id, field, None)),
             }
         }
         node.config = Value::Object(config);
@@ -492,8 +542,8 @@ pub struct Publication {
     /// its binary.
     pub aside: Vec<GraphKey>,
     /// Configuration fields set through the API that the code no longer
-    /// exposes, as `(graph, node, field)`: they are not applied.
-    pub ignored_overrides: Vec<(GraphKey, NodeId, String)>,
+    /// exposes, or no longer takes the value of: they are not applied.
+    pub ignored_overrides: Vec<IgnoredOverride>,
 }
 
 /// Who publishes.
@@ -675,9 +725,7 @@ pub async fn publish(
             kv.set_json(&keys::graph_code(&key), &code).await?;
         }
         let (spec, ignored) = lay_overrides(catalog, code, &load_overrides(kv, &key).await?)?;
-        publication
-            .ignored_overrides
-            .extend(ignored.into_iter().map(|(node, field)| (key.clone(), node, field)));
+        publication.ignored_overrides.extend(ignored);
         let stored = match load_spec(kv, &key).await {
             Ok(stored) => stored,
             Err(ControlError::Kv(KvError::Malformed { .. })) => None,
@@ -834,18 +882,28 @@ pub async fn set_node_paused(
     bump_epoch(kv).await
 }
 
+/// Asks the code of the application whether an operator takes a
+/// configuration, fed with values of the given type: what
+/// [`streaming_core::Registry::accepts`] says, in words when it refuses. An
+/// operator this binary does not have is not its to judge, and is accepted.
+pub type ConfigCheck = Arc<dyn Fn(&OpRef, Option<&TypeTag>, &Value) -> Result<(), String> + Send + Sync>;
+
 /// Set or clear some exposed configuration fields of `node`: each field of
 /// `patch` is laid over the configuration the code gave the node, a `null`
 /// value going back to the code's. Only the fields its operator describes
-/// among its parameters can be set. The resulting description is validated
-/// and stored as a new version, which the workers restart the node's
-/// instances on. Returns the new version.
+/// among its parameters can be set, to values these descriptions take: of
+/// their kind, among their choices, within their bounds. With `accepts`, the
+/// operator itself is asked about the configuration the node would have,
+/// which covers what a description cannot tell. The resulting description is
+/// validated and stored as a new version, which the workers restart the
+/// node's instances on. Returns the new version.
 ///
 /// The fields are kept apart from the description, so that a new version of
 /// the code keeps them.
 pub async fn patch_node_config(
     kv: &dyn Kv,
     clock: &dyn Clock,
+    accepts: Option<&ConfigCheck>,
     graph: &GraphKey,
     node: &NodeId,
     patch: Map<String, Value>,
@@ -859,12 +917,20 @@ pub async fn patch_node_config(
         });
     };
     let catalog = load_catalog(kv).await?;
-    if let Some(field) = patch.keys().find(|field| !exposes(&catalog, code_node, field)) {
-        return Err(ControlError::FieldNotExposed {
-            graph: graph.clone(),
-            node: node.clone(),
-            field: field.clone(),
-        });
+    for (field, value) in &patch {
+        let (graph, node, field) = (graph.clone(), node.clone(), field.clone());
+        let Some(param) = param(&catalog, code_node, &field) else {
+            return Err(ControlError::FieldNotExposed { graph, node, field });
+        };
+        // The value is not echoed back: it may be a secret.
+        if let Some(refusal) = param.refuses(value) {
+            return Err(ControlError::FieldRefused {
+                graph,
+                node,
+                field,
+                refusal: Box::new(refusal),
+            });
+        }
     }
     let mut overrides = load_overrides(kv, graph).await?;
     let fields = overrides.entry(node.clone()).or_default();
@@ -877,7 +943,19 @@ pub async fn patch_node_config(
     }
     let fields = fields.clone();
     let (spec, _) = lay_overrides(&catalog, code, &overrides)?;
-    Topology::build(&spec, &catalog)?;
+    let topology = Topology::build(&spec, &catalog)?;
+    if let (Some(accepts), Some(patched)) = (accepts, spec.node(node)) {
+        let fed = topology
+            .inputs
+            .get(node)
+            .and_then(|inputs| inputs.first())
+            .and_then(|input| topology.types.get(input));
+        accepts(&patched.op, fed, &patched.config).map_err(|detail| ControlError::ConfigRefused {
+            graph: graph.clone(),
+            node: node.clone(),
+            detail,
+        })?;
+    }
     let field = node.to_string();
     if fields.is_empty() {
         kv.hdel(&keys::graph_overrides(graph), vec![field]).await?;
