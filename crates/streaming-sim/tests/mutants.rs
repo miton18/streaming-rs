@@ -55,7 +55,8 @@ fn every_planted_bug_is_noticed() {
     // fighting over every slice; the same with three times the faults and an
     // operator; long stalls, after which a worker resumes far behind; a store
     // applying commands long after their sender gave up; a source whose
-    // partitions come and go, with and without a fight; and an application
+    // partitions come and go, with and without a fight; the tightest gate,
+    // which keeps windows open across many epochs; and an application
     // redeployed while it runs, two binaries side by side, with and without
     // a placement to keep them apart; and a source that pushes into its pipe
     // now and then, asked over and over where its partitions end.
@@ -92,6 +93,14 @@ fn every_planted_bug_is_noticed() {
         Scenario {
             repartition: true,
             duel: true,
+            operator: true,
+            slide: Duration::from_millis(500),
+            ..Scenario::default()
+        },
+        Scenario {
+            max_pending_windows: 1,
+            duel: true,
+            operator: true,
             slide: Duration::from_millis(500),
             ..Scenario::default()
         },
