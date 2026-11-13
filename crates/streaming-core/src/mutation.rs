@@ -60,11 +60,14 @@ pub enum Mutant {
     /// the commits found emitted: an instance left behind may commit, then
     /// acknowledge, what the closing voids.
     CloseWithoutClaim,
+    /// The mark of a deleted graph goes as soon as its purge is over, so that
+    /// a log a late controller closes again is never swept.
+    ForgetPurgedSlices,
 }
 
 impl Mutant {
     /// Every mutant.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::CommitWithoutFencing,
         Self::CommitBelowTheSeal,
         Self::AckBeforeCommit,
@@ -82,6 +85,7 @@ impl Mutant {
         Self::RunWhatIsBeingDeleted,
         Self::ConfirmWithoutTheSink,
         Self::CloseWithoutClaim,
+        Self::ForgetPurgedSlices,
     ];
 }
 

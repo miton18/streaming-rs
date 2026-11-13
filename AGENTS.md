@@ -176,6 +176,16 @@ exactly-once.
     Workers follow the mark too: slices started again on the word of an
     entry written back would commit into logs whose seal the purge has
     removed, and the purge, which goes by the seals, would leave them.
+    The mark outlives the purge: its last pass writes into it the slices
+    and aggregates of the graph (`Purged`, merged with what an earlier
+    purge listed, the plan being gone when an entry written back has the
+    graph purged again) before removing the documents. A controller that
+    had read the plan before it went may still close a log after the
+    purge; two `gc_grace` later, the first controller to see the mark
+    without its graph reads the mark again (the one it read before the
+    index may predate the purge), deletes those logs, seals and window
+    indexes (deletes only, a call or two), then the mark. Planted bug:
+    `ForgetPurgedSlices`.
 11. **Control plane.** Not knowing who is alive is never being alone
     (`Membership::alive` returns `None` on a failed read). Read errors are
     never taken for absent documents.
@@ -268,7 +278,7 @@ the operators it names, `App` collects them).
 `streaming-core/tests/pipes.rs` holds the adapters to these points one by
 one; the simulation holds them under faults.
 
-`streaming_core::mutation` (shown as `streaming_runtime::mutation`) holds seventeen **planted bugs** in its bench, one per precaution
+`streaming_core::mutation` (shown as `streaming_runtime::mutation`) holds eighteen **planted bugs** in its bench, one per precaution
 above (`SIM_MUTANT=<name>` plants a single one). `CloseWithoutClaim` is
 noticed by the `Auditor`: closing a log without the claim voids its head, and
 a log that still holds fields but no head is history going backwards (every
@@ -362,7 +372,11 @@ The harness (`streaming-sim/src/lib.rs`):
   release in place landing after it; the release in place must take the
   graph back), and the graph leaves the code before it is deleted. Every run ends with an index entry written back by
   someone who had read it before the deletion, at once or just as the purge
-  has removed the first seal.
+  has removed the first seal, and with one log closed again by a late
+  controller once the purge is over (the sweep of point 10 must remove it).
+  From the end of the purge, anything written into the graph but such a
+  seal (`p:` fields only) is a violation: the sweep would otherwise hide a
+  slice still running (`DeleteWithoutClosing`, `RunWhatIsBeingDeleted`).
 - Moonpool specifics: the run stops when *any* workload returns, so auxiliary
   workloads wait on `ctx.shutdown()`; without pinned seeds each run explores
   new ones; a "did not settle" may be a configuration too slow for the
@@ -390,7 +404,15 @@ The harness (`streaming-sim/src/lib.rs`):
   bench, with `SIM_PIPED=1`, lasted over seven minutes before that; the
   handed reader did the same.
 
-Last validated state (SDK traits): the hand-written suite at 200 seeds per
+Last validated state (purge sweep): the hand-written suite at 100 seeds per
+scenario, 30 random configurations at five seeds, and the eighteen planted
+bugs over 80 runs each (ten bench scenarios, one of them with the tightest
+gate, `max_pending_windows: 1`): `ForgetPurgedSlices`, `DeleteWithoutClosing`,
+`DeleteByTheIndexEntry` and `AckBeforeCommit` in every run;
+`CommitBelowTheSeal` in 8, `ForgetAtOnce` in 7 and `JoinWithoutWatermark` in
+2, which stay the least noticed.
+
+Before that (SDK traits): the hand-written suite at 200 seeds per
 scenario and 40 random configurations at ten seeds; 2,700 runs of the bench's scenarios
 without a planted bug, half of them through a source that pushes, none
 lasting more than a fraction of a second; the seventeen planted bugs noticed
@@ -410,10 +432,7 @@ scenarios, the hand-written suite, 680 random configurations, and the four
 planted bugs of the declarations noticed one at a time (`RunAnotherDeclaration`
 and `AsideByTheIndexEntry` in nearly every deployment run,
 `DeleteByTheIndexEntry` in every run, `RunWhatIsBeingDeleted` in one run in
-six). One alarm was met once and not since: `the deleted graph left 5 keys`,
-seals only, on seed 2359436515542362806 of a random configuration whose seed
-was not kept. A controller taking over while another one ends the purge would
-close the logs again, and leave such seals: not established.
+six).
 
 ## Defects the simulation found (do not bring them back)
 
@@ -454,7 +473,14 @@ worker, dead, had sent under the same owner token and that landed late
 (`try_commit` went by the owner alone: the new instance acknowledged one
 record beyond what the log held; it now recognises its own record byte for
 byte, held by `an_instance_that_drew_the_token_of_another_is_fenced` in
-`state.rs`).
+`state.rs`); seals left by a deleted graph (`the deleted graph left 5 keys`,
+seen once on a random configuration): a controller that had read the plan
+before the purge removed it closed the logs again afterwards, and nothing
+went by them any more. The mark now keeps the list and sweeps it; the
+first versions of that fix lost the list when an index entry written back
+had the graph purged a second time, without its plan; needed several
+flawless store calls in a row to sweep; and swept by a mark read before the
+purge, removing the list it had just written.
 
 ## The HTTP API and its OpenAPI document
 

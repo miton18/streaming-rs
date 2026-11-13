@@ -304,6 +304,27 @@ async fn foreign_commit(
     })
 }
 
+/// What is wrong, if anything, with a commit that just landed in the log of
+/// `slice` under `field`, as for the deletion of its graph.
+///
+/// Once the purge is over (the plan is gone, the mark is still there), every
+/// instance had stopped: closing the logs fenced them, and what they had in
+/// flight landed during the grace the purge waited for. A commit now is a
+/// slice that went on running, and its log outlives the graph.
+async fn purged_commit(kv: &dyn Kv, slice: &SliceKey, field: &str) -> Option<String> {
+    if !field.starts_with("c:") {
+        return None;
+    }
+    let graph = slice.graph_key();
+    let marked = kv
+        .hget(keys::CLUSTER_DELETING, &graph.to_string())
+        .await
+        .ok()?
+        .is_some();
+    let planned = kv.get(&keys::graph_plan(&graph)).await.ok()?.is_some();
+    (marked && !planned).then(|| format!("slice {slice} committed {field} after the purge of its graph"))
+}
+
 /// A [`Kv`] that misbehaves the way a remote store does.
 pub struct ChaosKv<P: Providers> {
     env: Arc<SimEnv>,
@@ -417,6 +438,9 @@ impl<P: Providers> Kv for ChaosKv<P> {
             // Every commit is looked at the instant it takes effect.
             if written && let Some(slice) = slice_of_log(&key) {
                 if let Some(finding) = late_commit(kv.as_ref(), &slice, &field, &value).await {
+                    env.audit.lock().push(finding);
+                }
+                if let Some(finding) = purged_commit(kv.as_ref(), &slice, &field).await {
                     env.audit.lock().push(finding);
                 }
                 if let Some(declared) = &declared {
@@ -1936,6 +1960,29 @@ impl Workload for Driver {
             .await
             .map_err(failed)?;
         store.incr(keys::CLUSTER_EPOCH).await.map_err(failed)?;
+        // A controller that took over as the purge ended had read the plan
+        // before it went: its closing of one log lands just after the purge.
+        let seal = env
+            .kv
+            .keys()
+            .into_iter()
+            .find(|key| key.starts_with(&prefix) && key.ends_with(":log"))
+            .and_then(|log| log.strip_suffix(":log").map(|slice| format!("{slice}:seal")));
+        if let Some(seal) = seal {
+            let started = ctx.time().now();
+            while store
+                .hget(keys::CLUSTER_GRAPHS, &graph.to_string())
+                .await
+                .map_or(true, |entry| entry.is_some())
+                && ctx.time().now().saturating_sub(started) < Duration::from_secs(300)
+            {
+                let _ = ctx.time().sleep(Duration::from_millis(20)).await;
+            }
+            store
+                .hset(&seal, vec![(format!("p:{}", u64::MAX), b"1".to_vec())])
+                .await
+                .map_err(failed)?;
+        }
         let started = ctx.time().now();
         loop {
             let left: Vec<String> = env
@@ -1957,15 +2004,34 @@ impl Workload for Driver {
             if left.is_empty() && !indexed && !marked {
                 break;
             }
+            if !indexed {
+                // The purge is over. Nothing writes into the graph any more
+                // but a controller closing a log from a plan it read before
+                // the purge removed it: its seal, `p:` fields only, is for
+                // the sweep. Anything else is an instance still running,
+                // which the sweep would hide.
+                for key in &left {
+                    let closing = key.ends_with(":seal")
+                        && env
+                            .kv
+                            .hgetall(key)
+                            .await
+                            .is_ok_and(|fields| fields.iter().all(|(field, _)| field.starts_with("p:")));
+                    if !closing {
+                        dump(&env).await;
+                        return Err(violation(format!("{key} was written after the purge of its graph")));
+                    }
+                }
+            }
             if ctx.time().now().saturating_sub(started) > Duration::from_secs(300) {
                 dump(&env).await;
                 return Err(violation(format!(
-                    "the deleted graph left {} keys, e.g. {:?} (still indexed: {indexed})",
+                    "the deleted graph left {} keys, e.g. {:?} (still indexed: {indexed}, still marked: {marked})",
                     left.len(),
                     &left[..left.len().min(3)]
                 )));
             }
-            let _ = ctx.time().sleep(Duration::from_millis(500)).await;
+            let _ = ctx.time().sleep(Duration::from_millis(50)).await;
         }
         assert_sometimes!(true, "a deleted graph was purged");
         Ok(())
