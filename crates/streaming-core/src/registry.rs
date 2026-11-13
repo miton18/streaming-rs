@@ -11,7 +11,7 @@ use crate::{
         Aggregator, DynAggregator, DynKey, DynMap, OpError, SinkConnector, SourceConnector, TypedAggregator,
         WindowAssigner, downcast,
     },
-    param::Secret,
+    param::{Param, Secret},
     pipe::{self, Built, Sink, Source, Transformer},
 };
 use moonpool_core::{Providers, TimeProvider};
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     any::{Any, TypeId},
+    cmp::Ordering,
     collections::{BTreeMap, HashMap},
     fmt,
     sync::Arc,
@@ -196,6 +197,45 @@ pub struct ParamSpec {
     /// texts. Empty when any value of `kind` is.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<String>,
+    /// The least value accepted, as a configuration holds it (`1`, `"5s"`).
+    /// Absent when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<serde_json::Value>,
+    /// The greatest value accepted, as a configuration holds it. Absent when
+    /// there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<serde_json::Value>,
+}
+
+/// Why a parameter cannot be given a value, as far as its description tells:
+/// see [`ParamSpec::refuses`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamRefusal {
+    /// The value is not of the kind of the parameter, which is given.
+    Kind(String),
+    /// The value is none of the choices of the parameter, which are given.
+    Choice(Vec<String>),
+    /// The value is below the least one accepted, which is given.
+    BelowMin(Value),
+    /// The value is above the greatest one accepted, which is given.
+    AboveMax(Value),
+}
+
+impl ParamRefusal {
+    /// A bound as a person writes it: a text without its quotes.
+    #[must_use]
+    pub fn shown(bound: &Value) -> String { bound.as_str().map_or_else(|| bound.to_string(), str::to_owned) }
+}
+
+impl fmt::Display for ParamRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Kind(kind) => write!(f, "it is not of kind `{kind}`"),
+            Self::Choice(choices) => write!(f, "it is none of `{}`", choices.join("`, `")),
+            Self::BelowMin(min) => write!(f, "it is below {}", Self::shown(min)),
+            Self::AboveMax(max) => write!(f, "it is above {}", Self::shown(max)),
+        }
+    }
 }
 
 impl ParamSpec {
@@ -209,6 +249,8 @@ impl ParamSpec {
             default: None,
             description: description.to_owned(),
             choices: Vec::new(),
+            min: None,
+            max: None,
         }
     }
 
@@ -231,6 +273,78 @@ impl ParamSpec {
     pub fn choices<'a>(mut self, choices: impl IntoIterator<Item = &'a str>) -> Self {
         self.choices = choices.into_iter().map(str::to_owned).collect();
         self
+    }
+
+    /// Give the least value accepted, as a configuration holds it.
+    #[must_use]
+    pub fn min(mut self, value: impl Into<Value>) -> Self {
+        self.min = Some(value.into());
+        self
+    }
+
+    /// Give the greatest value accepted, as a configuration holds it.
+    #[must_use]
+    pub fn max(mut self, value: impl Into<Value>) -> Self {
+        self.max = Some(value.into());
+        self
+    }
+
+    /// Why a configuration cannot hold `value` for this parameter, as far as
+    /// the description tells: its kind, its choices and its bounds. `None`
+    /// is not a promise that the operator takes it, which only its code
+    /// knows ([`Registry::accepts`]); a kind this crate does not know, and a
+    /// bound that does not compare with the value, refuse nothing. `null`
+    /// stands for no value, and is never refused.
+    #[must_use]
+    pub fn refuses(&self, value: &Value) -> Option<ParamRefusal> {
+        if value.is_null() {
+            return None;
+        }
+        let of_kind = match self.kind.as_str() {
+            "integer" => value.is_i64() || value.is_u64(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "text" => value.is_string(),
+            "duration" => Duration::from_json(value).is_ok(),
+            "secret" => Secret::from_json(value).is_ok(),
+            _ => true,
+        };
+        if !of_kind {
+            return Some(ParamRefusal::Kind(self.kind.clone()));
+        }
+        if !self.choices.is_empty()
+            && !value
+                .as_str()
+                .is_some_and(|text| self.choices.iter().any(|choice| choice == text))
+        {
+            return Some(ParamRefusal::Choice(self.choices.clone()));
+        }
+        let against = |bound: &Option<Value>| bound.as_ref().and_then(|bound| self.order(value, bound));
+        if against(&self.min) == Some(Ordering::Less) {
+            return self.min.clone().map(ParamRefusal::BelowMin);
+        }
+        if against(&self.max) == Some(Ordering::Greater) {
+            return self.max.clone().map(ParamRefusal::AboveMax);
+        }
+        None
+    }
+
+    /// How two values of this parameter compare, when its kind has an order
+    /// and both are of it.
+    fn order(&self, a: &Value, b: &Value) -> Option<Ordering> {
+        let integer = |value: &Value| {
+            value
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| value.as_u64().map(i128::from))
+        };
+        match self.kind.as_str() {
+            "integer" => Some(integer(a)?.cmp(&integer(b)?)),
+            "number" => a.as_f64()?.partial_cmp(&b.as_f64()?),
+            "duration" => Some(Duration::from_json(a).ok()?.cmp(&Duration::from_json(b).ok()?)),
+            "text" => Some(a.as_str()?.cmp(b.as_str()?)),
+            _ => None,
+        }
     }
 }
 

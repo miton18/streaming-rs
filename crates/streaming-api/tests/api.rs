@@ -13,11 +13,11 @@ use std::sync::{
 };
 use streaming_api::{
     ApiConfig, ApiState,
-    control::{self, ControlError, Publication},
+    control::{self, ControlError, IgnoredOverride, Publication},
     router,
 };
 use streaming_core::{
-    Clock, DynKv, GraphKey, GraphSpec, MemKv, OpDescriptor, OpKind, OpRef, ParamSpec, Registry, TypeTag,
+    Clock, DynKv, GraphKey, GraphSpec, MemKv, OpDescriptor, OpKind, OpRef, ParamRefusal, ParamSpec, Registry, TypeTag,
     control::{
         ActorKind, ActorSnapshot, ActorState, DesiredState, GraphIndexEntry, GraphPlan, Load, MemberInfo, OutputRow,
         Placement, RunState, SliceSnapshot, TenantRecord, TenantUsage, WorkerSnapshot,
@@ -148,8 +148,12 @@ fn descriptor(op: &str, kind: OpKind) -> OpDescriptor {
     // The parameters the fake operators expose.
     let params = match op {
         "t/src@1" => vec![
-            ParamSpec::new("topic", "string", "Topic."),
-            ParamSpec::new("rate", "integer", "Records per second."),
+            ParamSpec::new("topic", "text", "Topic."),
+            ParamSpec::new("rate", "integer", "Records per second.")
+                .min(1)
+                .max(1000),
+            ParamSpec::new("mode", "text", "How it reads.").choices(["fast", "safe"]),
+            ParamSpec::new("linger", "duration", "How long it waits for a full batch.").min("10ms"),
         ],
         "t/key@1" => vec![ParamSpec::new("by", "string", "Field.")],
         _ => Vec::new(),
@@ -163,6 +167,15 @@ fn descriptor(op: &str, kind: OpKind) -> OpDescriptor {
         params,
         signatures: Vec::new(),
     }
+}
+
+/// What the code of the fake operators refuses beyond what their parameters
+/// tell: a source does not linger in `fast` mode.
+fn operators_accept(op: &OpRef, _fed: Option<&TypeTag>, config: &Value) -> Result<(), String> {
+    if op.to_string() == "t/src@1" && config["mode"] == "fast" && !config["linger"].is_null() {
+        return Err("`linger` only goes with the `safe` mode".to_owned());
+    }
+    Ok(())
 }
 
 impl Env {
@@ -201,6 +214,7 @@ impl Env {
                 json!({"keys": s.keys, "bytes": s.bytes, "reads": s.reads, "writes": s.writes})
             })),
             config: ApiConfig::default(),
+            accepts: Some(Arc::new(operators_accept)),
         };
         Self {
             kv: kv.clone(),
@@ -997,12 +1011,182 @@ async fn fields_the_code_no_longer_exposes_are_not_applied() {
     let publication = env.put_spec(spec(changed)).await;
     assert_eq!(
         publication.ignored_overrides,
-        [(gk("g"), "events".parse().unwrap(), "rate".to_owned())]
+        [IgnoredOverride {
+            graph: gk("g"),
+            node: "events".parse().unwrap(),
+            field: "rate".to_owned(),
+            refusal: None,
+        }]
     );
     let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
     assert_eq!(
         detail["spec"]["nodes"][0]["config"],
         json!({"topic": "other", "rate": 10})
+    );
+}
+
+#[tokio::test]
+async fn a_field_only_takes_what_its_parameter_describes() {
+    let env = Env::new().await;
+    env.put_graph("g").await;
+    let config = "/api/v1/tenants/acme/graphs/g/nodes/events/config";
+    let epoch = env.epoch().await;
+    let context = |field: &str| json!({"tenant": "acme", "graph": "g", "node": "events", "field": field});
+    let with = |field: &str, key: &str, value: Value| {
+        let mut context = context(field);
+        context[key] = value;
+        context
+    };
+    for (patch, code, context, message) in [
+        (
+            json!({"rate": "fast"}),
+            "NODE_FIELD_WRONG_KIND",
+            with("rate", "kind", json!("integer")),
+            "the configuration field `rate` of node `events` in graph `acme/g` takes a value of kind `integer`",
+        ),
+        (
+            json!({"rate": 2.5}),
+            "NODE_FIELD_WRONG_KIND",
+            with("rate", "kind", json!("integer")),
+            "the configuration field `rate` of node `events` in graph `acme/g` takes a value of kind `integer`",
+        ),
+        (
+            json!({"linger": "soon"}),
+            "NODE_FIELD_WRONG_KIND",
+            with("linger", "kind", json!("duration")),
+            "the configuration field `linger` of node `events` in graph `acme/g` takes a value of kind `duration`",
+        ),
+        (
+            json!({"mode": "reckless"}),
+            "NODE_FIELD_NOT_A_CHOICE",
+            with("mode", "choices", json!(["fast", "safe"])),
+            "the configuration field `mode` of node `events` in graph `acme/g` must be one of fast, safe",
+        ),
+        (
+            json!({"rate": 0}),
+            "NODE_FIELD_BELOW_MIN",
+            with("rate", "min", json!(1)),
+            "the configuration field `rate` of node `events` in graph `acme/g` must be at least 1",
+        ),
+        (
+            json!({"linger": "5ms"}),
+            "NODE_FIELD_BELOW_MIN",
+            with("linger", "min", json!("10ms")),
+            "the configuration field `linger` of node `events` in graph `acme/g` must be at least 10ms",
+        ),
+        (
+            // A field that is fine does not let the next one through.
+            json!({"mode": "safe", "rate": 70000}),
+            "NODE_FIELD_ABOVE_MAX",
+            with("rate", "max", json!(1000)),
+            "the configuration field `rate` of node `events` in graph `acme/g` must be at most 1000",
+        ),
+    ] {
+        let (status, body) = env.call(Method::PATCH, config, Some(patch.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{patch}");
+        assert_eq!(body["code"], code, "{patch}");
+        assert_eq!(body["context"], context, "{patch}");
+        assert_eq!(body["message"], message, "{patch}");
+    }
+    // Nothing was stored, nothing changed.
+    assert!(
+        env.kv
+            .hgetall_json::<Value>(&keys::graph_overrides(&gk("g")))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(env.epoch().await, epoch);
+
+    // The bounds themselves are taken, and `null` always is.
+    let (status, _) = env
+        .call(
+            Method::PATCH,
+            config,
+            Some(json!({"rate": 1000, "linger": "10ms", "mode": null})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = env.call(Method::PATCH, config, Some(json!({"rate": 1}))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_operator_has_the_last_word_on_a_configuration() {
+    let env = Env::new().await;
+    env.put_graph("g").await;
+    let config = "/api/v1/tenants/acme/graphs/g/nodes/events/config";
+    // Each field is one its parameter takes: only the operator knows they do
+    // not go together.
+    let (status, _) = env.call(Method::PATCH, config, Some(json!({"linger": "50ms"}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let epoch = env.epoch().await;
+    let (status, body) = env.call(Method::PATCH, config, Some(json!({"mode": "fast"}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "NODE_CONFIG_REFUSED");
+    assert_eq!(
+        body["context"],
+        json!({
+            "tenant": "acme",
+            "graph": "g",
+            "node": "events",
+            "detail": "`linger` only goes with the `safe` mode",
+        })
+    );
+    assert_eq!(
+        body["message"],
+        "the operator of node `events` in graph `acme/g` refuses this configuration: `linger` only goes with the \
+         `safe` mode"
+    );
+    // What was stored before stays, and nothing changed.
+    let overrides = env
+        .kv
+        .hgetall_json::<Value>(&keys::graph_overrides(&gk("g")))
+        .await
+        .unwrap();
+    assert_eq!(overrides, [("events".to_owned(), json!({"linger": "50ms"}))]);
+    assert_eq!(env.epoch().await, epoch);
+    let (status, _) = env
+        .call(Method::PATCH, config, Some(json!({"mode": "fast", "linger": null})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_value_its_parameter_no_longer_takes_is_not_applied() {
+    let env = Env::new().await;
+    env.put_graph("g").await;
+    env.call(
+        Method::PATCH,
+        "/api/v1/tenants/acme/graphs/g/nodes/events/config",
+        Some(json!({"rate": 50, "mode": "safe"})),
+    )
+    .await;
+    // A new version of the operator takes a lower `rate` at most.
+    let mut src = descriptor("t/src@1", OpKind::Source);
+    for param in &mut src.params {
+        if param.name == "rate" {
+            param.max = Some(json!(20));
+        }
+    }
+    env.kv.hset_json(keys::CLUSTER_CATALOG, "t/src@1", &src).await.unwrap();
+    let mut changed = graph_body("g");
+    changed["nodes"][0]["config"]["topic"] = json!("other");
+    let publication = env.put_spec(spec(changed)).await;
+    assert_eq!(
+        publication.ignored_overrides,
+        [IgnoredOverride {
+            graph: gk("g"),
+            node: "events".parse().unwrap(),
+            field: "rate".to_owned(),
+            refusal: Some(ParamRefusal::AboveMax(json!(20))),
+        }]
+    );
+    // The code's value stands, and the other field is still applied.
+    let (_, detail) = env.get("/api/v1/tenants/acme/graphs/g").await;
+    assert_eq!(
+        detail["spec"]["nodes"][0]["config"],
+        json!({"topic": "other", "rate": 10, "mode": "safe"})
     );
 }
 

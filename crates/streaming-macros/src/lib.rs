@@ -325,23 +325,22 @@ fn derive_operator(input: &DeriveInput) -> syn::Result<Tokens> {
         let default = args.default.as_ref().map(|expr| constant(&core, expr)).transpose()?;
         let default_json = optional(default.map(|constant| constant.json));
         let description = first_paragraph(&field.attrs);
-        specs.push(quote!(#private::spec::<#ty>(#json_name, #description, #default_json)));
+        let bound = |expr: &Option<Expr>| expr.as_ref().map(|expr| constant(&core, expr)).transpose();
+        let (min, max) = (bound(&args.min)?, bound(&args.max)?);
+        let said = |bound: &Option<Constant>| optional(bound.as_ref().map(|constant| constant.json.clone()));
+        let (min_json, max_json) = (said(&min), said(&max));
+        specs.push(quote!(#private::spec::<#ty>(#json_name, #description, #default_json, #min_json, #max_json)));
         puts.push(quote!(#private::put_param(&mut map, #json_name, &self.#ident);));
         secrets.push(quote!(#core::Param::secret(&self.#ident)));
         gets.push(quote!(#ident: #private::param(map, #json_name, #default_json)?));
-        if args.min.is_some() || args.max.is_some() {
-            let bound = |expr: &Option<Expr>| -> syn::Result<Tokens> {
-                Ok(optional(
-                    expr.as_ref()
-                        .map(|expr| constant(&core, expr))
-                        .transpose()?
-                        .map(|constant| {
-                            let (json, shown) = (constant.json, constant.shown);
-                            quote!((#json, #shown))
-                        }),
-                ))
+        if min.is_some() || max.is_some() {
+            let checked = |bound: Option<Constant>| {
+                optional(bound.map(|constant| {
+                    let (json, shown) = (constant.json, constant.shown);
+                    quote!((#json, #shown))
+                }))
             };
-            let (min, max) = (bound(&args.min)?, bound(&args.max)?);
+            let (min, max) = (checked(min), checked(max));
             checks.push(if is_option(ty) {
                 quote! {
                     if let ::std::option::Option::Some(value) = &self.#ident {

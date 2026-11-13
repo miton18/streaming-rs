@@ -20,7 +20,7 @@ use axum::{
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use streaming_core::{IdError, IdProblem, KvError, MAX_ID_LEN, SpecError, WiringRule};
+use streaming_core::{IdError, IdProblem, KvError, MAX_ID_LEN, ParamRefusal, SpecError, WiringRule};
 use streaming_openapi::{OperationContext, OperationOutput};
 
 /// One kind of error: its code, status and message template.
@@ -107,6 +107,26 @@ codes! {
     /// it exposes.
     NODE_FIELD_NOT_EXPOSED = BAD_REQUEST,
         "node `{node}` in graph `{tenant}/{graph}` does not expose the configuration field `{field}`";
+    /// The value given to a field is not of the kind of its parameter
+    /// (`integer`, `number`, `boolean`, `text`, `duration`, `secret`).
+    NODE_FIELD_WRONG_KIND = BAD_REQUEST,
+        "the configuration field `{field}` of node `{node}` in graph `{tenant}/{graph}` takes a value of kind `{kind}`";
+    /// The value given to a field is none of the choices of its parameter.
+    NODE_FIELD_NOT_A_CHOICE = BAD_REQUEST,
+        "the configuration field `{field}` of node `{node}` in graph `{tenant}/{graph}` must be one of {choices}";
+    /// The value given to a field is below the least one its parameter
+    /// accepts.
+    NODE_FIELD_BELOW_MIN = BAD_REQUEST,
+        "the configuration field `{field}` of node `{node}` in graph `{tenant}/{graph}` must be at least {min}";
+    /// The value given to a field is above the greatest one its parameter
+    /// accepts.
+    NODE_FIELD_ABOVE_MAX = BAD_REQUEST,
+        "the configuration field `{field}` of node `{node}` in graph `{tenant}/{graph}` must be at most {max}";
+    /// The operator refuses the configuration its node would have, for a
+    /// reason the description of its parameters does not tell. `detail` is
+    /// the operator's own explanation, in English.
+    NODE_CONFIG_REFUSED = BAD_REQUEST,
+        "the operator of node `{node}` in graph `{tenant}/{graph}` refuses this configuration: {detail}";
     /// The description has no node.
     GRAPH_EMPTY = BAD_REQUEST, "the graph has no node";
     /// Two nodes share an id.
@@ -494,6 +514,28 @@ impl From<ControlError> for ApiError {
                     .with("node", node.as_str())
                     .with("field", field)
             }
+            ControlError::FieldRefused {
+                graph,
+                node,
+                field,
+                refusal,
+            } => {
+                let (code, key, expected) = match *refusal {
+                    ParamRefusal::Kind(kind) => (&NODE_FIELD_WRONG_KIND, "kind", Value::from(kind)),
+                    ParamRefusal::Choice(choices) => (&NODE_FIELD_NOT_A_CHOICE, "choices", Value::from(choices)),
+                    ParamRefusal::BelowMin(min) => (&NODE_FIELD_BELOW_MIN, "min", min),
+                    ParamRefusal::AboveMax(max) => (&NODE_FIELD_ABOVE_MAX, "max", max),
+                };
+                graph_context(Self::new(code), &graph)
+                    .with("node", node.as_str())
+                    .with("field", field)
+                    .with(key, expected)
+            }
+            ControlError::ConfigRefused { graph, node, detail } => {
+                graph_context(Self::new(&NODE_CONFIG_REFUSED), &graph)
+                    .with("node", node.as_str())
+                    .with("detail", detail)
+            }
             // Only a publication, never a request, meets an undeclared tenant.
             ControlError::TenantNotCreated(tenant) => Self::new(&TENANT_NOT_FOUND).with("tenant", tenant.as_str()),
             ControlError::TenantConflict(tenant) => {
@@ -624,6 +666,40 @@ mod tests {
                 graph: key.clone(),
                 node: node(),
                 field: "size".into(),
+            }
+            .into(),
+            ControlError::FieldRefused {
+                graph: key.clone(),
+                node: node(),
+                field: "size".into(),
+                refusal: Box::new(ParamRefusal::Kind("duration".into())),
+            }
+            .into(),
+            ControlError::FieldRefused {
+                graph: key.clone(),
+                node: node(),
+                field: "mode".into(),
+                refusal: Box::new(ParamRefusal::Choice(vec!["fast".into(), "safe".into()])),
+            }
+            .into(),
+            ControlError::FieldRefused {
+                graph: key.clone(),
+                node: node(),
+                field: "size".into(),
+                refusal: Box::new(ParamRefusal::BelowMin("1ms".into())),
+            }
+            .into(),
+            ControlError::FieldRefused {
+                graph: key.clone(),
+                node: node(),
+                field: "rate".into(),
+                refusal: Box::new(ParamRefusal::AboveMax(64.into())),
+            }
+            .into(),
+            ControlError::ConfigRefused {
+                graph: key.clone(),
+                node: node(),
+                detail: "`slide` must not exceed `size`".into(),
             }
             .into(),
             ControlError::TenantNotCreated(key.tenant.clone()).into(),

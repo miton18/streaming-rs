@@ -481,7 +481,9 @@ three in-memory workers, two demo graphs (`acme/count-per-key`,
 `globex/clicks`) and the UI on `http://127.0.0.1:8080`. Views: overview,
 cluster, catalogue, graph (topology, metrics, bottleneck, results; the side
 panel of a node edits the fields its operator exposes, built from the
-catalogue's `ParamSpec`s, a `choices` list becoming a drop-down), and **API**
+catalogue's `ParamSpec`s, a `choices` list becoming a drop-down, `min` and
+`max` bounding a number and being said under the field, a refusal of the API
+that names a field being shown on it), and **API**
 (`#/api`), a viewer of `/api/v1/openapi.json` (operations by tag, schema
 trees, a form to try GET operations). Every connector describes
 its parameters; a test per connector checks the descriptions against the
@@ -497,15 +499,22 @@ application (the UI is embedded) and check it in a real browser.
 
 ## Known limits and open questions
 
-- **The API accepts a value its operator refuses.** The catalogue says the
-  name, kind, default and choices of a parameter, not its bounds
-  (`#[param(min, max)]`) nor what `check = ...` refuses: `PATCH
-  .../nodes/{node}/config` with `latencyMs: 70000` on the demo's slow sink is
-  stored, and the slices of the node then fail to start, saying
-  "`latencyMs` must be at most 60000" until the field is set again. It was so
-  before the traits (the factory refused). Natural next step, offered to the
-  owner: carry the bounds in `ParamSpec`, refuse in the API with new error
-  codes, and bound the inputs of the UI.
+- **What the API refuses of a configuration, and what it still lets
+  through.** `PATCH .../nodes/{node}/config` refuses a value its parameter
+  does not describe (`ParamSpec::refuses`: kind, choices, and the bounds of
+  `#[param(min, max)]`, which the catalogue now carries, an integer narrower
+  than 64 bits being bounded by its type), each with its own error code,
+  then asks the operator itself through `ApiState::accepts`
+  (`Registry::accepts`, hence `check = ...`), which `App` gives. Three things
+  remain. An API served without the application's code (`accepts: None`)
+  only goes by the descriptions. The operator asked is the one of the binary
+  serving the request: during a deployment it may not be the one of the
+  description in force, and an operator this binary does not have is
+  accepted. And a publication only leaves out the stored fields a
+  *description* refuses (`Publication::ignored_overrides`, said by the
+  worker): a stored configuration that a newer `check` refuses is still laid
+  over the code's, and the slices of the node then fail to start, saying
+  why, until the field is set again.
 - **A source that pushes acknowledges late, and answers for its end.** The
   engine does not wait for it after a commit (point 3 of the SDK layer): the
   last acknowledgement before a slice stops may never reach the broker, which
@@ -563,8 +572,9 @@ application (the UI is embedded) and check it in a real browser.
 - **Publication** (`streaming_api::control::publish`) keeps the code's
   description in `t:..:g:..:code`, lays the API's fields
   (`t:..:g:..:overrides`, per node) over it, and stores the result as a new
-  version only when it differs. A field the operator no longer exposes is
-  not applied (the worker says so). A graph in the store but not in the code
+  version only when it differs. A field the operator no longer exposes, or
+  whose stored value its parameter no longer takes, is not applied (the
+  worker says so). A graph in the store but not in the code
   becomes an *orphan* (`GraphIndexEntry.orphan`): stopped, state kept, every
   write refused but `DELETE`, which is refused for the others. The owner
   confirmed this over deleting it at once (2026-11-12): deleting a state

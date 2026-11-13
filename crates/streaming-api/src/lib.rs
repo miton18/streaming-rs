@@ -61,6 +61,11 @@ pub struct ApiState {
     pub kv_stats: Option<KvStatsFn>,
     /// Settings.
     pub config: ApiConfig,
+    /// What the operators of the embedding application say of a
+    /// configuration, when the API is served by a binary that holds them: a
+    /// change of configuration is then refused for every reason its operator
+    /// has, and not only for those the catalogue tells.
+    pub accepts: Option<control::ConfigCheck>,
 }
 
 /// Build the application: API routes, embedded UI as fallback, permissive CORS

@@ -183,6 +183,7 @@ async fn is_served() {
         clock: std::sync::Arc::new(streaming_core::SystemClock),
         kv_stats: None,
         config: streaming_api::ApiConfig::default(),
+        accepts: None,
     };
     let request = axum::http::Request::get("/api/v1/openapi.json")
         .body(axum::body::Body::empty())

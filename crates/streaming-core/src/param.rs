@@ -107,6 +107,15 @@ pub trait Param: Sized {
     /// The secret the value is, if it is one.
     #[must_use]
     fn secret(&self) -> Option<&Secret> { None }
+
+    /// The least value the type holds, when tools gain from knowing it: what
+    /// a parameter without `min` is bounded by.
+    #[must_use]
+    fn least() -> Option<Value> { None }
+
+    /// The greatest value the type holds, when tools gain from knowing it.
+    #[must_use]
+    fn greatest() -> Option<Value> { None }
 }
 
 macro_rules! integer_params {
@@ -126,6 +135,15 @@ macro_rules! integer_params {
                     None => Err("expected an integer".to_owned()),
                 }
             }
+
+            // The bounds of a 64-bit type say nothing a person needs, and
+            // are beyond what JSON numbers carry everywhere: only zero is
+            // said, for the types that stop there.
+            fn least() -> Option<Value> {
+                (<$ty>::MIN == 0 || <$ty>::BITS < 64).then(|| Value::from(<$ty>::MIN))
+            }
+
+            fn greatest() -> Option<Value> { (<$ty>::BITS < 64).then(|| Value::from(<$ty>::MAX)) }
         }
     )*};
 }
@@ -215,6 +233,10 @@ impl<T: Param> Param for Option<T> {
     fn absent() -> Option<Self> { Some(None) }
 
     fn secret(&self) -> Option<&Secret> { self.as_ref().and_then(T::secret) }
+
+    fn least() -> Option<Value> { T::least() }
+
+    fn greatest() -> Option<Value> { T::greatest() }
 }
 
 /// A secret of a configuration: the text itself, or the name of one of the
@@ -299,7 +321,13 @@ pub mod private {
 
     /// The description of the parameter `name` of type `T`.
     #[must_use]
-    pub fn spec<T: Param>(name: &str, description: &str, default: Option<Value>) -> ParamSpec {
+    pub fn spec<T: Param>(
+        name: &str,
+        description: &str,
+        default: Option<Value>,
+        min: Option<Value>,
+        max: Option<Value>,
+    ) -> ParamSpec {
         ParamSpec {
             name: name.to_owned(),
             kind: T::KIND.to_owned(),
@@ -307,6 +335,8 @@ pub mod private {
             default,
             description: description.to_owned(),
             choices: T::choices(),
+            min: min.or_else(T::least),
+            max: max.or_else(T::greatest),
         }
     }
 
@@ -510,6 +540,106 @@ mod tests {
         let token = by_name("token");
         assert_eq!((token.kind.as_str(), token.required), ("secret", true));
         assert_eq!(by_name("extra-headers").kind, "json");
+    }
+
+    #[test]
+    fn a_parameter_says_its_bounds() {
+        let params = Thing::params();
+        let bounds = |name: &str| {
+            let param = params.iter().find(|p| p.name == name).unwrap();
+            (param.min.clone(), param.max.clone())
+        };
+        // What the attribute says, as a configuration holds it.
+        assert_eq!(bounds("partitions"), (Some(json!(1)), Some(json!(64))));
+        assert_eq!(bounds("ratio"), (None, Some(json!(1.0))));
+        assert_eq!(bounds("timeout"), (Some(json!("1ms")), None));
+        // Whether the parameter may be absent or not.
+        assert_eq!(bounds("linger"), (None, Some(json!("1h"))));
+        // Else what the type holds, when it is worth saying.
+        assert_eq!(bounds("offset"), (Some(json!(-10)), None));
+        assert_eq!(bounds("start"), (None, None));
+        assert_eq!((u16::least(), u16::greatest()), (Some(json!(0)), Some(json!(65_535))));
+        assert_eq!((i8::least(), i8::greatest()), (Some(json!(-128)), Some(json!(127))));
+        assert_eq!((u64::least(), u64::greatest()), (Some(json!(0)), None));
+        assert_eq!((i64::least(), i64::greatest()), (None, None));
+        assert_eq!(Option::<u32>::least(), Some(json!(0)));
+    }
+
+    #[test]
+    fn a_description_refuses_what_its_operator_would() {
+        use crate::ParamRefusal::{AboveMax, BelowMin, Choice, Kind};
+        let params = Thing::params();
+        let refuses = |name: &str, value: Value| params.iter().find(|p| p.name == name).unwrap().refuses(&value);
+
+        assert_eq!(refuses("partitions", json!(1)), None);
+        assert_eq!(refuses("partitions", json!(64)), None);
+        assert_eq!(refuses("partitions", json!(0)), Some(BelowMin(json!(1))));
+        assert_eq!(refuses("partitions", json!(-3)), Some(BelowMin(json!(1))));
+        assert_eq!(refuses("partitions", json!(65)), Some(AboveMax(json!(64))));
+        assert_eq!(refuses("partitions", json!(2.5)), Some(Kind("integer".into())));
+        assert_eq!(refuses("partitions", json!("4")), Some(Kind("integer".into())));
+        assert_eq!(refuses("offset", json!(-11)), Some(BelowMin(json!(-10))));
+        assert_eq!(refuses("offset", json!(u64::MAX)), None);
+
+        assert_eq!(refuses("ratio", json!(1)), None);
+        assert_eq!(refuses("ratio", json!(1.5)), Some(AboveMax(json!(1.0))));
+        assert_eq!(refuses("ratio", json!("half")), Some(Kind("number".into())));
+        assert_eq!(refuses("enabled", json!(0)), Some(Kind("boolean".into())));
+
+        // Durations compare as durations, however they are written.
+        assert_eq!(refuses("timeout", json!("2s")), None);
+        assert_eq!(refuses("timeout", json!(250)), None);
+        assert_eq!(refuses("timeout", json!("0ms")), Some(BelowMin(json!("1ms"))));
+        assert_eq!(refuses("timeout", json!(0)), Some(BelowMin(json!("1ms"))));
+        assert_eq!(refuses("linger", json!("90m")), Some(AboveMax(json!("1h"))));
+        assert_eq!(refuses("linger", json!("60m")), None);
+        assert_eq!(refuses("timeout", json!("soon")), Some(Kind("duration".into())));
+
+        let choices = || vec!["earliest".to_owned(), "now".to_owned(), "latest-first".to_owned()];
+        assert_eq!(refuses("start", json!("now")), None);
+        assert_eq!(refuses("start", json!("RightNow")), Some(Choice(choices())));
+        assert_eq!(refuses("start", json!(1)), Some(Kind("text".into())));
+
+        assert_eq!(refuses("token", json!("literal")), None);
+        assert_eq!(refuses("token", json!({"secret": "tok"})), None);
+        assert_eq!(refuses("token", json!({"name": "tok"})), Some(Kind("secret".into())));
+        assert_eq!(refuses("extra-headers", json!({"a": [1, 2]})), None);
+
+        // No value is no refusal: whether one is needed is another question.
+        assert_eq!(refuses("partitions", Value::Null), None);
+        // A kind nobody knows, or a bound that does not compare, refuses nothing.
+        assert_eq!(ParamSpec::new("x", "string", "").min(3).refuses(&json!(1)), None);
+        assert_eq!(ParamSpec::new("x", "integer", "").min("three").refuses(&json!(1)), None);
+        assert_eq!(
+            ParamSpec::new("x", "integer", "").min(3).max(5).refuses(&json!(6)),
+            Some(AboveMax(json!(5)))
+        );
+
+        // What the description refuses, the operator refuses too.
+        for (name, value) in [
+            ("partitions", json!(0)),
+            ("partitions", json!(65)),
+            ("partitions", json!(2.5)),
+            ("offset", json!(-11)),
+            ("ratio", json!(1.5)),
+            ("timeout", json!("0ms")),
+            ("linger", json!("90m")),
+            ("start", json!("RightNow")),
+            ("token", json!({"name": "tok"})),
+        ] {
+            let mut config = minimal();
+            config[name] = value.clone();
+            let refused = thing(config).map_err(OpError::Config).and_then(|thing| thing.check());
+            assert!(refused.is_err(), "{name} = {value} is refused by the description alone");
+        }
+
+        assert_eq!(Kind("integer".into()).to_string(), "it is not of kind `integer`");
+        assert_eq!(
+            Choice(choices()).to_string(),
+            "it is none of `earliest`, `now`, `latest-first`"
+        );
+        assert_eq!(BelowMin(json!("1ms")).to_string(), "it is below 1ms");
+        assert_eq!(AboveMax(json!(64)).to_string(), "it is above 64");
     }
 
     #[test]

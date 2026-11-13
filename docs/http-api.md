@@ -106,8 +106,10 @@ true, "default": null, "description": "..."}`. `kind` is `duration`,
 `integer`, `number`, `text`, `boolean`, `secret` (a text or a
 `{"secret": "<name>"}` reference) or `json` (any JSON value, such as an
 object). A parameter restricted to a fixed set of texts also carries
-`"choices": ["...", ...]`. An empty list means the operator takes no
-parameter, or does not say.
+`"choices": ["...", ...]`, and one that is bounded `"min"` and `"max"`, the
+least and the greatest value accepted, written as a configuration holds them
+(`1`, `"5s"`). An integer narrower than 64 bits is bounded by its type. An
+empty list means the operator takes no parameter, or does not say.
 
 An operator written for several types of elements (a sink of anything, a
 count of anything) also carries `signatures`, one `{"input": "...",
@@ -257,13 +259,26 @@ Add or remove the node from `desired.pausedNodes`. `404` for an unknown node.
 Body: a JSON object of configuration fields, each laid over the
 configuration the code gave the node; a `null` value goes back to the code's
 value. Only the fields the node's operator lists among its `params` in the
-catalogue can be set: another one is a `400` (`NODE_FIELD_NOT_EXPOSED`). The
+catalogue can be set: another one is a `400` (`NODE_FIELD_NOT_EXPOSED`). A
+value must be one its parameter describes: of its `kind`
+(`NODE_FIELD_WRONG_KIND`), among its `choices` (`NODE_FIELD_NOT_A_CHOICE`),
+no lower than its `min` (`NODE_FIELD_BELOW_MIN`) and no greater than its
+`max` (`NODE_FIELD_ABOVE_MAX`); the context of these errors carries the
+field and what was expected, never the value sent. The operator itself is
+then asked about the configuration the node would have, which covers what a
+description cannot tell, such as two fields that do not go together
+(`NODE_CONFIG_REFUSED`, with the operator's explanation, in English, as
+`detail`). Nothing is stored when a field is refused. The
 fields are stored apart from the description
 (`t:<tenant>:g:<graph>:overrides`), so that a new version of the code keeps
 them. The resulting description is validated against the catalogue and
 stored as a new version, on which the node's instances restart. Answers
 `{"version": 5}`; `400` with the code of the rule broken (`OPERATOR_UNKNOWN`,
 `TYPE_MISMATCH`, `WIRING_*`...) when it does not validate.
+
+A stored field the operator of a newer code no longer exposes, or holds a
+value its parameter no longer takes, is not applied: the node runs with the
+code's value, and the worker that publishes says so.
 
 ## Static UI
 

@@ -50,7 +50,7 @@ pub use pipe::{
     Batch, Closed, Context, Element, Keyed, Opaque, Pipe, Sink, SinkPipe, Source, SourcePipe, Transformer, Windows,
 };
 pub use registry::{
-    Catalog, OpContext, OpDescriptor, OpFactory, OpKind, ParamSpec, Registry, Shared, Signature, TypeTag,
+    Catalog, OpContext, OpDescriptor, OpFactory, OpKind, ParamRefusal, ParamSpec, Registry, Shared, Signature, TypeTag,
 };
 pub use spec::{GraphSettings, GraphSpec, NodeSpec, SpecError, Topology, WiringRule};
 /// Derives [`Operator`] for a structure whose fields are its configuration:

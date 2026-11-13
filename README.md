@@ -243,6 +243,9 @@ A parameter is of any type implementing `Param`: integers, floats, `bool`,
 revealed by `ctx.reveal`), `serde_json::Value`, `Option` of these, and the
 enumerations deriving `Param` (shown as a list of choices). `check = path`
 in `#[operator(...)]` names a function refusing what the bounds cannot say.
+The API refuses what the operator would: the catalogue carries the kind, the
+choices and the bounds of each parameter, and the worker serving the API asks
+the operator itself, `check` included, before a configuration is stored.
 
 **A source** is started once per partition, with a pipe to push into:
 
