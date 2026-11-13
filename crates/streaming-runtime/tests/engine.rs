@@ -6,8 +6,8 @@ use moonpool_core::TokioProviders;
 use parking_lot::Mutex;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use streaming_core::{
-    Clock, DynKv, Emit, GraphSpec, Kv, KvError, MemKv, NoSecrets, Position, Registry, SinkConnector, SinkError,
-    SliceKey, SystemClock, TypeTag, Window, Windowed, WorkerId,
+    Clock, DynKv, Emit, GraphBuilder, GraphSpec, Kv, KvError, MemKv, NoSecrets, Position, Registry, SinkConnector,
+    SinkError, SliceKey, Split, SystemClock, TypeTag, Window, Windowed, WorkerId,
     control::{GraphIndexEntry, SliceSnapshot, WorkerSnapshot},
     datum, keys,
 };
@@ -391,6 +391,196 @@ async fn a_slice_behind_what_another_instance_acknowledged_starts_again() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    shutdown.cancel();
+    running.await.unwrap();
+}
+
+/// A numbered event.
+#[derive(Debug, Clone)]
+struct Numbered(u64);
+
+/// Stands for `test/numbers@1`, registered by hand.
+#[derive(Debug, Clone, streaming_core::Operator)]
+#[operator("test/numbers@1")]
+struct Numbers;
+
+/// Stands for a sink registered by hand, `test/all@1` or `test/odd@1`.
+#[derive(Debug, Clone, streaming_core::Operator)]
+#[operator("test/all@1")]
+struct All;
+
+#[derive(Debug, Clone, streaming_core::Operator)]
+#[operator("test/odd@1")]
+struct Odd;
+
+/// Sends odd numbers to the second branch.
+#[derive(Debug, Clone, streaming_core::Operator)]
+#[operator("test/parity@1")]
+struct Parity;
+
+impl Split<Numbered> for Parity {
+    fn branch(&self, input: &Numbered) -> usize { (input.0 % 2) as usize }
+}
+
+/// How many times each number was written, by emit id.
+#[derive(Default)]
+struct Written {
+    seen: Mutex<BTreeMap<String, u64>>,
+}
+
+#[async_trait]
+impl SinkConnector for Written {
+    async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
+        let mut seen = self.seen.lock();
+        for emit in batch {
+            let Some(number) = emit.value.downcast_ref::<Numbered>() else {
+                return Err(SinkError("not a number".into()));
+            };
+            seen.insert(emit.id.to_string(), number.0);
+        }
+        Ok(())
+    }
+}
+
+/// A split sends each element to exactly one branch, and a union of the
+/// branches gives back every element once.
+#[tokio::test(flavor = "current_thread")]
+async fn a_split_routes_each_element_once_and_a_union_brings_them_back() {
+    let store = MemKv::shared();
+    let kv: DynKv = store.clone();
+    let log = MemLog::with_retention(3, true);
+    let all = Arc::new(Written::default());
+    let odd = Arc::new(Written::default());
+
+    let mut graph = GraphBuilder::<TokioProviders>::new("acme", "split-union").settings(spec().settings);
+    let numbers = graph.node("numbers", Numbers).typed::<Numbered>();
+    let [even_numbers, odd_numbers] = graph.split(numbers, "parity", Parity, ["even", "odd"]);
+    let together = graph.union([even_numbers, odd_numbers], "together");
+    let to_all = graph.node("all", All);
+    graph.edge(together, to_all);
+    let to_odd = graph.node("odd", Odd);
+    graph.edge(odd_numbers, to_odd);
+    let (mut spec, operators) = graph.into_parts().unwrap();
+    spec.version = 1;
+
+    let mut registry = Registry::<TokioProviders>::standard();
+    builtin::register(&mut registry);
+    {
+        let log = log.clone();
+        registry.register_source::<Numbered>("test/numbers@1", "", move |context, _| {
+            Ok(log.source(context.providers.clone()))
+        });
+    }
+    for (op, sink) in [("test/all@1", all.clone()), ("test/odd@1", odd.clone())] {
+        registry.register_sink(op, "", TypeTag::of::<Numbered>(), move |_, _| {
+            Ok(sink.clone() as Arc<dyn SinkConnector>)
+        });
+    }
+    assert!(operators.register(&mut registry).is_empty());
+    let nodes: Vec<&str> = spec.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(
+        nodes,
+        [
+            "numbers",
+            "parity",
+            "parity-even",
+            "parity-odd",
+            "together",
+            "all",
+            "odd"
+        ]
+    );
+
+    let (shutdown, running) = start(kv.clone(), registry);
+    submit(&kv, &spec).await;
+    let total = 300_u64;
+    for n in 0..total {
+        log.append((n % 3) as u32, SystemClock.now_ms(), datum(Numbered(n)));
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while all.seen.lock().len() < total as usize || odd.seen.lock().len() < (total / 2) as usize {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} of {total} brought back, {} of {} odd",
+            all.seen.lock().len(),
+            odd.seen.lock().len(),
+            total / 2
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut everything: Vec<u64> = all.seen.lock().values().copied().collect();
+    everything.sort_unstable();
+    assert_eq!(
+        everything,
+        (0..total).collect::<Vec<_>>(),
+        "each number once through the union"
+    );
+    let mut odds: Vec<u64> = odd.seen.lock().values().copied().collect();
+    odds.sort_unstable();
+    assert_eq!(odds, (0..total).filter(|n| n % 2 == 1).collect::<Vec<_>>());
+    shutdown.cancel();
+    running.await.unwrap();
+}
+
+/// Stands for `test/more-numbers@1`, a second source registered by hand.
+#[derive(Debug, Clone, streaming_core::Operator)]
+#[operator("test/more-numbers@1")]
+struct MoreNumbers;
+
+/// A union of two sources: each partition of each source is a slice of its
+/// own, and every element reaches the sink once.
+#[tokio::test(flavor = "current_thread")]
+async fn a_union_of_two_sources_writes_each_element_once() {
+    let kv: DynKv = MemKv::shared();
+    let (first, second) = (MemLog::with_retention(2, true), MemLog::with_retention(3, true));
+    let all = Arc::new(Written::default());
+
+    let mut graph = GraphBuilder::<TokioProviders>::new("acme", "two-sources").settings(spec().settings);
+    let numbers = graph.node("numbers", Numbers).typed::<Numbered>();
+    let more = graph.node("more", MoreNumbers).typed::<Numbered>();
+    let together = graph.union([numbers, more], "together");
+    let to_all = graph.node("all", All);
+    graph.edge(together, to_all);
+    let (mut spec, operators) = graph.into_parts().unwrap();
+    spec.version = 1;
+
+    let mut registry = Registry::<TokioProviders>::standard();
+    builtin::register(&mut registry);
+    for (op, log) in [
+        ("test/numbers@1", first.clone()),
+        ("test/more-numbers@1", second.clone()),
+    ] {
+        registry.register_source::<Numbered>(op, "", move |context, _| Ok(log.source(context.providers.clone())));
+    }
+    let sink = all.clone();
+    registry.register_sink("test/all@1", "", TypeTag::of::<Numbered>(), move |_, _| {
+        Ok(sink.clone() as Arc<dyn SinkConnector>)
+    });
+    assert!(operators.register(&mut registry).is_empty());
+
+    let (shutdown, running) = start(kv.clone(), registry);
+    submit(&kv, &spec).await;
+    let total = 400_u64;
+    for n in 0..total {
+        let (log, partitions) = if n % 2 == 0 { (&first, 2) } else { (&second, 3) };
+        log.append((n % partitions) as u32, SystemClock.now_ms(), datum(Numbered(n)));
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while all.seen.lock().len() < total as usize {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} of {total} written",
+            all.seen.lock().len()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut everything: Vec<u64> = all.seen.lock().values().copied().collect();
+    everything.sort_unstable();
+    assert_eq!(everything, (0..total).collect::<Vec<_>>());
     shutdown.cancel();
     running.await.unwrap();
 }

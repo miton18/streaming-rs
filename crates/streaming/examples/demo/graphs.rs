@@ -26,7 +26,7 @@ use streaming::{
     App,
     core::{
         Clock, Context, GraphBuilder, GraphSettings, Keyed, OpError, Operator, Pipe, Position, Sink, SinkPipe, Source,
-        SourcePipe, StatelessFilterMap, SystemClock, Transformer, datum,
+        SourcePipe, SystemClock, Transformer, datum,
         stdops::{Count, Sliding, Tumbling},
     },
     moonpool_core::{Providers, RandomProvider, TaskProvider, TimeProvider},
@@ -154,15 +154,9 @@ impl Source for Generator {
     }
 }
 
-/// Decodes a JSON event.
-#[derive(Debug, Clone, Copy, Default, Operator)]
-#[operator("demo/decode@1")]
-pub struct Decode;
-
-impl StatelessFilterMap<Vec<u8>> for Decode {
-    type Out = Event;
-
-    fn apply(&self, bytes: &Vec<u8>) -> Option<Event> { serde_json::from_slice(bytes).ok() }
+streaming::core::json_decoder! {
+    /// Decodes a JSON event.
+    pub struct Decode("demo/decode@1") -> Event;
 }
 
 /// Groups events by user.

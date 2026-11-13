@@ -103,7 +103,10 @@ use crate::{
     ids::{GraphId, IdError, NodeId, OpRef, TenantId},
     ops::OpError,
     param::Secret,
-    pipe::{Sink, Source, Stateless, StatelessFilter, StatelessFilterMap, StatelessTransformer, Transformer},
+    pipe::{
+        Sink, Source, Split, Splitter, Stateless, StatelessFilter, StatelessFilterMap, StatelessTransformer,
+        Transformer,
+    },
     registry::{ParamSpec, Registry},
     spec::{GraphSettings, GraphSpec, NodeSpec},
 };
@@ -360,6 +363,48 @@ impl<P: Providers> GraphBuilder<P> {
         operator: T,
     ) -> Node<T::Out> {
         self.then(upstream, id, StatelessFilter(operator))
+    }
+
+    /// Add a node `id` bringing together what flows out of every node of
+    /// `inputs`, all of one type (`std/union@1`).
+    pub fn union<T: Any + Send + Sync>(
+        &mut self,
+        inputs: impl IntoIterator<Item = Node<T>>,
+        id: impl Into<String>,
+    ) -> Node<T> {
+        let node = self.add(id, &crate::stdops::Union);
+        for input in inputs {
+            self.edges.push((input.0, node));
+        }
+        self.registers(node, |registry| {
+            registry.transformer::<T, _>(&crate::stdops::Union).map(drop)
+        });
+        Node(node, PhantomData)
+    }
+
+    /// Add a node `id` sending each element of `upstream` to one of
+    /// `branches` with `operator`, evaluated once per element, and one node
+    /// per branch, `<id>-<branch>` (`std/branch@1`), in the order given:
+    /// what [`Split::branch`] returns is an index into `branches`.
+    ///
+    /// ```ignore
+    /// let [valid, invalid] = graph.split(events, "check", Check, ["valid", "invalid"]);
+    /// ```
+    pub fn split<In: Any + Send + Sync, S: Split<In>, const N: usize>(
+        &mut self,
+        upstream: Node<In>,
+        id: impl Into<String>,
+        operator: S,
+        branches: [&str; N],
+    ) -> [Node<In>; N] {
+        let id = id.into();
+        let routed = self.then(upstream, id.clone(), Splitter(operator));
+        let mut index = 0;
+        branches.map(|name| {
+            let branch = crate::stdops::Branch { branch: index };
+            index += 1;
+            self.then(routed, format!("{id}-{name}"), branch)
+        })
     }
 
     /// Add a node `id` running `transformer` on what flows out of `upstream`.

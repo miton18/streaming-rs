@@ -799,3 +799,45 @@ fn a_graph_maps_with_a_stateless_transformer(
 ) -> streaming_core::Node<String> {
     graph.map(numbers, "scale", Scale { factor: 3 })
 }
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+struct Point {
+    x: i64,
+}
+
+streaming_core::json_decoder! {
+    /// Decodes a point.
+    struct DecodePoint("test/decode-point@1") -> Point;
+}
+
+#[test]
+fn a_json_decoder_decodes_bytes_and_text_and_drops_what_is_not_json() {
+    let mut registry = Registry::<TokioProviders>::empty();
+    registry
+        .transformer::<Vec<u8>, _>(&StatelessFilter(DecodePoint))
+        .unwrap();
+    registry
+        .transformer::<String, _>(&StatelessFilter(DecodePoint))
+        .unwrap();
+    let decode = |op: &str, input: streaming_core::Datum| -> Vec<streaming_core::Datum> {
+        let reference = OpRef::new(op).unwrap();
+        let tag = if input.is::<String>() {
+            streaming_core::TypeTag::of::<String>()
+        } else {
+            streaming_core::TypeTag::of::<Vec<u8>>()
+        };
+        let (_, OpFactory::Map(factory)) = registry.get_for(&reference, Some(&tag)).unwrap() else {
+            panic!("not a map");
+        };
+        let mut out = Vec::new();
+        factory(&json!(null)).unwrap().apply(&input, &mut out).unwrap();
+        out
+    };
+    let point = decode("test/decode-point@1", datum(br#"{"x": 3}"#.to_vec()));
+    assert_eq!(point[0].downcast_ref::<Point>(), Some(&Point { x: 3 }));
+    let point = decode("test/decode-point@1", datum(r#"{"x": 4}"#.to_owned()));
+    assert_eq!(point[0].downcast_ref::<Point>(), Some(&Point { x: 4 }));
+    assert!(decode("test/decode-point@1", datum(b"{".to_vec())).is_empty());
+    assert!(decode("test/decode-point@1", datum(r#"{"y": 1}"#.to_owned())).is_empty());
+    assert_eq!(DecodePoint::ABOUT, "Decodes a point.");
+}

@@ -6,12 +6,17 @@
 //! | `std/sliding@1` | window | `{"size": "5m", "slide": "1m", "allowedLateness": "0s"}` |
 //! | `std/count@1` | aggregate | none; emits `Windowed<u64>` |
 //! | `std/identity@1` | map | none |
+//! | `std/union@1` | map | none; any number of inputs of one type |
+//! | `std/branch@1` | map | `{"branch": 0}`, fixed by the code; after a split, registered by the builder for its type only |
+//!
+//! [`json_decoder!`](crate::json_decoder) declares a decoder to a type of
+//! the application's.
 
 use crate::{
     Operator,
     data::Windowed,
     ops::{OpError, WindowAssigner},
-    pipe::{Keyed, Opaque, Pipe, Transformer, Windows},
+    pipe::{Keyed, Opaque, Pipe, Routed, Transformer, Windows},
     registry::Registry,
     time::{Timestamp, Window},
 };
@@ -140,6 +145,70 @@ impl<T: Any + Send + Sync> Transformer<T> for Identity {
     fn transform(&self, input: Pipe<T>) -> Pipe<T> { input }
 }
 
+/// Brings together what its inputs carry, all of one type, into one flow.
+/// [`GraphBuilder::union`](crate::GraphBuilder::union) connects them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/union@1")]
+pub struct Union;
+
+impl<T: Any + Send + Sync> Transformer<T> for Union {
+    type Out = T;
+
+    fn transform(&self, input: Pipe<T>) -> Pipe<T> { input }
+}
+
+/// Keeps what a split routed to one of its branches.
+/// [`GraphBuilder::split`](crate::GraphBuilder::split) adds one per branch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/branch@1")]
+pub struct Branch {
+    /// The index of the branch, in the order the branches were named.
+    pub branch: usize,
+}
+
+impl<T: Any + Send + Sync> Transformer<Routed<T>> for Branch {
+    type Out = T;
+
+    fn transform(&self, input: Pipe<Routed<T>>) -> Pipe<T> { input.branch(self.branch) }
+}
+
+/// Declare an operator decoding JSON, bytes or text, into a type of the
+/// application's, dropping what does not decode. The reference is the
+/// application's: two decoders to two types are two operators.
+///
+/// ```ignore
+/// json_decoder! {
+///     /// Decodes a JSON event.
+///     pub struct Decode("demo/decode@1") -> Event;
+/// }
+/// let decoded = graph.filter_map(events, "decode", Decode);
+/// ```
+#[macro_export]
+macro_rules! json_decoder {
+    ($(#[$meta:meta])* $vis:vis struct $name:ident($op:literal) -> $out:ty;) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, $crate::Operator)]
+        #[operator($op)]
+        $vis struct $name;
+
+        impl $crate::StatelessFilterMap<::std::vec::Vec<u8>> for $name {
+            type Out = $out;
+
+            fn apply(&self, bytes: &::std::vec::Vec<u8>) -> ::std::option::Option<$out> {
+                $crate::__private_json::from_slice(bytes).ok()
+            }
+        }
+
+        impl $crate::StatelessFilterMap<::std::string::String> for $name {
+            type Out = $out;
+
+            fn apply(&self, text: &::std::string::String) -> ::std::option::Option<$out> {
+                $crate::__private_json::from_str(text).ok()
+            }
+        }
+    };
+}
+
 /// Register the `std/*` operators listed in the module documentation, each
 /// for any type of element.
 pub fn register<P: Providers>(registry: &mut Registry<P>) {
@@ -151,6 +220,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
             .err(),
         registry.transformer::<Windows<Opaque>, _>(&Count).err(),
         registry.transformer::<Opaque, _>(&Identity).err(),
+        registry.transformer::<Opaque, _>(&Union).err(),
     ];
     debug_assert!(
         registered.iter().all(Option::is_none),

@@ -321,6 +321,16 @@ any operator. The operator must be `Clone`. Outside a `GraphBuilder`, the
 wrappers `Stateless(op)` and `StatelessFilter(op)` make `Transformer`s of
 them.
 
+`json_decoder!` declares such an operator for JSON, bytes or text, decoded
+into a type of the application's (what does not decode is dropped):
+
+```rust
+json_decoder! {
+    /// Decodes a JSON event.
+    pub struct Decode("demo/decode@1") -> Event;
+}
+```
+
 Any other transformer takes a pipe and returns a pipe:
 
 ```rust
@@ -358,7 +368,21 @@ graph.sink(rows, "results", KvSink { retain: 400 });
 graph.sink(decoded, "archive", Archive);                // any DAG
 ```
 
-`source`, `map`, `filter_map`, `then` and `sink` only accept an operator written for what flows
+Two shapes have their own method. `graph.union([a, b], "all")` brings
+together nodes carrying one type (`std/union@1`). `graph.split(upstream,
+"check", Check, ["valid", "invalid"])` sends each element to one branch with
+an operator implementing `Split` (`fn branch(&self, &In) -> usize`, an index
+into the names; an index with no branch drops the element), evaluated once
+per element; it returns one node per branch, `check-valid` and
+`check-invalid` (`std/branch@1`), carrying the type of `upstream`:
+
+```rust
+let [valid, invalid] = graph.split(decoded, "check", Check, ["valid", "invalid"]);
+graph.sink(invalid, "rejects", Archive);
+let all = graph.union([valid, other], "all");
+```
+
+`source`, `map`, `filter_map`, `union`, `split`, `then` and `sink` only accept an operator written for what flows
 out of the node it is connected to. The application checks the graph when it
 starts (wiring, types, the configuration of every node against its operator)
 and refuses to run otherwise. The `std/*` operators have their types
