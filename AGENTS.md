@@ -367,6 +367,13 @@ The harness (`streaming-sim/src/lib.rs`):
   workloads wait on `ctx.shutdown()`; without pinned seeds each run explores
   new ones; a "did not settle" may be a configuration too slow for the
   900 s timeout rather than a deadlock — look at whether progress is made.
+- Moonpool 0.8.0 reseeds the *global* simulation RNG with the iteration's
+  seed every time a process restarts (`handle_restart` builds
+  `SimProviders::new(.., seed, ..)`): all randomness starts over after each
+  reboot, and a rebooted worker draws again owner tokens it drew before (in
+  about two runs out of three). This is the only path that exercises two
+  instances of a slice sharing a token; fixing the reseed without injecting
+  such reuse on purpose would leave that precaution untested. Open.
 - `Scenario::random` lowers what it drew when the run could not end in
   time. A slow sink is paid once per write, a window reaching its sink
   seven keys at a time (`CHUNK_SIZE`): counted once per epoch only, a draw
@@ -441,7 +448,13 @@ commit, valid when written, was voided by the closing: lost had it carried
 records); a source slice lingering for a full batch behind a
 source that redelivered faster than it moved on, polling for ever without
 ever awaiting the clock (the simulation's time stood still: a seed that does
-not end; the slice now stops lingering when a poll brings nothing new).
+not end; the slice now stops lingering when a poll brings nothing new); an
+instance taking for its own a commit that the previous instance of its
+worker, dead, had sent under the same owner token and that landed late
+(`try_commit` went by the owner alone: the new instance acknowledged one
+record beyond what the log held; it now recognises its own record byte for
+byte, held by `an_instance_that_drew_the_token_of_another_is_fenced` in
+`state.rs`).
 
 ## The HTTP API and its OpenAPI document
 
