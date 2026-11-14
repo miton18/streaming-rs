@@ -110,6 +110,7 @@ use streaming_kv_redis::{RedisConfig, RedisKv};
 pub use streaming_pulsar as pulsar;
 pub use streaming_runtime as runtime;
 use streaming_runtime::{GossipConfig, GossipMembership, RuntimeEnv, Worker, WorkerConfig, builtin};
+#[cfg(feature = "warp10")]
 pub use streaming_warp10 as warp10;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -200,8 +201,11 @@ impl App {
     fn registered(&self) -> (AppRegistry, Vec<String>) {
         let mut registry = AppRegistry::standard();
         builtin::register(&mut registry);
-        streaming_warp10::register(&mut registry);
         stock::register(&mut registry);
+        #[cfg(feature = "warp10")]
+        streaming_warp10::register(&mut registry);
+        #[cfg(feature = "pulsar")]
+        streaming_pulsar::register(&mut registry);
         for register in &self.operators {
             register(&mut registry);
         }
@@ -1046,7 +1050,25 @@ mod tests {
     #[test]
     fn an_application_without_graphs_is_valid() {
         App::new().tenant("acme", "Acme").check().unwrap();
-        assert!(App::new().registry().catalog().ops.len() >= 8);
+        assert!(App::new().registry().catalog().ops.len() >= 6);
+    }
+
+    #[test]
+    fn a_connector_is_in_the_catalogue_with_its_feature_only() {
+        let catalog = App::new().registry().catalog();
+        let has = |op: &str| catalog.get(&streaming_core::OpRef::new(op).unwrap()).is_some();
+        assert!(has("std/count-to-json@1"));
+        for op in ["std/warp10-sink@1", "std/count-to-gts@1"] {
+            assert_eq!(has(op), cfg!(feature = "warp10"), "{op}");
+        }
+        for op in [
+            "std/pulsar-source@1",
+            "std/pulsar-sink@1",
+            "std/pulsar-key@1",
+            "std/count-to-pulsar@1",
+        ] {
+            assert_eq!(has(op), cfg!(feature = "pulsar"), "{op}");
+        }
     }
 
     #[test]

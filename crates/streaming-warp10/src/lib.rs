@@ -47,6 +47,7 @@
 //! applied, which is fine, see above).
 
 pub mod config;
+mod count;
 pub mod fake;
 pub mod gts;
 pub mod http;
@@ -55,6 +56,7 @@ mod sink;
 mod tls;
 
 pub use config::Warp10Config;
+pub use count::CountToGts;
 pub use gts::{Gts, GtsValue, TimeUnit};
 use moonpool_core::Providers;
 pub use sink::Warp10Writer;
@@ -133,7 +135,12 @@ impl Sink<Gts> for Warp10Sink {
 }
 
 /// Register `std/warp10-sink@1` (input: [`Gts`]).
-pub fn register<P: Providers>(registry: &mut Registry<P>) { registry.sink::<Gts, Warp10Sink>(); }
+pub fn register<P: Providers>(registry: &mut Registry<P>) {
+    registry.sink::<Gts, Warp10Sink>();
+    registry
+        .transformer(&CountToGts::new("class"))
+        .expect("std/count-to-gts@1 is one kind of operator");
+}
 
 #[cfg(test)]
 mod tests {

@@ -7,18 +7,24 @@ rust-version.workspace = true
 repository.workspace = true
 
 [features]
+# No connector by default: an application turns on those it uses, each one
+# registering its operators (connectors and their glue) with the stock ones.
 default = []
-# TLS towards Redis / Materia KV (`rediss://`) and Warp 10 (`https://`).
-tls = ["streaming-kv-redis/tls", "streaming-warp10/tls"]
-# Apache Pulsar source and sink (Magnetar client).
+# TLS towards Redis / Materia KV (`rediss://`), and Warp 10 (`https://`) with
+# the `warp10` feature.
+tls = ["streaming-kv-redis/tls", "streaming-warp10?/tls"]
+# Apache Pulsar source and sink (Magnetar client), `std/pulsar-key@1` and
+# `std/count-to-pulsar@1`.
 pulsar = ["dep:streaming-pulsar"]
+# Warp 10 sink (`/api/v0/update`) and `std/count-to-gts@1`.
+warp10 = ["dep:streaming-warp10"]
 
 [dependencies]
 streaming-core.workspace = true
 streaming-runtime.workspace = true
 streaming-api.workspace = true
 streaming-kv-redis.workspace = true
-streaming-warp10.workspace = true
+streaming-warp10 = { workspace = true, optional = true }
 streaming-pulsar = { workspace = true, optional = true }
 clap = { version = "4", features = ["derive", "env"] }
 moonpool-core.workspace = true
@@ -31,6 +37,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 
 [dev-dependencies]
 async-trait.workspace = true
+# The demonstration turns counts into Warp 10 points (`std/count-to-gts@1`),
+# which its graph names, and writes them to a simulated destination: it needs
+# the operator, not the `warp10` feature and its sink.
+streaming-warp10.workspace = true
 parking_lot.workspace = true
 
 [[test]]

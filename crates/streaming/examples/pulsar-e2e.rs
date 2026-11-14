@@ -12,8 +12,9 @@ use streaming::{
         GraphBuilder, GraphSettings,
         stdops::{Count, Tumbling},
     },
+    pulsar::{CountToPulsar, PulsarKey, PulsarSink, PulsarSource},
     runtime::builtin::KvSink,
-    stock::{CountToJson, CountToPulsar, PulsarKey, PulsarSink, PulsarSource},
+    stock::CountToJson,
 };
 
 fn env(name: &str, default: Option<&str>) -> String {
