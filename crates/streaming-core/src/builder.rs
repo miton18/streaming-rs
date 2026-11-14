@@ -407,6 +407,35 @@ impl<P: Providers> GraphBuilder<P> {
         })
     }
 
+    /// Add the nodes gathering what flows out of `upstream` into batches:
+    /// those of every partition whose event time falls in one window of
+    /// `max_wait`, emitted once the window is closed, in pieces of at most
+    /// `max_size` elements. Four nodes: `<id>-key` (`std/one-key@1`),
+    /// `<id>-window` (`std/tumbling@1`, whose `size` is `max_wait`),
+    /// `<id>-collect` (`std/collect@1`) and `<id>` (`std/batch@1`).
+    ///
+    /// Exactly-once like any window: the collected elements are committed
+    /// with the position of the source, so a replay gives the same batches
+    /// under the same emit ids. They are the state of the window, held
+    /// whole in each commit (5 MB at most), and encoded with `postcard`,
+    /// which takes neither `serde_json::Value` nor untagged enumerations.
+    pub fn batch<A>(
+        &mut self,
+        upstream: Node<A>,
+        id: impl Into<String>,
+        max_wait: std::time::Duration,
+        max_size: Option<u64>,
+    ) -> Node<Vec<A>>
+    where
+        A: Serialize + DeserializeOwned + Clone + Any + Send + Sync,
+    {
+        let id = id.into();
+        let keyed = self.then(upstream, format!("{id}-key"), crate::stdops::OneKey);
+        let windows = self.then(keyed, format!("{id}-window"), crate::stdops::Tumbling::of(max_wait));
+        let collected = self.then(windows, format!("{id}-collect"), crate::stdops::Collect);
+        self.then(collected, id, crate::stdops::Batch { max_size })
+    }
+
     /// Add a node `id` running `transformer` on what flows out of `upstream`.
     pub fn then<In: 'static, T: Transformer<In>>(
         &mut self,

@@ -402,11 +402,17 @@ graph.sink(invalid, "rejects", Archive);
 let all = graph.union([valid, other], "all");
 ```
 
-`source`, `map`, `filter_map`, `union`, `split`, `then` and `sink` only accept an operator written for what flows
+`graph.batch(upstream, "batch", Duration::from_secs(5), Some(100))` gathers
+elements into `Vec<A>`s over event-time windows of five seconds, a hundred
+at most per batch, exactly-once like any window (`docs/operators.md`,
+*Batches*, says what it costs); `std/flatten@1` gives them back one at a
+time.
+
+`source`, `map`, `filter_map`, `union`, `split`, `batch`, `then` and `sink` only accept an operator written for what flows
 out of the node it is connected to. The application checks the graph when it
 starts (wiring, types, the configuration of every node against its operator)
 and refuses to run otherwise. The `std/*` operators have their types
-(`Tumbling`, `Sliding`, `Count`, `Identity`, `Union`, `Flatten`, `KvSink`,
+(`Tumbling`, `Sliding`, `Count`, `Identity`, `Union`, `Collect`, `Batch`, `Flatten`, `KvSink`,
 `CountToJson` in `streaming::stock`, and those of the connectors, see below);
 `crates/streaming/examples/demo/graphs.rs` builds the demonstration graphs
 this way.

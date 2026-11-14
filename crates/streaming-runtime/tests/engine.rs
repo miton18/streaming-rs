@@ -584,3 +584,108 @@ async fn a_union_of_two_sources_writes_each_element_once() {
     shutdown.cancel();
     running.await.unwrap();
 }
+
+/// A number that can be collected into a window's state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Collected(u64);
+
+/// Stands for `test/collected@1` and `test/batches@1`, registered by hand.
+#[derive(Debug, Clone, streaming_core::Operator)]
+#[operator("test/collected@1")]
+struct CollectedNumbers;
+
+#[derive(Debug, Clone, streaming_core::Operator)]
+#[operator("test/batches@1")]
+struct Batches;
+
+/// Every batch written, by emit id.
+#[derive(Default)]
+struct WrittenBatches {
+    seen: Mutex<BTreeMap<String, Vec<u64>>>,
+}
+
+#[async_trait]
+impl SinkConnector for WrittenBatches {
+    async fn write(&self, batch: &[Emit]) -> Result<(), SinkError> {
+        let mut seen = self.seen.lock();
+        for emit in batch {
+            let Some(numbers) = emit.value.downcast_ref::<Vec<Collected>>() else {
+                return Err(SinkError("not a batch".into()));
+            };
+            seen.insert(emit.id.to_string(), numbers.iter().map(|number| number.0).collect());
+        }
+        Ok(())
+    }
+}
+
+/// A batch gathers the elements of every partition over a window, in
+/// pieces no larger than asked, each element in exactly one of them.
+#[tokio::test(flavor = "current_thread")]
+async fn a_batch_gathers_every_element_once_in_pieces_no_larger_than_asked() {
+    let kv: DynKv = MemKv::shared();
+    let log = MemLog::with_retention(3, true);
+    let batches = Arc::new(WrittenBatches::default());
+
+    let mut graph = GraphBuilder::<TokioProviders>::new("acme", "batches").settings(spec().settings);
+    let numbers = graph.node("numbers", CollectedNumbers).typed::<Collected>();
+    let batched = graph.batch(numbers, "batch", Duration::from_millis(500), Some(7));
+    let to_sink = graph.node("out", Batches);
+    graph.edge(batched, to_sink);
+    let (mut spec, operators) = graph.into_parts().unwrap();
+    spec.version = 1;
+    let nodes: Vec<&str> = spec.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(
+        nodes,
+        ["numbers", "batch-key", "batch-window", "batch-collect", "batch", "out"]
+    );
+
+    let mut registry = Registry::<TokioProviders>::standard();
+    builtin::register(&mut registry);
+    {
+        let log = log.clone();
+        registry.register_source::<Collected>("test/collected@1", "", move |context, _| {
+            Ok(log.source(context.providers.clone()))
+        });
+    }
+    let sink = batches.clone();
+    registry.register_sink("test/batches@1", "", TypeTag::of::<Vec<Collected>>(), move |_, _| {
+        Ok(sink.clone() as Arc<dyn SinkConnector>)
+    });
+    assert!(operators.register(&mut registry).is_empty());
+
+    let (shutdown, running) = start(kv.clone(), registry);
+    submit(&kv, &spec).await;
+    let total = 300_u64;
+    for n in 0..total {
+        log.append((n % 3) as u32, SystemClock.now_ms(), datum(Collected(n)));
+        if n % 30 == 29 {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    }
+
+    let written = || -> usize { batches.seen.lock().values().map(Vec::len).sum() };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while written() < total as usize {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} of {total} batched",
+            written()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let seen = batches.seen.lock().clone();
+    assert!(
+        seen.values().all(|batch| !batch.is_empty() && batch.len() <= 7),
+        "a batch larger than asked"
+    );
+    let mut everything: Vec<u64> = seen.values().flatten().copied().collect();
+    everything.sort_unstable();
+    assert_eq!(
+        everything,
+        (0..total).collect::<Vec<_>>(),
+        "each number in exactly one batch"
+    );
+    shutdown.cancel();
+    running.await.unwrap();
+}

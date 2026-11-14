@@ -275,6 +275,40 @@ The state is committed to the store with the source position, in one
 command: this is what makes the result exactly-once. Keep it small (a store
 value is limited to 5 MB on Materia KV).
 
+### Batches
+
+`graph.batch(upstream, "batch", Duration::from_secs(5), Some(100))` gathers
+the elements of every partition whose event time falls in one window of
+`maxWait` into `Vec<A>`s of at most `maxSize` elements, emitted once the
+window closes, and `std/flatten@1` gives them back one at a time. It is a
+window over a single key, four nodes the builder adds:
+
+| Node | Operator | Holds |
+|---|---|---|
+| `batch-key` | `std/one-key@1` | every element under one key |
+| `batch-window` | `std/tumbling@1` | `size`, the maximum wait |
+| `batch-collect` | `std/collect@1` | the elements, the state of the window |
+| `batch` | `std/batch@1` | `maxSize`, optional: the collected elements cut in order |
+
+It is exactly-once for the reason any window is: what was collected is
+committed with the position of the source, and a replay gives the same
+batches under the same emit ids. A batch flushed at each epoch barrier
+would not be: a replay ends its epochs elsewhere, as it would a wait in
+processing time, and the replayed batches would differ under the same ids.
+What this costs:
+
+- the wait is in event time, and a window closes with the watermark (an
+  idle partition lets it go after the graph's `idleTimeout`);
+- `maxSize` cuts what a window collected, it does not make a batch leave
+  earlier;
+- the collected elements are the state of the window, held whole in every
+  commit that changes it: a value of the store takes 5 MB at most, so a
+  batch suits windows of thousands of small elements, not millions;
+- the state is encoded with `postcard`, which takes neither
+  `serde_json::Value` nor untagged enumerations;
+- the elements of one partition keep their order, the partitions come one
+  after the other.
+
 ## Sinks
 
 A sink receives a pipe of batches and confirms each one.
@@ -330,6 +364,7 @@ make two branches disagree. Every branch carries the type of what was split.
 | `map(upstream, id, op)` | a `StatelessTransformer` |
 | `filter_map(upstream, id, op)` | a `StatelessFilterMap` |
 | `union(inputs, id)` | a `std/union@1` node fed by every node of `inputs`, all of one type; gives that type |
+| `batch(upstream, id, max_wait, max_size)` | four nodes gathering `upstream` into `Vec<A>`s (see *Batches*); gives `Node<Vec<A>>` |
 | `split(upstream, id, op, [names])` | a node running a `Split` once per element, and one `std/branch@1` node per name, `<id>-<name>`; gives one `Node` per branch, of the type of `upstream` |
 | `then(upstream, id, transformer)` | any `Transformer` |
 | `sink(upstream, id, sink)` | a sink |
@@ -362,6 +397,9 @@ topic, through a durable Failover subscription.
 |---|---|---|---|
 | `std/identity@1` | `streaming-core` | any → same | none |
 | `std/union@1` | `streaming-core` | any → same, from several inputs | none |
+| `std/one-key@1` | `streaming-core` | any → `Keyed<T>` | none; one key for every element |
+| `std/collect@1` | `streaming-core` | `Windows<T>` → `Windowed<Vec<T>>` | none; `T` serializable and `Clone` |
+| `std/batch@1` | `streaming-core` | `Windowed<Vec<T>>` → `Vec<T>` | `maxSize` (≥ 1, optional) |
 | `std/flatten@1` | `streaming-core` | `Vec<T>` → `T` | none; one element at a time, in order (`T: Clone`) |
 | `std/branch@1` | `streaming-core` | `Routed<T>` → `T` | `branch`, fixed by the code; added by `GraphBuilder::split`, registered for its type only |
 | `std/tumbling@1` | `streaming-core` | `Keyed<T>` → `Windows<T>` | `size` (≥ 1 ms), `allowedLateness` (default `0s`) |
@@ -387,9 +425,6 @@ one of `streaming` that registers the operator (none is on by default).
 ## Not yet
 
 Being built in other threads of work, and not on `main`:
-
-- **`std/batch@1`**: gather elements into a `Vec<A>` until a maximum wait
-  (required) or an optional maximum size, beside the event-time windows.
 
 Not started: a dedicated output for late records or for what a decoder
 refuses, session windows, joins, a keyed process function with timers,

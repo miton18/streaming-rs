@@ -7,6 +7,9 @@
 //! | `std/count@1` | aggregate | none; emits `Windowed<u64>` |
 //! | `std/identity@1` | map | none |
 //! | `std/union@1` | map | none; any number of inputs of one type |
+//! | `std/one-key@1` | key_by | none; every element under one key |
+//! | `std/collect@1` | aggregate | none; emits `Windowed<Vec<T>>` |
+//! | `std/batch@1` | map | `{"maxSize": 100}`, optional; `Windowed<Vec<T>>` cut into `Vec<T>` |
 //! | `std/flatten@1` | map | none; a `Vec<T>` given back one element at a time |
 //! | `std/branch@1` | map | `{"branch": 0}`, fixed by the code; after a split, registered by the builder for its type only |
 //!
@@ -22,6 +25,7 @@ use crate::{
     time::{Timestamp, Window},
 };
 use moonpool_core::Providers;
+use serde::{Serialize, de::DeserializeOwned};
 use std::{any::Any, time::Duration};
 
 /// Fixed-size, non-overlapping event-time windows.
@@ -156,6 +160,66 @@ impl<T: Any + Send + Sync> Transformer<T> for Union {
     type Out = T;
 
     fn transform(&self, input: Pipe<T>) -> Pipe<T> { input }
+}
+
+/// Puts every element under one key, for a window over all of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/one-key@1")]
+pub struct OneKey;
+
+impl<T: Any + Send + Sync> Transformer<T> for OneKey {
+    type Out = Keyed<T>;
+
+    fn transform(&self, input: Pipe<T>) -> Pipe<Keyed<T>> { input.key_by(|_| ()) }
+}
+
+/// Collects the elements of each key in each window, those of one partition
+/// in the order they came, the partitions one after the other.
+///
+/// The collected elements are the state of the window: each commit holds
+/// them all, within the 5 MB a value of the store may take.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/collect@1")]
+pub struct Collect;
+
+impl<T> Transformer<Windows<T>> for Collect
+where
+    T: Serialize + DeserializeOwned + Clone + Any + Send + Sync,
+{
+    type Out = Windowed<Vec<T>>;
+
+    fn transform(&self, input: Pipe<Windows<T>>) -> Pipe<Windowed<Vec<T>>> {
+        input.aggregate(
+            Vec::new,
+            |elements: &mut Vec<T>, element: &T| elements.push(element.clone()),
+            |elements: &mut Vec<T>, other: &Vec<T>| elements.extend(other.iter().cloned()),
+        )
+    }
+}
+
+/// Cuts what a window collected into batches of at most `max_size`
+/// elements, in order; the whole of it when there is no maximum.
+/// [`GraphBuilder::batch`](crate::GraphBuilder::batch) puts it after a window
+/// and a [`Collect`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/batch@1")]
+pub struct Batch {
+    /// Most elements in one batch; none for all those of the window.
+    #[param(min = 1)]
+    pub max_size: Option<u64>,
+}
+
+impl<T: Clone + Any + Send + Sync> Transformer<Windowed<Vec<T>>> for Batch {
+    type Out = Vec<T>;
+
+    fn transform(&self, input: Pipe<Windowed<Vec<T>>>) -> Pipe<Vec<T>> {
+        let size = self
+            .max_size
+            .map_or(usize::MAX, |size| usize::try_from(size).unwrap_or(usize::MAX).max(1));
+        input.flat_map(move |windowed, out| {
+            out.extend(windowed.value.chunks(size).map(<[T]>::to_vec));
+        })
+    }
 }
 
 /// Gives back the elements of a `Vec<T>` one at a time, in order.

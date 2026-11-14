@@ -299,6 +299,21 @@ the operators it names, `App` collects them).
    `a_union_of_two_sources_writes_each_element_once` in
    `streaming-runtime/tests/engine.rs`; the simulation's graph does not use
    them yet.
+   **A batch is a window over one key** (the owner chose it, 2026-11-14,
+   over a batch flushed at each epoch barrier, which is not exactly-once:
+   a replay ends its epochs elsewhere, and the replayed batches would
+   differ under the same emit ids; and over a batch held in the commit by
+   a new protocol). `GraphBuilder::batch` adds `std/one-key@1`,
+   `std/tumbling@1` (`max_wait`), `std/collect@1` (an aggregate whose state
+   is the `Vec<T>`) and `std/batch@1` (`maxSize`, cutting at emission). The
+   engine is untouched. Limits: event time; the whole `Vec` in every commit
+   that changes the window (5 MB); `postcard` encoding; and the order of
+   the partitions in a batch is that of the feeding slices, so an emitter
+   retried across a change of plan could cut a window otherwise under the
+   same emit ids. Held by
+   `a_batch_gathers_every_element_once_in_pieces_no_larger_than_asked`
+   (measured: a `merge` that drops the other partitions fails it); the
+   simulation's graph does not use it yet.
 7. **A transformer is one node, hence one kind**: any number of maps and
    filters in a row (fused), or one `key_by`, or one window, or one
    aggregate. `Registry::transformer` calls `transform` on an example to
