@@ -3,6 +3,7 @@ name = "streaming"
 description = "The streaming-rs SDK: an application declares its tenants, operators and graphs in Rust and runs as a worker, with the stock connectors, the HTTP API and the web UI."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 

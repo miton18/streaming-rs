@@ -3,6 +3,7 @@ name = "streaming-api"
 description = "HTTP API server of streaming-rs: reads and writes control-plane documents in the KV and serves the web UI."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 

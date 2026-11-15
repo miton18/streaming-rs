@@ -3,6 +3,7 @@ name = "streaming-gossip"
 description = "Cluster membership over gossip (Scuttlebutt anti-entropy), runtime-agnostic via moonpool providers."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 

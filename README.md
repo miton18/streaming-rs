@@ -7,9 +7,10 @@ It is multi-tenant, keeps its state in a Redis-protocol key-value store
 (Redis, Clever Cloud Materia KV), and is built from day one to run under
 [Moonpool](https://github.com/PierreZ/moonpool) deterministic simulation.
 
-> **Status: early.** The engine, the control plane, the connectors and the UI
-> work and are tested as described below. Read [Limits](#limits) before
-> relying on it.
+> **Status: a test project.** streaming-rs exists to experiment with stream
+> processing and deterministic simulation; it is not meant for production.
+> The engine, the control plane, the connectors and the UI work and are
+> tested as described below. Read [Limits](#limits) before relying on it.
 
 ## Try it
 
@@ -497,3 +498,7 @@ what was produced.
 - A graph changes only with a new version of the application. During a
   deployment, an old worker that restarts publishes its graphs again.
 - Not yet run against a real Materia KV or a real Warp 10.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE).

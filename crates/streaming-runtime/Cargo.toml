@@ -3,6 +3,7 @@ name = "streaming-runtime"
 description = "The streaming-rs execution engine: actors, backpressure, exactly-once commits, workers and placement."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 

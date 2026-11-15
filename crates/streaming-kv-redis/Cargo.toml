@@ -3,6 +3,7 @@ name = "streaming-kv-redis"
 description = "Redis-protocol (RESP2) client implementing streaming_core::Kv, for Redis and Clever Cloud Materia KV, written against the Moonpool provider traits."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 

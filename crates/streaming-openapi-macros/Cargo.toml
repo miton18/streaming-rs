@@ -3,6 +3,7 @@ name = "streaming-openapi-macros"
 description = "The `#[route]` attribute of streaming-openapi: registers an axum handler and describes it in OpenAPI."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 

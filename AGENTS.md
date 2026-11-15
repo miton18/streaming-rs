@@ -19,7 +19,8 @@ is deployed in production; the on-disk formats may still change freely.
 - Answer in **French**. Code, comments, commit messages, `README.md` and this
   file are in English; the web UI is in French.
 - Work is pushed **directly to `main`** (the repository started empty). No
-  pull request unless asked. No licence is declared yet. These three choices
+  pull request unless asked. The licence is MIT (the owner's choice,
+  2026-11-15). The first two choices
   were stated to the owner and never explicitly confirmed: ask before
   changing them.
 - The owner's standard: *"if the whole simulation passes on a project this
