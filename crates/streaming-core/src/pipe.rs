@@ -85,6 +85,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{
     any::{Any, TypeId},
     collections::VecDeque,
+    fmt,
     future::{Future, poll_fn},
     marker::PhantomData,
     pin::Pin,
@@ -1025,6 +1026,17 @@ impl<T: Any + Send + Sync> Pipe<T> {
         self.flat_map(move |input, out| out.extend(f(input)))
     }
 
+    /// Tag each element with the index of the branch `f` sends it to, for a
+    /// [`Split`]: the element itself is not copied.
+    #[must_use]
+    pub fn route(self, f: impl Fn(&T) -> usize + Send + Sync + 'static) -> Pipe<Routed<T>> {
+        self.elements("route").then(
+            Step::Map(Arc::new(RouteFn(f, PhantomData))),
+            tag::<T>(),
+            tag::<Routed<T>>(),
+        )
+    }
+
     /// Turn each element into any number of others.
     #[must_use]
     pub fn flat_map<O: Any + Send + Sync>(self, f: impl Fn(&T, &mut Vec<O>) + Send + Sync + 'static) -> Pipe<O> {
@@ -1055,6 +1067,72 @@ impl<T: Any + Send + Sync> Pipe<T> {
                 .get_or_insert_with(|| format!("`{step}` is asked of a pipe that carries {carries}"));
         }
         self
+    }
+}
+
+/// An element, and the index of the branch of a [`Split`] it goes to.
+pub struct Routed<T> {
+    branch: usize,
+    value: Arc<T>,
+}
+
+impl<T> Routed<T> {
+    /// The index of the branch, in the order the branches were named.
+    #[must_use]
+    pub fn branch(&self) -> usize { self.branch }
+
+    /// The element.
+    #[must_use]
+    pub fn value(&self) -> &T { &self.value }
+}
+
+impl<T> fmt::Debug for Routed<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Routed")
+            .field("branch", &self.branch)
+            .finish_non_exhaustive()
+    }
+}
+
+struct RouteFn<In, F>(F, PhantomData<fn(&In)>);
+
+impl<In, F> DynMap for RouteFn<In, F>
+where
+    In: Any + Send + Sync,
+    F: Fn(&In) -> usize + Send + Sync + 'static,
+{
+    fn apply(&self, input: &Datum, out: &mut Vec<Datum>) -> Result<(), OpError> {
+        let value = Arc::downcast::<In>(input.clone()).map_err(|_| OpError::Type {
+            expected: std::any::type_name::<In>(),
+        })?;
+        let branch = (self.0)(&value);
+        out.push(datum(Routed { branch, value }));
+        Ok(())
+    }
+}
+
+struct BranchFn<T>(usize, PhantomData<fn(&T)>);
+
+impl<T: Any + Send + Sync> DynMap for BranchFn<T> {
+    fn apply(&self, input: &Datum, out: &mut Vec<Datum>) -> Result<(), OpError> {
+        let routed = crate::ops::downcast::<Routed<T>>(input)?;
+        if routed.branch == self.0 {
+            out.push(routed.value.clone());
+        }
+        Ok(())
+    }
+}
+
+impl<T: Any + Send + Sync> Pipe<Routed<T>> {
+    /// Keep the elements routed to branch `index`, as they were before
+    /// [`Pipe::route`].
+    #[must_use]
+    pub fn branch(self, index: usize) -> Pipe<T> {
+        self.then(
+            Step::Map(Arc::new(BranchFn::<T>(index, PhantomData))),
+            tag::<Routed<T>>(),
+            tag::<T>(),
+        )
     }
 }
 
@@ -1337,5 +1415,30 @@ impl<In: Any + Send + Sync, T: StatelessFilterMap<In>> Transformer<In> for State
     fn transform(&self, input: Pipe<In>) -> Pipe<T::Out> {
         let operator = self.0.clone();
         input.filter_map(move |element| operator.apply(element))
+    }
+}
+
+/// An operator sending each element to one of several branches, and knowing
+/// nothing of pipes: [`GraphBuilder::split`](crate::GraphBuilder::split)
+/// makes a node of it, evaluated once per element, and one node per branch.
+pub trait Split<In>: Operator + Clone {
+    /// The index of the branch `input` goes to, in the order the branches
+    /// are named. An index with no branch drops the element.
+    fn branch(&self, input: &In) -> usize;
+}
+
+/// A [`Split`] as a [`Transformer`], whose elements carry the index of their
+/// branch; [`Branch`](crate::stdops::Branch) nodes take them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Splitter<T>(pub T);
+
+delegate_operator!(Splitter);
+
+impl<In: Any + Send + Sync, T: Split<In>> Transformer<In> for Splitter<T> {
+    type Out = Routed<In>;
+
+    fn transform(&self, input: Pipe<In>) -> Pipe<Routed<In>> {
+        let operator = self.0.clone();
+        input.route(move |element| operator.branch(element))
     }
 }

@@ -6,16 +6,26 @@
 //! | `std/sliding@1` | window | `{"size": "5m", "slide": "1m", "allowedLateness": "0s"}` |
 //! | `std/count@1` | aggregate | none; emits `Windowed<u64>` |
 //! | `std/identity@1` | map | none |
+//! | `std/union@1` | map | none; any number of inputs of one type |
+//! | `std/one-key@1` | key_by | none; every element under one key |
+//! | `std/collect@1` | aggregate | none; emits `Windowed<Vec<T>>` |
+//! | `std/batch@1` | map | `{"maxSize": 100}`, optional; `Windowed<Vec<T>>` cut into `Vec<T>` |
+//! | `std/flatten@1` | map | none; a `Vec<T>` given back one element at a time |
+//! | `std/branch@1` | map | `{"branch": 0}`, fixed by the code; after a split, registered by the builder for its type only |
+//!
+//! [`json_decoder!`](crate::json_decoder) declares a decoder to a type of
+//! the application's.
 
 use crate::{
     Operator,
     data::Windowed,
     ops::{OpError, WindowAssigner},
-    pipe::{Keyed, Opaque, Pipe, Transformer, Windows},
+    pipe::{Keyed, Opaque, Pipe, Routed, Transformer, Windows},
     registry::Registry,
     time::{Timestamp, Window},
 };
 use moonpool_core::Providers;
+use serde::{Serialize, de::DeserializeOwned};
 use std::{any::Any, time::Duration};
 
 /// Fixed-size, non-overlapping event-time windows.
@@ -140,6 +150,143 @@ impl<T: Any + Send + Sync> Transformer<T> for Identity {
     fn transform(&self, input: Pipe<T>) -> Pipe<T> { input }
 }
 
+/// Brings together what its inputs carry, all of one type, into one flow.
+/// [`GraphBuilder::union`](crate::GraphBuilder::union) connects them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/union@1")]
+pub struct Union;
+
+impl<T: Any + Send + Sync> Transformer<T> for Union {
+    type Out = T;
+
+    fn transform(&self, input: Pipe<T>) -> Pipe<T> { input }
+}
+
+/// Puts every element under one key, for a window over all of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/one-key@1")]
+pub struct OneKey;
+
+impl<T: Any + Send + Sync> Transformer<T> for OneKey {
+    type Out = Keyed<T>;
+
+    fn transform(&self, input: Pipe<T>) -> Pipe<Keyed<T>> { input.key_by(|_| ()) }
+}
+
+/// Collects the elements of each key in each window, those of one partition
+/// in the order they came, the partitions one after the other.
+///
+/// The collected elements are the state of the window: each commit holds
+/// them all, within the 5 MB a value of the store may take.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/collect@1")]
+pub struct Collect;
+
+impl<T> Transformer<Windows<T>> for Collect
+where
+    T: Serialize + DeserializeOwned + Clone + Any + Send + Sync,
+{
+    type Out = Windowed<Vec<T>>;
+
+    fn transform(&self, input: Pipe<Windows<T>>) -> Pipe<Windowed<Vec<T>>> {
+        input.aggregate(
+            Vec::new,
+            |elements: &mut Vec<T>, element: &T| elements.push(element.clone()),
+            |elements: &mut Vec<T>, other: &Vec<T>| elements.extend(other.iter().cloned()),
+        )
+    }
+}
+
+/// Cuts what a window collected into batches of at most `max_size`
+/// elements, in order; the whole of it when there is no maximum.
+/// [`GraphBuilder::batch`](crate::GraphBuilder::batch) puts it after a window
+/// and a [`Collect`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/batch@1")]
+pub struct Batch {
+    /// Most elements in one batch; none for all those of the window.
+    #[param(min = 1)]
+    pub max_size: Option<u64>,
+}
+
+impl<T: Clone + Any + Send + Sync> Transformer<Windowed<Vec<T>>> for Batch {
+    type Out = Vec<T>;
+
+    fn transform(&self, input: Pipe<Windowed<Vec<T>>>) -> Pipe<Vec<T>> {
+        let size = self
+            .max_size
+            .map_or(usize::MAX, |size| usize::try_from(size).unwrap_or(usize::MAX).max(1));
+        input.flat_map(move |windowed, out| {
+            out.extend(windowed.value.chunks(size).map(<[T]>::to_vec));
+        })
+    }
+}
+
+/// Gives back the elements of a `Vec<T>` one at a time, in order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/flatten@1")]
+pub struct Flatten;
+
+impl<T: Any + Clone + Send + Sync> Transformer<Vec<T>> for Flatten {
+    type Out = T;
+
+    fn transform(&self, input: Pipe<Vec<T>>) -> Pipe<T> {
+        input.flat_map(|elements, out| out.extend(elements.iter().cloned()))
+    }
+}
+
+/// Keeps what a split routed to one of its branches.
+/// [`GraphBuilder::split`](crate::GraphBuilder::split) adds one per branch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Operator)]
+#[operator("std/branch@1")]
+pub struct Branch {
+    /// The index of the branch, in the order the branches were named.
+    pub branch: usize,
+}
+
+impl<T: Any + Send + Sync> Transformer<Routed<T>> for Branch {
+    type Out = T;
+
+    fn transform(&self, input: Pipe<Routed<T>>) -> Pipe<T> { input.branch(self.branch) }
+}
+
+/// Declare an operator decoding JSON, bytes or text, into a type of the
+/// application's, dropping what does not decode. The reference is the
+/// application's: two decoders to two types are two operators.
+///
+/// ```ignore
+/// json_decoder! {
+///     /// Decodes a JSON event.
+///     pub struct Decode("demo/decode@1") -> Event;
+/// }
+/// let decoded = graph.filter_map(events, "decode", Decode);
+/// ```
+#[macro_export]
+macro_rules! json_decoder {
+    ($(#[$meta:meta])* $vis:vis struct $name:ident($op:literal) -> $out:ty;) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, $crate::Operator)]
+        #[operator($op)]
+        $vis struct $name;
+
+        impl $crate::StatelessFilterMap<::std::vec::Vec<u8>> for $name {
+            type Out = $out;
+
+            fn apply(&self, bytes: &::std::vec::Vec<u8>) -> ::std::option::Option<$out> {
+                $crate::__private_json::from_slice(bytes).ok()
+            }
+        }
+
+        impl $crate::StatelessFilterMap<::std::string::String> for $name {
+            type Out = $out;
+
+            fn apply(&self, text: &::std::string::String) -> ::std::option::Option<$out> {
+                $crate::__private_json::from_str(text).ok()
+            }
+        }
+    };
+}
+
 /// Register the `std/*` operators listed in the module documentation, each
 /// for any type of element.
 pub fn register<P: Providers>(registry: &mut Registry<P>) {
@@ -151,6 +298,7 @@ pub fn register<P: Providers>(registry: &mut Registry<P>) {
             .err(),
         registry.transformer::<Windows<Opaque>, _>(&Count).err(),
         registry.transformer::<Opaque, _>(&Identity).err(),
+        registry.transformer::<Opaque, _>(&Union).err(),
     ];
     debug_assert!(
         registered.iter().all(Option::is_none),

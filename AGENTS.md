@@ -278,6 +278,43 @@ the operators it names, `App` collects them).
    it conflicts with every generic `Transformer` implementation
    (`impl<T> Transformer<T> for Identity`, an application's own), and one
    wrapper cannot implement both traits (a type could implement the two).
+   `json_decoder!` declares a `StatelessFilterMap` from `Vec<u8>` and
+   `String` to a type of the application's, under a reference the
+   application names: a generic `JsonDecoder<T>` would have one reference
+   for every `T`, and the registry keeps one factory per reference and input
+   type, so two graphs decoding to two types would share one. What does not
+   decode is dropped (asked of the owner, answer pending: drop, fail the
+   node, count, or a dedicated output).
+   **Union and split are maps.** `GraphBuilder::union` is a `std/union@1`
+   node with several inputs (the engine aligns barriers over a node's
+   inputs, as for the diamond; inputs from several sources make the node a
+   member of each source's slices). `GraphBuilder::split` is a node running
+   the `Split` operator once per element, which wraps each in a
+   `Routed<T>` (the index of its branch and an `Arc` of the element, never
+   copied), then one `std/branch@1` node per branch, `{"branch": i}` fixed
+   by the code, keeping its own and unwrapping them. One node holds the
+   routing and its configuration, so a parameter changed through the API
+   cannot make two branches disagree. The engine is untouched: no new
+   precaution, hence no planted bug. Held by
+   `a_split_routes_each_element_once_and_a_union_brings_them_back` and
+   `a_union_of_two_sources_writes_each_element_once` in
+   `streaming-runtime/tests/engine.rs`; the simulation's graph does not use
+   them yet.
+   **A batch is a window over one key** (the owner chose it, 2026-11-14,
+   over a batch flushed at each epoch barrier, which is not exactly-once:
+   a replay ends its epochs elsewhere, and the replayed batches would
+   differ under the same emit ids; and over a batch held in the commit by
+   a new protocol). `GraphBuilder::batch` adds `std/one-key@1`,
+   `std/tumbling@1` (`max_wait`), `std/collect@1` (an aggregate whose state
+   is the `Vec<T>`) and `std/batch@1` (`maxSize`, cutting at emission). The
+   engine is untouched. Limits: event time; the whole `Vec` in every commit
+   that changes the window (5 MB); `postcard` encoding; and the order of
+   the partitions in a batch is that of the feeding slices, so an emitter
+   retried across a change of plan could cut a window otherwise under the
+   same emit ids. Held by
+   `a_batch_gathers_every_element_once_in_pieces_no_larger_than_asked`
+   (measured: a `merge` that drops the other partitions fails it); the
+   simulation's graph does not use it yet.
 7. **A transformer is one node, hence one kind**: any number of maps and
    filters in a row (fused), or one `key_by`, or one window, or one
    aggregate. `Registry::transformer` calls `transform` on an example to

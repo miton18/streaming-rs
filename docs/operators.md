@@ -172,16 +172,33 @@ let scaled = graph.map(numbers, "scale", Scale { factor: 3 });
 ```
 
 `StatelessFilterMap` is the same, but `apply` returns `Option<Out>`, and
-`None` drops the element. The demonstration decodes JSON this way:
+`None` drops the element:
 
 ```rust
-impl StatelessFilterMap<Vec<u8>> for Decode {
-    type Out = Event;
-    fn apply(&self, bytes: &Vec<u8>) -> Option<Event> { serde_json::from_slice(bytes).ok() }
+impl StatelessFilterMap<String> for Parse {
+    type Out = u64;
+    fn apply(&self, text: &String) -> Option<u64> { text.parse().ok() }
+}
+
+let numbers = graph.filter_map(texts, "parse", Parse);
+```
+
+`json_decoder!` declares one decoding JSON, from `Vec<u8>` or `String`, into a
+type of the application's, under a reference the application names; what
+does not decode is dropped. The demonstration decodes its events this way:
+
+```rust
+json_decoder! {
+    /// Decodes a JSON event.
+    pub struct Decode("demo/decode@1") -> Event;
 }
 
 let decoded = graph.filter_map(events, "decode", Decode);
 ```
+
+A generic `JsonDecoder<T>` would have one reference for every `T`: the
+registry keeps one factory per reference and input type, so two graphs
+decoding into two types would share one.
 
 The operator must be `Clone`. The node is an ordinary map, stored and shown
 under the operator's own reference and configuration.
@@ -258,6 +275,40 @@ The state is committed to the store with the source position, in one
 command: this is what makes the result exactly-once. Keep it small (a store
 value is limited to 5 MB on Materia KV).
 
+### Batches
+
+`graph.batch(upstream, "batch", Duration::from_secs(5), Some(100))` gathers
+the elements of every partition whose event time falls in one window of
+`maxWait` into `Vec<A>`s of at most `maxSize` elements, emitted once the
+window closes, and `std/flatten@1` gives them back one at a time. It is a
+window over a single key, four nodes the builder adds:
+
+| Node | Operator | Holds |
+|---|---|---|
+| `batch-key` | `std/one-key@1` | every element under one key |
+| `batch-window` | `std/tumbling@1` | `size`, the maximum wait |
+| `batch-collect` | `std/collect@1` | the elements, the state of the window |
+| `batch` | `std/batch@1` | `maxSize`, optional: the collected elements cut in order |
+
+It is exactly-once for the reason any window is: what was collected is
+committed with the position of the source, and a replay gives the same
+batches under the same emit ids. A batch flushed at each epoch barrier
+would not be: a replay ends its epochs elsewhere, as it would a wait in
+processing time, and the replayed batches would differ under the same ids.
+What this costs:
+
+- the wait is in event time, and a window closes with the watermark (an
+  idle partition lets it go after the graph's `idleTimeout`);
+- `maxSize` cuts what a window collected, it does not make a batch leave
+  earlier;
+- the collected elements are the state of the window, held whole in every
+  commit that changes it: a value of the store takes 5 MB at most, so a
+  batch suits windows of thousands of small elements, not millions;
+- the state is encoded with `postcard`, which takes neither
+  `serde_json::Value` nor untagged enumerations;
+- the elements of one partition keep their order, the partitions come one
+  after the other.
+
 ## Sinks
 
 A sink receives a pipe of batches and confirms each one.
@@ -286,6 +337,23 @@ A sink built on an existing `SinkConnector` hands it the batches with
 `input.write_with(&connector)`, as the Warp 10 and Pulsar sinks do.
 `impl<T> Sink<T> for Archive` makes a sink of any type.
 
+### Split: one branch per element
+
+```rust
+impl Split<Event> for Check {
+    fn branch(&self, event: &Event) -> usize { usize::from(event.amount < 0.0) }
+}
+
+let [valid, invalid] = graph.split(decoded, "check", Check, ["valid", "invalid"]);
+```
+
+`branch` returns an index into the names given to `split`; an index with no
+branch drops the element. The split node runs the operator once per element
+and wraps it in a `Routed<T>` (its branch and an `Arc` of the element, never
+copied); each `std/branch@1` node keeps its own and unwraps them. The routing
+and its parameters live in one node: changing them through the API cannot
+make two branches disagree. Every branch carries the type of what was split.
+
 ## Building a graph
 
 `GraphBuilder` connects typed nodes and registers the operators it names:
@@ -295,6 +363,9 @@ A sink built on an existing `SinkConnector` hands it the batches with
 | `source(id, source)` | a source node; gives `Node<S::Out>` |
 | `map(upstream, id, op)` | a `StatelessTransformer` |
 | `filter_map(upstream, id, op)` | a `StatelessFilterMap` |
+| `union(inputs, id)` | a `std/union@1` node fed by every node of `inputs`, all of one type; gives that type |
+| `batch(upstream, id, max_wait, max_size)` | four nodes gathering `upstream` into `Vec<A>`s (see *Batches*); gives `Node<Vec<A>>` |
+| `split(upstream, id, op, [names])` | a node running a `Split` once per element, and one `std/branch@1` node per name, `<id>-<name>`; gives one `Node` per branch, of the type of `upstream` |
 | `then(upstream, id, transformer)` | any `Transformer` |
 | `sink(upstream, id, sink)` | a sink |
 | `edge(from, to)` | one more edge: a node fed by several others (types checked when the application starts, not by the compiler) |
@@ -325,6 +396,12 @@ topic, through a durable Failover subscription.
 | Reference | Crate (feature) | In → Out | Parameters |
 |---|---|---|---|
 | `std/identity@1` | `streaming-core` | any → same | none |
+| `std/union@1` | `streaming-core` | any → same, from several inputs | none |
+| `std/one-key@1` | `streaming-core` | any → `Keyed<T>` | none; one key for every element |
+| `std/collect@1` | `streaming-core` | `Windows<T>` → `Windowed<Vec<T>>` | none; `T` serializable and `Clone` |
+| `std/batch@1` | `streaming-core` | `Windowed<Vec<T>>` → `Vec<T>` | `maxSize` (≥ 1, optional) |
+| `std/flatten@1` | `streaming-core` | `Vec<T>` → `T` | none; one element at a time, in order (`T: Clone`) |
+| `std/branch@1` | `streaming-core` | `Routed<T>` → `T` | `branch`, fixed by the code; added by `GraphBuilder::split`, registered for its type only |
 | `std/tumbling@1` | `streaming-core` | `Keyed<T>` → `Windows<T>` | `size` (≥ 1 ms), `allowedLateness` (default `0s`) |
 | `std/sliding@1` | `streaming-core` | `Keyed<T>` → `Windows<T>` | `size`, `slide` (≤ `size`), `allowedLateness` |
 | `std/count@1` | `streaming-core` | `Windows<T>` → `Windowed<u64>` | none |
@@ -349,16 +426,6 @@ one of `streaming` that registers the operator (none is on by default).
 
 Being built in other threads of work, and not on `main`:
 
-- **`union` and `split`**: several inputs merged into one node with types the
-  compiler checks (today `edge` does it, checked at start only), and several
-  outputs chosen by a predicate (side outputs, late records among them).
-- **A typed JSON decoder**: bytes to any `T: Deserialize`, dropping what does
-  not parse.
-- **`std/batch@1` and `std/flatten@1`**: gather elements into a `Vec<A>` until
-  a maximum wait (required) or an optional maximum size, flushed at every
-  epoch barrier so that a replay forms the same batches; and the reverse, a
-  `Vec<B>` given back one element at a time. They come beside the
-  event-time windows, not instead of them.
-
-Not started: session windows, joins, a keyed process function with timers,
+Not started: a dedicated output for late records or for what a decoder
+refuses, session windows, joins, a keyed process function with timers,
 and standard aggregates beyond `count`.

@@ -47,12 +47,14 @@ pub use ops::{
 pub use param::private as __private;
 pub use param::{Param, Secret};
 pub use pipe::{
-    Batch, Closed, Context, Element, Keyed, Opaque, Pipe, Sink, SinkPipe, Source, SourcePipe, Stateless,
-    StatelessFilter, StatelessFilterMap, StatelessTransformer, Transformer, Windows,
+    Batch, Closed, Context, Element, Keyed, Opaque, Pipe, Routed, Sink, SinkPipe, Source, SourcePipe, Split, Splitter,
+    Stateless, StatelessFilter, StatelessFilterMap, StatelessTransformer, Transformer, Windows,
 };
 pub use registry::{
     Catalog, OpContext, OpDescriptor, OpFactory, OpKind, ParamRefusal, ParamSpec, Registry, Shared, Signature, TypeTag,
 };
+#[doc(hidden)]
+pub use serde_json as __private_json;
 pub use spec::{GraphSettings, GraphSpec, NodeSpec, SpecError, Topology, WiringRule};
 /// Derives [`Operator`] for a structure whose fields are its configuration:
 /// see [`param`].
